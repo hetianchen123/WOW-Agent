@@ -44,6 +44,7 @@ make_app "WowAgent Keyboard Mouse" io.wowagent.input WowAgentInput YES
 controller="$stage/WowAgent Controller.app"
 helper="$stage/WowAgent Keyboard Mouse.app"
 printf '%s' "$root" > "$controller/Contents/Resources/project-root"
+printf '%s' "$root" > "$helper/Contents/Resources/project-root"
 "${compiler[@]}" "$root/macos/IPC.swift" "$root/macos/Controller.swift" \
     -o "$controller/Contents/MacOS/WowAgentController"
 /usr/bin/codesign --force --sign "$identity" "$controller"

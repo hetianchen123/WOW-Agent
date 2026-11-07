@@ -385,9 +385,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         cfg.dry_run = True
     quest_module_args = None
-    quest_mode = args.module in {"quest", "quest_accept"}
+    quest_mode = args.module in {"quest", "quest_accept", "quest_navigate"}
     if quest_mode:
-        from .modules.quest import QuestAcceptModule, QuestModule, load_quest_plan
+        from .modules.quest import QuestAcceptModule, QuestModule, QuestNavigateModule, load_quest_plan
         from .perception.quest_channel import QuestKind
 
         if args.module == "quest" and args.quest_plan is None:
@@ -415,7 +415,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 raise ValueError("请先打开 WowAgent Keyboard Mouse.app")
             from .modules.quest import wait_for_game
 
-            wait_for_game()
+            wait_for_game(activate=not getattr(args, "require_prepared", False))
         ctx, estop = _build_runtime(cfg, dry_run=cfg.dry_run or args.mock_input, want_audio=not quest_mode)
     except (ValueError, OSError) as exc:
         log.error("无法启动：%s", exc)
@@ -446,6 +446,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             planner = QuestPlanner(LocalStartLux(args.startlux_port))
             if args.module == "quest_accept":
                 runner = QuestAcceptModule(ctx, args.key, planner, quest_module_args[1])
+            elif args.module == "quest_navigate":
+                runner = QuestNavigateModule(ctx, planner, quest_module_args[1], args.travel_only,
+                                             args.require_prepared)
             else:
                 runner = QuestModule(ctx, *quest_module_args, planner=planner)
             outcome = runner.run(args.max_duration)
@@ -460,6 +463,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             outcome = mod(ctx).run(args.max_duration)
         print(f"结果: {outcome.status}  统计: {outcome.stats}")
         ctx.db.end_session(session_id, outcome.status, outcome.stats)
+        if getattr(args, "require_prepared", False):
+            explanations = {
+                "stopped:quest_automatic_not_prepared": "请在插件里点「一键准备自动任务」，等核对成功后再启动。",
+                "stopped:quest_automatic_preparation_lost": "运行中失去了已经核对的任务键位或游戏设置。",
+                "stopped:quest_turn_in_npc_not_in_interact_range": "游戏没有识别到范围内的交付 NPC，请核对名字和位置。",
+                "stopped:quest_turn_in_npc_lost": "靠近时失去了已确认的交付 NPC，已停止移动。",
+                "stopped:quest_turn_in_approach_blocked": "尝试靠近 NPC 时，角色位置没有变化。请检查脚下或前方是否有障碍。",
+                "stopped:quest_turn_in_approach_exhausted": "已向交付 NPC 靠近三次，仍未打开任务对话。",
+                "stopped:quest_reward_choice_required": "游戏要求选择奖励，请在任务对话中选择。",
+                "stopped:quest_objective_profile_required": "当前任务目标还没有可自动执行的配置。",
+                "stopped:quest_offer_not_open": "需要从当前任务的接取对话开始。",
+                "stopped:quest_startlux_timeout": "本地 StartLux 推理超时，任务在发送按键前停止。",
+                "stopped:quest_startlux_unavailable": "本地 StartLux 请求失败，请查看本次任务日志中的错误。",
+            }
+            if outcome.status in explanations:
+                print(explanations[outcome.status])
+            return 0 if outcome.status == "completed" else 3
         return 0 if not outcome.status.startswith("stopped") else 3
     finally:
         ctx.input.release_all()
@@ -516,15 +536,66 @@ def cmd_probe_quests(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_probe_navigation(args: argparse.Namespace) -> int:
+    from .perception.travel_channel import TravelFlags, decode_travel, travel_region
+
+    cfg = load_config()
+    capture = ScreenCapture(cfg.capture)
+    region = travel_region(cfg.channel.x, cfg.channel.y)
+    sequence = None
+    deadline = time.monotonic() + args.duration
+    while time.monotonic() < deadline:
+        sample = decode_travel(capture.grab(*region))
+        if sample:
+            if sequence is not None and sample.sequence != sequence:
+                result = dataclasses.asdict(sample)
+                result["phase"] = sample.phase.name
+                result["flags"] = [flag.name for flag in TravelFlags if sample.flags & flag]
+                print(json.dumps(result, ensure_ascii=False))
+                return 0
+            sequence = sample.sequence
+        time.sleep(.1)
+    print("未读到持续更新的寻路色条。请先在插件中点「准备任务寻路」。", file=sys.stderr)
+    return 2
+
+
 # ------------------------------------------------------------------ main ----
+def _run_controller_once(argv: list[str]) -> int:
+    from .control.input_helper import in_controller_app
+
+    if sys.platform != "darwin" or not in_controller_app():
+        print("此选项需要由 WowAgent 主控 App 启动。", file=sys.stderr)
+        return 2
+    from AppKit import NSRunningApplication
+
+    parent = NSRunningApplication.runningApplicationWithProcessIdentifier_(os.getppid())
+    expected = (DATA_DIR / "apps" / "WowAgent Controller.app").resolve()
+    if (not parent or parent.bundleIdentifier() != "io.wowagent.controller"
+            or not parent.bundleURL() or Path(parent.bundleURL().path()).resolve() != expected):
+        print("无法核对本次启动的主控 App。", file=sys.stderr)
+        return 2
+    try:
+        return main(argv)
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        parent.terminate()
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--controller-once"]:
+        return _run_controller_once(argv[1:])
+
     from .calibrate_cli import add_parser as add_calibration_parser
     from .combat_cli import add_parser as add_combat_parser
+    from .terrain_cli import add_parser as add_terrain_parser
 
     parser = argparse.ArgumentParser(prog="wowagnet", description="WoW retail automation controller")
     sub = parser.add_subparsers(dest="cmd", required=True)
     add_combat_parser(sub)
     add_calibration_parser(sub)
+    add_terrain_parser(sub)
 
     sub.add_parser("init-config", help="生成默认配置文件").set_defaults(func=cmd_init_config)
 
@@ -539,6 +610,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--waypoints", action="store_true", help="附带当前地图上的归一化坐标")
     p.set_defaults(func=cmd_probe_quests)
 
+    p = sub.add_parser("probe-navigation", help="只读核对任务目标和移动能力")
+    p.add_argument("--duration", type=float, default=3.0)
+    p.set_defaults(func=cmd_probe_navigation)
+
     p = sub.add_parser("accept-quest", help="本地 StartLux 决策，脚本接受已准备的当前 NPC 任务")
     p.add_argument("--key", choices=[str(key) for key in range(1, 10)], default="9")
     p.add_argument("--startlux-port", type=int, default=8090)
@@ -546,6 +621,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--mock-input", action="store_true")
     p.set_defaults(func=cmd_run, module="quest_accept", quest_plan=None,
+                   quest_kinds=["campaign", "mainline", "side", "important"])
+
+    p = sub.add_parser("navigate-quest", help="按原生任务目标坐标寻路并执行已准备任务")
+    p.add_argument("--startlux-port", type=int, default=8090)
+    p.add_argument("--max-duration", type=float, default=600.0)
+    p.add_argument("--travel-only", action="store_true", help="只验证寻路，抵达落地后结束")
+    p.add_argument("--require-prepared", action="store_true", help="仅运行插件内一键准备并核对的任务")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--mock-input", action="store_true")
+    p.set_defaults(func=cmd_run, module="quest_navigate", quest_plan=None,
                    quest_kinds=["campaign", "mainline", "side", "important"])
 
     p = sub.add_parser("probe-audio", help="音频设备与能量探针")

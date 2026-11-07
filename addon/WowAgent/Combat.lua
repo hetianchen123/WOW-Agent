@@ -137,6 +137,27 @@ local function MacroLimits()
            constants.MAX_CHARACTER_MACROS or MAX_CHARACTER_MACROS or 18
 end
 
+local pendingMacros = {}
+
+local function NamedMacro(name, created)
+    local index = GetMacroIndexByName(name)
+    if index and index > 0 then return index end
+    if created and GetMacroInfo and Public(GetMacroInfo(created)) == name then return created end
+end
+
+local function ReadMacroBody(index, name)
+    local body = GetMacroBody(index)
+    if secret(body) then return nil, false end
+    if body == nil and GetMacroInfo then
+        local actualName, _, actualBody = GetMacroInfo(index)
+        if (name and Public(actualName) ~= name) or secret(actualBody) then return nil, false end
+        body = actualBody
+        if body == nil then return nil, true end
+    end
+    local text = MacroText(body)
+    return text, text == ""
+end
+
 local function WriteMacro(name, body)
     if not body or #body > 255 then
         print("WowAgent：动作不可用或宏内容无效。")
@@ -144,16 +165,47 @@ local function WriteMacro(name, body)
     end
     local accountLimit, characterLimit = MacroLimits()
     local expected = MacroText(body)
-    local availableName
+    local availableName, pendingName, pendingIndex, pendingBlank, pendingText
     for suffix = 0, accountLimit + characterLimit do
         local candidate = suffix == 0 and name or name .. suffix
-        local index = GetMacroIndexByName(candidate)
-        if index and index > 0 and MacroText(GetMacroBody(index)) == expected then
-            print("WowAgent：宏已就绪 " .. candidate)
-            return index
-        elseif (not index or index < 1) and not availableName then
+        local pending = pendingMacros[candidate]
+        local index = NamedMacro(candidate, pending and pending.created)
+        if index then
+            local actual, blank = ReadMacroBody(index, candidate)
+            if actual == expected then
+                pendingMacros[candidate] = nil
+                print("WowAgent：宏已就绪 " .. candidate)
+                return index
+            elseif pending and pending.body == expected and not pendingName then
+                pendingName, pendingIndex, pendingBlank, pendingText = candidate, index, blank, actual
+            end
+        elseif pending and pending.body == expected and not pendingName then
+            pendingName = candidate
+        elseif not pending and not availableName then
             availableName = candidate
         end
+    end
+    if pendingName then
+        local pending = pendingMacros[pendingName]
+        -- Repair only a confirmed blank created by this session for this exact body.
+        if pendingBlank and not pending.edited and EditMacro then
+            pending.edited = true
+            local ok = pcall(EditMacro, pendingIndex, nil, nil, body)
+            local index = NamedMacro(pendingName, pendingIndex)
+            if ok and index and ReadMacroBody(index, pendingName) == expected then
+                pendingMacros[pendingName] = nil
+                print("WowAgent：宏已补写并核对 " .. pendingName)
+                return index
+            elseif ok then
+                return nil, "macro_pending"
+            end
+        elseif pendingText == nil and not pending.edited and not pending.waited then
+            pending.waited = true
+            return nil, "macro_pending"
+        end
+        pendingMacros[pendingName] = nil
+        print("WowAgent：无法核对新宏 " .. pendingName .. "，请脱战后重试。")
+        return
     end
     if not availableName then
         print("WowAgent：没有可用的宏名称，请整理宏列表后重试。")
@@ -181,14 +233,20 @@ local function WriteMacro(name, body)
         print("WowAgent：创建宏未返回有效编号 " .. availableName .. "，请查看游戏错误提示。")
         return
     end
-    local actual = GetMacroBody(created)
-    if MacroText(actual) ~= expected then
+    -- The client sorts macros by name, so resolve the index again after writing.
+    local index = NamedMacro(availableName, created)
+    local actual = index and ReadMacroBody(index, availableName) or nil
+    if actual == nil or actual == "" then
+        pendingMacros[availableName] = {created = created, body = expected}
+        print("WowAgent：宏内容暂未确认 " .. availableName .. "，稍后核对或补写。")
+        return nil, "macro_pending"
+    elseif actual ~= expected then
         print(string.format("WowAgent：宏已创建，但内容核对失败 %s，预期 %q，实际 %q。",
             availableName, body, tostring(actual)))
         return
     end
     print("WowAgent：宏已就绪 " .. availableName)
-    return created
+    return index
 end
 
 local function BoundSlot(key)
@@ -244,7 +302,7 @@ local function ActionMatches(key, action, body)
         if not C_AssistedCombat or not C_AssistedCombat.IsAvailable() then return false end
         if kind == "spell" then return id == C_AssistedCombat.GetActionSpell() end
     end
-    return kind == "macro" and id and body and MacroText(Public(GetMacroBody(id))) == MacroText(body)
+    return kind == "macro" and id and body and ReadMacroBody(id) == MacroText(body)
 end
 
 local function HostileTarget()
@@ -289,6 +347,8 @@ local function UtilityMacro(kind, id)
         return "WAI" .. id, "#showtooltip item:" .. id .. "\n/use [nocombat,nomounted] item:" .. id
     elseif kind == "quest" and WowAgent.QuestAction then
         return "WAQ" .. id, "/run WowAgent.QuestAction(" .. id .. ")"
+    elseif kind == "travel" and WowAgent.TravelMacro then
+        return WowAgent.TravelMacro(id)
     end
 end
 
@@ -373,7 +433,10 @@ local function Update()
     local p = Identity()
     local target, dead = HostileTarget()
     local flags = dead and 1 or 0
-    if armed and ActionMatches(armed.key, armed.spell, armed.body) then flags = flags + 2 end
+    if armed and (armed.spell ~= "assist" or (armed.body and AssistMacro() == armed.body))
+        and ActionMatches(armed.key, armed.spell, armed.body) then
+        flags = flags + 2
+    end
     if Public(UnitIsDead("player")) ~= false or Public(UnitIsGhost("player")) ~= false
         or (IsFlying and Public(IsFlying()) ~= false) then flags = flags + 4 end
     sequence = (sequence + 1) % 128
@@ -458,8 +521,8 @@ local function SetupAction(kind, id, requestedKey)
         print("WowAgent：鼠标上已有物品或动作，请先放下。")
         return
     end
-    local index = WriteMacro(name, body)
-    if not index then return end
+    local index, reason = WriteMacro(name, body)
+    if not index then return nil, reason end
     if GetCursorInfo() ~= nil or BoundSlot(key) ~= slot or Public(hasAction(slot)) ~= false then
         print("WowAgent：动作栏或鼠标状态已变化，请重试。")
         return
@@ -508,6 +571,10 @@ for _, name in ipairs({"PLAYER_TARGET_CHANGED", "PLAYER_ENTERING_WORLD", "PLAYER
 end
 events:SetScript("OnEvent", function(_, event, unit)
     if event == "PLAYER_TARGET_CHANGED" then
+        stateEpoch = (stateEpoch + 1) % 64
+    elseif event == "SPELLS_CHANGED" and armed and armed.spell == "assist" then
+        -- Mount and action-bar transitions can temporarily hide Assisted Combat.
+        -- Update verifies the current spell and action before publishing the key.
         stateEpoch = (stateEpoch + 1) % 64
     elseif event ~= "PLAYER_SPECIALIZATION_CHANGED" or unit == "player" then
         Disarm()
@@ -716,5 +783,5 @@ WowAgent.LayoutSupport = {
     Identity = Identity, Public = Public, NormalBar = NormalBar, ReadAction = ReadAction,
     Disarm = Disarm, MacroDefinition = MacroDefinition, WriteMacro = WriteMacro,
     SwitchLoadout = SwitchLoadout, LearnedSpells = Spellbook,
-    SetupAction = SetupAction,
+    SetupAction = SetupAction, ActionMatches = ActionMatches, BoundSlot = BoundSlot, ReadMacroBody = ReadMacroBody,
 }

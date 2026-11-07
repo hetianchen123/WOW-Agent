@@ -64,6 +64,12 @@ local function control(set)
 end
 local inCombat, dialogOpen
 function InCombatLockdown() return inCombat end
+Enum = {SoftTargetEnableFlags = {Any = 3, Gamepad = 1}}
+local softTargetInteract = "1"
+C_CVar = {
+    GetCVar = function(key) assert(key == "softTargetInteract"); return softTargetInteract end,
+    SetCVar = function(key, value) assert(key == "softTargetInteract"); softTargetInteract = tostring(value) end,
+}
 ClassTalentLoadoutImportDialog = {
     IsShown = function() return dialogOpen end,
     ShowDialog = function() dialogOpen = true end,
@@ -185,3 +191,12 @@ click("清空主栏", 366, -304)
 assert(combat[#combat] == "layout clear")
 click("恢复备份", 488, -304)
 assert(combat[#combat] == "layout restore")
+click("任务寻路")
+inCombat = true
+click("启用游戏互动键")
+assert(softTargetInteract == "1")
+inCombat = false
+click("启用游戏互动键")
+assert(softTargetInteract == "3" and button("停用游戏互动键"))
+click("停用游戏互动键")
+assert(softTargetInteract == "1" and button("启用游戏互动键"))

@@ -64,9 +64,38 @@ def test_planner_discards_changed_phase_and_expired_response(monkeypatch):
         planner.future.set_result({"recommendation": "pending"})
         assert planner.poll((1, "active"), {}, {}) is None
         planner.future = Future()
-        planner.signature, planner.started = (1, "pending"), 6
+        planner.signature, planner.started = (1, "pending"), 0
         planner.future.set_result({"recommendation": "pending"})
         result = planner.poll((1, "pending"), {}, {})
         assert result["recommendation"] is None and result["reason"] == "stale_decision"
+    finally:
+        planner.close()
+
+
+def test_planner_retries_timeout_with_fresh_state_and_accepts_slow_response(monkeypatch):
+    from bot.decision import startlux
+
+    now = [10.0]
+    monkeypatch.setattr(startlux.time, "monotonic", lambda: now[0])
+    planner = QuestPlanner(LocalStartLux())
+    signature = (90882, "READY", "CLOSED")
+    requests = []
+
+    def submit(_, state, criteria):
+        future = Future()
+        requests.append((state, future))
+        return future
+
+    try:
+        monkeypatch.setattr(planner.pool, "submit", submit)
+        assert planner.poll(signature, {"observation_age_ms": 200}, {}) is None
+        requests[0][1].set_exception(TimeoutError())
+        now[0] = 18
+        assert planner.poll(signature, {"observation_age_ms": 50}, {}) is None
+        assert planner.poll(signature, {"observation_age_ms": 25}, {}) is None
+        assert requests[1][0]["observation_age_ms"] == 25
+        now[0] = 22
+        requests[1][1].set_result({"recommendation": "turn_in"})
+        assert planner.poll(signature, {"observation_age_ms": 50}, {})["recommendation"] == "turn_in"
     finally:
         planner.close()

@@ -36,6 +36,7 @@ class Dialogue(IntEnum):
     PROGRESS = 4
     REWARD = 5
     BLOCKED = 6
+    REWARD_CHOICE = 7
 
 
 class Objective(IntEnum):

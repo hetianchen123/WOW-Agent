@@ -20,6 +20,17 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
     private var eventCount = 0
     private var simulatedFocus = true
     private var timer: Timer?
+    private var launchDeadline: TimeInterval?
+    private var nextLaunchCheck: TimeInterval = 0
+    private var launchWait: LaunchWait?
+    private var questRequestedAt: Date?
+    private var questProcess: Process?
+
+    private enum LaunchWait: String {
+        case accessibility = "请授权当前版键鼠助手（设备控制和数据访问）"
+        case postEvents = "等待键鼠事件发送权限"
+        case game = "权限已通过，等待魔兽切回前台"
+    }
 
     init(simulate: Bool) { self.simulate = simulate }
 
@@ -39,7 +50,9 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
         item.button?.title = simulate ? "WoW 输入模拟" : "WoW 键鼠"
         let menu = NSMenu()
         menu.addItem(state)
-        for (title, action) in [("启用一次会话", #selector(arm)), ("立即停止", #selector(stop)),
+        for (title, action) in [("授权并运行已准备任务", #selector(runPrepared)),
+                                ("查看任务运行日志", #selector(showQuestLog)),
+                                ("启用一次会话", #selector(arm)), ("立即停止", #selector(cancel)),
                                 ("检查键鼠权限", #selector(permissions)),
                                 ("请求发送事件权限", #selector(requestPostPermission)),
                                 ("退出", #selector(quit))] {
@@ -131,9 +144,95 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
 
     @objc func arm() {
         guard server >= 0, permission else { permissions(); return }
-        guard !session else { return }
+        guard !session, launchDeadline == nil, questProcess == nil else { return }
         armed = true
         updateStatus()
+    }
+
+    @objc private func runPrepared() {
+        guard !simulate, server >= 0, !session, questProcess == nil, launchDeadline == nil else { return }
+        do {
+            let log = try questRoot().appendingPathComponent("data/logs/quest-launch.log")
+            try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+            questRequestedAt = Date()
+            try Data("已请求运行任务。\n".utf8).write(to: log)
+        } catch {
+            state.title = "无法写入任务启动日志 · \(error.localizedDescription)"
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        launchDeadline = now + 120
+        nextLaunchCheck = now
+        launchWait = nil
+        watch()
+    }
+
+    private func questRoot() throws -> URL {
+        guard let resource = Bundle.main.url(forResource: "project-root", withExtension: nil) else {
+            throw InputError.message("找不到 WowAgent 项目目录")
+        }
+        return URL(fileURLWithPath: try String(contentsOf: resource, encoding: .utf8), isDirectory: true)
+    }
+
+    private func startPrepared() {
+        launchDeadline = nil
+        do {
+            let root = try questRoot()
+            let logURL = root.appendingPathComponent("data/logs/quest-launch.log")
+            let log = try FileHandle(forWritingTo: logURL)
+            _ = try log.seekToEnd()
+            try log.write(contentsOf: Data("权限已通过，魔兽已在前台，启动任务。\n".utf8))
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            task.arguments = [root.appendingPathComponent("macos/quest-accept.command").path, "--run-prepared"]
+            task.standardOutput = log
+            task.standardError = log
+            task.terminationHandler = { [weak self] child in
+                try? log.close()
+                DispatchQueue.main.async {
+                    guard let self, self.questProcess === child else { return }
+                    self.questProcess = nil
+                    self.stop()
+                    self.state.title = child.terminationStatus == 0 ? "任务已完成" : "任务已停止 · 查看运行日志"
+                }
+            }
+            armed = true
+            try task.run()
+            questProcess = task
+            state.title = "正在启动或运行任务"
+        } catch {
+            stop()
+            state.title = "任务启动失败 · \(error)"
+            recordLaunchStatus(state.title)
+        }
+    }
+
+    private func recordLaunchStatus(_ message: String) {
+        guard let root = try? questRoot(),
+              let log = try? FileHandle(forWritingTo: root.appendingPathComponent("data/logs/quest-launch.log")) else { return }
+        defer { try? log.close() }
+        do {
+            _ = try log.seekToEnd()
+            try log.write(contentsOf: Data((message + "\n").utf8))
+        } catch { NSLog("WowAgent 任务启动日志写入失败：%@", error.localizedDescription) }
+    }
+
+    @objc private func showQuestLog() {
+        guard let root = try? questRoot() else { return }
+        let result = root.appendingPathComponent("data/logs/quest-session.log")
+        let launch = root.appendingPathComponent("data/logs/quest-launch.log")
+        let modified = try? result.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        let currentResult = modified.map { $0 >= (questRequestedAt ?? .distantPast) } ?? false
+        let url = currentResult ? result : launch
+        if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.open(url) }
+    }
+
+    @objc private func cancel() {
+        launchDeadline = nil
+        let task = questProcess
+        questProcess = nil
+        if let task, task.isRunning { task.terminate() }
+        stop()
     }
 
     @objc func stop() {
@@ -145,13 +244,17 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
         updateStatus()
     }
 
-    @objc private func quit() { stop(); NSApp.terminate(nil) }
-    func applicationWillTerminate(_ notification: Notification) { stop() }
+    @objc private func quit() { cancel(); NSApp.terminate(nil) }
+    func applicationWillTerminate(_ notification: Notification) { cancel() }
 
     @objc private func permissions() {
         let alert = NSAlert()
         alert.messageText = "WowAgent Keyboard Mouse"
-        alert.informativeText = "辅助功能 \(AXIsProcessTrusted() ? "已授权" : "未授权")，事件发送 \(CGPreflightPostEventAccess() ? "已授权" : "未授权")。\n请在「隐私与安全性 → 辅助功能」中启用本 App。"
+        let accessibility = AXIsProcessTrusted()
+        alert.informativeText = "设备控制 \(accessibility ? "已授权" : "未授权")，事件发送 \(CGPreflightPostEventAccess() ? "已授权" : "未授权")。"
+        if !accessibility {
+            alert.informativeText += "\n请在「隐私与安全性 → 设备控制和数据访问（辅助功能）」中启用当前版。若旧条目已打开，请移除旧条目，再添加并启用当前 App。"
+        }
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
@@ -161,10 +264,48 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
     private func updateStatus() { state.title = armed ? "已启用，等待或正在执行" : "已停止" }
 
     private func watch() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let deadline = launchDeadline, now >= nextLaunchCheck {
+            nextLaunchCheck = now + 1
+            if now >= deadline {
+                launchDeadline = nil
+                state.title = "启动等待超时 · " + (launchWait?.rawValue ?? "查看运行日志")
+                recordLaunchStatus(state.title)
+            } else {
+                checkPreparedLaunch()
+            }
+        }
         guard session else { return }
         if let game, game != foreground { stop(); return }
         if (!keys.isEmpty || !buttons.isEmpty) &&
             ProcessInfo.processInfo.systemUptime - lastContact > 2 { stop() }
+    }
+
+    private func checkPreparedLaunch() {
+        let waiting: LaunchWait
+        if !AXIsProcessTrusted() {
+            waiting = .accessibility
+        } else if !CGPreflightPostEventAccess() {
+            waiting = .postEvents
+        } else if foreground == nil {
+            waiting = .game
+        } else {
+            startPrepared()
+            return
+        }
+        guard waiting != launchWait else { return }
+        launchWait = waiting
+        state.title = waiting.rawValue
+        recordLaunchStatus(waiting.rawValue)
+        switch waiting {
+        case .accessibility:
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        case .postEvents:
+            _ = CGRequestPostEventAccess()
+        case .game:
+            break
+        }
     }
 
     private func respond(_ request: [String: Any]) -> [String: Any] {

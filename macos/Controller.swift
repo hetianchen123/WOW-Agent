@@ -19,6 +19,39 @@ private final class Controller: NSObject, NSApplicationDelegate {
     init(_ args: [String]) { self.args = args }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if args == ["--run-prepared"] {
+            do {
+                let root = try projectRoot()
+                let path = root.appendingPathComponent("data/logs/quest-session.log")
+                try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data().write(to: path)
+                let log = try FileHandle(forWritingTo: path)
+                if !CGPreflightScreenCaptureAccess() {
+                    let message = "主控缺少录屏权限。请在「隐私与安全性 → 屏幕与系统录音」启用当前版 WowAgent Controller，再从键鼠菜单运行。若旧条目已开启，请移除后重新添加。\n任务退出状态 2\n"
+                    try log.write(contentsOf: Data(message.utf8))
+                    try log.close()
+                    _ = CGRequestScreenCaptureAccess()
+                    NSApp.terminate(nil)
+                    return
+                }
+                let task = try makeTask(args: ["-m", "bot.cli", "navigate-quest", "--require-prepared"],
+                                        simulate: false, connectInput: true)
+                task.standardOutput = log
+                task.standardError = log
+                task.terminationHandler = { child in
+                    let result = "\n任务退出状态 \(child.terminationStatus)\n"
+                    try? log.write(contentsOf: Data(result.utf8))
+                    try? log.close()
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                }
+                try start(task)
+                process = task
+            } catch {
+                fputs("\(error)\n", stderr)
+                NSApp.terminate(nil)
+            }
+            return
+        }
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 450),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
                            backing: .buffered, defer: false)
@@ -114,10 +147,14 @@ private final class Controller: NSObject, NSApplicationDelegate {
     }
 }
 
-private func makeTask(args: [String], simulate: Bool, connectInput: Bool) throws -> Process {
+private func projectRoot() throws -> URL {
     guard let file = Bundle.main.url(forResource: "project-root", withExtension: nil)
     else { throw InputError.message("找不到 WowAgent 项目位置") }
-    let root = URL(fileURLWithPath: try String(contentsOf: file, encoding: .utf8), isDirectory: true)
+    return URL(fileURLWithPath: try String(contentsOf: file, encoding: .utf8), isDirectory: true)
+}
+
+private func makeTask(args: [String], simulate: Bool, connectInput: Bool) throws -> Process {
+    let root = try projectRoot()
     let python = root.appendingPathComponent(".venv/bin/python")
     guard FileManager.default.isExecutableFile(atPath: python.path)
     else { throw InputError.message("请在项目根目录安装 .venv 后重新运行") }
@@ -161,7 +198,7 @@ enum ControllerApp {
             } catch { fputs("\(error)\n", stderr); exit(2) }
         }
         let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        app.setActivationPolicy(args == ["--run-prepared"] ? .accessory : .regular)
         let delegate = Controller(args)
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }

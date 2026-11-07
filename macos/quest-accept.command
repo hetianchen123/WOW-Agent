@@ -2,11 +2,13 @@
 set -eu
 quest_project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$quest_project_root"
-exec .venv/bin/python - <<'PY'
+exec .venv/bin/python - "$@" <<'PY'
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
+import sys
 import time
 from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
@@ -16,6 +18,12 @@ root = Path.cwd()
 opener = build_opener(ProxyHandler({}), NoRedirect())
 server = None
 log_file = None
+prepared = sys.argv[1:] == ["--run-prepared"]
+
+def terminate(*_):
+    raise SystemExit(130)
+
+signal.signal(signal.SIGTERM, terminate)
 
 def ready():
     try:
@@ -44,12 +52,18 @@ try:
             if server.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("模型服务启动失败，请查看 data/startlux/server.log")
             time.sleep(.5)
-    print("本地模型已就绪。测试完成后关闭主控窗口，即可结束本次启动的模型服务。", flush=True)
-    print("主控启动后会自动切回游戏。请保持已准备的 NPC 任务对话打开。", flush=True)
-    subprocess.run([
-        "open", "-n", "-W", str(root / "data/apps/WowAgent Controller.app"),
-        "--args", "accept-quest",
-    ], check=True)
+    print("本地模型已就绪。任务结束后会自动关闭本次启动的主控和模型服务。", flush=True)
+    app = str(root / "data/apps/WowAgent Controller.app")
+    if prepared:
+        result = root / "data/logs/quest-session.log"
+        result.unlink(missing_ok=True)
+        subprocess.run(["open", "-g", "-n", "-W", app, "--args", "--run-prepared"], check=True)
+        if not result.is_file() or "任务退出状态 0\n" not in result.read_text().splitlines(keepends=True)[-1:]:
+            raise SystemExit("任务已停止，请查看任务运行日志。")
+    else:
+        command = sys.argv[1:] or ["accept-quest"]
+        print("主控启动后会自动切回游戏。请保持已准备的任务色条可见。", flush=True)
+        subprocess.run(["open", "-n", "-W", app, "--args", "--controller-once", *command], check=True)
 except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
     raise SystemExit(str(exc))
 finally:

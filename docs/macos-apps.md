@@ -11,6 +11,8 @@
 
 本机 macOS 27.2 的权限页显示为「设备控制和数据访问」。键鼠 App 的「辅助功能」提示对应这个页面。若开关已打开但 App 自检仍显示未授权，先退出并重开键鼠 App。仍未识别时，可在当前权限页移除旧的键鼠 App 条目，再添加本项目 `data/apps/WowAgent Keyboard Mouse.app` 并开启。
 
+「授权并运行已准备任务」会在菜单顶部和启动日志中显示当前等待的条件：设备控制、事件发送或魔兽前台。若主控录屏授权失效，任务日志会显示重新授权的步骤。只为键鼠 App 开启设备控制，为主控 App 开启录屏。
+
 1. 双击主 App，点「检查录屏权限」。保留默认的 `calibrate-channel`，点「运行」后切回魔兽，等待校准结果。
 2. 实机输入前打开键鼠 App。在菜单栏「WoW 键鼠」里选择「检查键鼠权限」。如果辅助功能已开启而事件发送仍显示未授权，可以在同一菜单里选择「请求发送事件权限」并按系统提示操作。
 3. 点「启用一次会话」，从主 App 运行已有的 CLI 参数，例如 `run --module quest --quest-plan "路径" --max-duration 60`。脚本会自动切回游戏，若系统未切换，在 12 秒内手动切回。`--dry-run` 使用模拟输入。
@@ -18,6 +20,6 @@
 
 键鼠 App 只接收来自本次配套签名的主 App 的本地连接。它验证前台客户端、允许的按键和鼠标目标所在窗口。辅助功能授权的系统范围仍取决于 macOS。当前用本机临时签名构建，修改后重新构建时可能需要重新授权。[Apple 代码签名与权限说明](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
 
-自动接任务可在游戏里点「准备自动接任务」，启用键鼠会话后双击 `macos/quest-accept.command`。启动器加载本地 StartLux 并启动主 App 的 `accept-quest` 命令。关闭本次主控窗口后，启动器会结束自己启动的模型服务。完整操作见 [任务模块](quest.md)。
+自动接任务可在游戏里点「准备自动接任务」，启用键鼠会话后双击 `macos/quest-accept.command`。启动器加载本地 StartLux 并启动主 App 的 `accept-quest` 命令。任务结束后，本次打开的主控会自行退出，启动器也会结束自己启动的模型服务。任务日志可在 `data/logs/bot.log` 查看。完整操作见 [任务模块](quest.md)。
 
 `bash macos/smoke.sh` 使用模拟执行器验证签名、输入通信、窗口边界、失焦和按键释放。

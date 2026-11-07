@@ -1,5 +1,5 @@
 -- Run from the repository root with Lua 5.1 or lupa.lua51.
-local macros, macroIDs, calls, rows = {}, {}, {}, {}
+local macros, macroIDs, calls, rows, frames = {}, {}, {}, {}, {}
 local locked, gearLocked, assist = false, false, true
 local actionKind, actionID, activeSpec = "macro", 1, 1
 local currentLoadout, equippedSet
@@ -13,7 +13,10 @@ WowAgent = {
     end,
 }
 function CreateFrame()
-    return setmetatable({}, {__index = function() return function() end end})
+    local frame = {scripts = {}}
+    function frame:SetScript(event, callback) self.scripts[event] = callback end
+    frames[#frames + 1] = frame
+    return setmetatable(frame, {__index = function() return function() end end})
 end
 function UnitClass() return "Mage", "MAGE", 8 end
 function UnitRace() return "Human", "Human", 1 end
@@ -100,6 +103,14 @@ assert(macro("WASAssist") == "#showtooltip 一键辅助\n/cast [harm,nodead,noch
 command("macro assist")
 assert(#macros == 1)
 command("arm 4 assist")
+assert(math.floor(rows[80] / 2) % 2 == 1)
+assist = false
+frames[2].scripts.OnEvent(nil, "SPELLS_CHANGED")
+frames[1].scripts.OnUpdate(nil, .2)
+assert(math.floor(rows[80] / 2) % 2 == 0)
+assist = true
+frames[2].scripts.OnEvent(nil, "SPELLS_CHANGED")
+frames[1].scripts.OnUpdate(nil, .2)
 assert(math.floor(rows[80] / 2) % 2 == 1)
 macros[1] = "/say original"
 command("macro assist")
@@ -355,3 +366,56 @@ assert(calls[#calls][1]:find("无法核对", 1, true))
 duplicateBody = macros[macroIDs.WASAssist] .. "\n"
 kind, index = WowAgent.LayoutSupport.ReadAction(6)
 assert(kind == "macro" and index == macroIDs.WASAssist)
+
+-- A new macro can temporarily read back as empty. Retry the same macro,
+-- leaving any blank macro that existed before setup alone.
+function GetNumMacros() return #macros, 0 end
+CreateMacro("WATTest", 134400, "", nil)
+local originalCreate = CreateMacro
+function CreateMacro(name, icon, _, character)
+    return originalCreate(name, icon, "", character)
+end
+function EditMacro(id, _, _, body)
+    assert(id == macroIDs.WATTest1 and macros[id] == "")
+    macros[id] = body
+    return id
+end
+local expected = "/dismount [mounted,noflying]"
+local failed, reason = WowAgent.LayoutSupport.WriteMacro("WATTest", expected)
+assert(not failed and reason == "macro_pending")
+count = #macros
+assert(WowAgent.LayoutSupport.WriteMacro("WATTest", expected) == macroIDs.WATTest1)
+assert(#macros == count and macro("WATTest") == "" and macro("WATTest1") == expected)
+
+-- The new macro may first be absent from the name index and later have
+-- a nil body in both read APIs. Keep its identity across the retry.
+local indexed = false
+local originalLookup, originalRead = GetMacroIndexByName, GetMacroBody
+function GetMacroIndexByName(name)
+    if name == "WATLand" and not indexed then return 0 end
+    return originalLookup(name)
+end
+function GetMacroBody(id)
+    if id == macroIDs.WATLand and macros[id] == "" then return nil end
+    return originalRead(id)
+end
+function GetMacroInfo(id)
+    if id == macroIDs.WATLand and macros[id] == "" then
+        if indexed then return "WATLand", 134400, nil end
+        return nil
+    end
+    return originalMacroInfo(id)
+end
+function EditMacro(id, _, _, body)
+    assert(id == macroIDs.WATLand)
+    macros[id] = body
+    return id
+end
+failed, reason = WowAgent.LayoutSupport.WriteMacro("WATLand", expected)
+assert(not failed and reason == "macro_pending")
+count = #macros
+failed, reason = WowAgent.LayoutSupport.WriteMacro("WATLand", expected)
+assert(not failed and reason == "macro_pending" and #macros == count)
+indexed = true
+assert(WowAgent.LayoutSupport.WriteMacro("WATLand", expected) == macroIDs.WATLand)
+assert(#macros == count and macro("WATLand") == expected)

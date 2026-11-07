@@ -625,6 +625,103 @@ local function BuildPanel()
     Label(talents, "在游戏窗口确认导入。导入后可在「战斗准备」按名称找到方案。", 0, 275, 595)
     talents:SetScript("OnShow", refreshTalents)
 
+    local navigation = NewTab(5, "任务寻路")
+    Label(navigation, "选择已接任务，或先打开 NPC 的接任务对话。", 0, 7)
+    Label(navigation, "任务", 0, 45)
+    local npc, itemMode
+    local navQuest = NamedSelect(navigation, "navQuest", 104, 40, 385, Quests, function()
+        local active = Quests()
+        if #active == 1 then return active[1].value end
+        return C_SuperTrack and C_SuperTrack.GetSuperTrackedQuestID and C_SuperTrack.GetSuperTrackedQuestID()
+    end, function()
+        if npc then npc:SetText("") end
+        if profile then profile.navItem, profile.navNPCQuest = nil, nil end
+        if itemMode then itemMode() end
+    end)
+    local function TravelMounts(kind)
+        local list = {Choice(0, "自动选择可用坐骑")}
+        for _, entry in ipairs(WowAgent.GetNavigationMounts and WowAgent.GetNavigationMounts(kind) or {}) do
+            list[#list + 1] = entry
+        end
+        return list
+    end
+    Label(navigation, "飞行坐骑", 0, 85)
+    local fly = NamedSelect(navigation, "navFly", 104, 80, 300, function() return TravelMounts("fly") end,
+        function() return 0 end)
+    Label(navigation, "地面坐骑", 0, 119)
+    local ground = NamedSelect(navigation, "navGround", 104, 114, 300, function() return TravelMounts("ground") end,
+        function() return 0 end)
+    Label(navigation, "任务键位", 0, 209)
+    local navBindings = NamedSelect(navigation, "navBindings", 104, 204, 300, function()
+        return {Choice(0, "沿用游戏键位"), Choice(1, "准备时启用临时任务键位")}
+    end, function() return 0 end)
+    local interactFlags = Enum and Enum.SoftTargetEnableFlags
+    local getCVar, setCVar = C_CVar and C_CVar.GetCVar, C_CVar and C_CVar.SetCVar
+    if interactFlags and getCVar and setCVar then
+        local function InteractEnabled()
+            return tonumber(getCVar("softTargetInteract")) == interactFlags.Any
+        end
+        local function RefreshInteract(button)
+            button:SetText(InteractEnabled() and "停用游戏互动键" or "启用游戏互动键")
+        end
+        local interact = Button(navigation, "", 416, 204, 150, function(button)
+            if InCombatLockdown and InCombatLockdown() then
+                return WowAgent.Report("WowAgent：请脱战后更改游戏互动键设置。")
+            end
+            local enable = not InteractEnabled()
+            local ok = pcall(setCVar, "softTargetInteract", enable and interactFlags.Any or interactFlags.Gamepad)
+            RefreshInteract(button)
+            if not ok or InteractEnabled() ~= enable then
+                return WowAgent.Report("WowAgent：客户端未确认游戏互动键设置。")
+            end
+            WowAgent.Report(enable and "WowAgent：游戏互动键已启用。靠近并面向 NPC 后可按 F 互动。"
+                or "WowAgent：游戏互动键已停用。")
+        end)
+        interact:SetScript("OnShow", RefreshInteract)
+        RefreshInteract(interact)
+    end
+    Button(navigation, "准备任务寻路", 0, 158, 141, function()
+        if WowAgent.PrepareQuestNavigation then
+            WowAgent.PrepareQuestNavigation(tonumber((navQuest())), tonumber((fly())), tonumber((ground())),
+                tonumber((navBindings())) == 1)
+        else WowAgent.Report("WowAgent：当前客户端无法读取任务寻路接口。") end
+    end)
+    Button(navigation, "关闭寻路色条", 151, 158, 136, function()
+        if WowAgent.StopQuestNavigation then WowAgent.StopQuestNavigation() end
+    end)
+    Button(navigation, "查看任务键位", 298, 158, 136, function()
+        if WowAgent.ReportQuestBindings then WowAgent.ReportQuestBindings() end
+    end)
+    Button(navigation, "一键准备自动任务", 444, 158, 150, function()
+        if WowAgent.PrepareQuestNavigation then
+            local quest = navQuest()
+            if profile and profile.navNPCQuest and profile.navNPCQuest ~= quest then
+                return WowAgent.Report("WowAgent：任务已变化，请在下拉列表重新选任务，再填写交付 NPC。")
+            end
+            if profile and quest and Text(npc) ~= "" then
+                profile.navQuest, profile.navNPCQuest = quest, quest
+            end
+            WowAgent.PrepareQuestNavigation(tonumber(quest), tonumber((fly())), tonumber((ground())),
+                true, true, Text(npc), tonumber((itemMode())) == 1)
+        end
+    end)
+    Label(navigation, "交付 NPC", 0, 246)
+    npc = Field(navigation, "navNPC", 104, 241, 140)
+    Button(navigation, "读取当前目标", 252, 241, 112, function()
+        local support = WowAgent.LayoutSupport
+        local guid = support and support.Public(UnitGUID("target"))
+        local name = support and UnitName and support.Public(UnitName("target"))
+        if not guid or not guid:match("^Creature%-") or not name or support.Public(UnitIsDead("target")) ~= false then
+            return WowAgent.Report("WowAgent：请先选中活着的交付 NPC，或填写准确名字。")
+        end
+        npc:SetText(name)
+    end)
+    itemMode = NamedSelect(navigation, "navItem", 372, 241, 222, function()
+        return {Choice(0, "只绑定任务道具"), Choice(1, "自动使用无目标道具")}
+    end, function() return 0 end)
+    Label(navigation, "W/S/方向键/空格移动 · Tab 选敌 · K 选 NPC · F 互动和拾取 · J 任务道具", 0, 277, 595)
+    Label(navigation, "1 输出 · 5–8 坐骑 · 9 对话。准备成功后从「WoW 键鼠」授权并运行。", 0, 303, 595)
+
     local function RefreshSelections()
         for _, refresh in ipairs(selectors) do refresh() end
         if talents:IsShown() then refreshTalents() end

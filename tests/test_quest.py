@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,6 +8,7 @@ from bot.core.config import BotConfig
 from bot.modules import quest
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import Dialogue, Objective, QuestKind, QuestState, decode_quest
+from bot.perception.travel_channel import TaskFlags, TravelFlags, TravelSample
 
 
 def image(sequence, state, dialogue=Dialogue.CLOSED, dialogue_id=0, done=0, kind=QuestKind.CAMPAIGN):
@@ -64,6 +66,7 @@ quests:
         plan = plan.replace("objective_key: '8'", "combat_targets: [244669]")
     path.write_text(plan)
     clock = [100.0]
+    sequence = 0
     monkeypatch.setattr(quest, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     frame = [None]
     combat_frame = [None]
@@ -78,9 +81,10 @@ quests:
     run.on_enter(ctx)
 
     def tick(state, dialogue=Dialogue.CLOSED, dialogue_id=0, done=0, kind=QuestKind.CAMPAIGN,
-             *, target=0, dead=False, fighting=False, epoch=1, verified=True):
-        clock[0] += 2.1
-        sequence = round(clock[0]) % 128
+             *, target=0, dead=False, fighting=False, epoch=1, verified=True, elapsed=2.1):
+        nonlocal sequence
+        clock[0] += elapsed
+        sequence = (sequence + 1) % 128
         frame[0] = image(sequence, state, dialogue, dialogue_id, done, kind)
         if combat:
             flags[0] = spec.StatusFlags.HP_UNKNOWN | (spec.StatusFlags.IN_COMBAT if fighting else 0)
@@ -112,6 +116,83 @@ def test_quest_progresses_from_offer_to_confirmed_turn_in(tmp_path, monkeypatch)
     assert ctx.input.count("key_down", "f") == 2
     assert ctx.input.count("key_down", "9") == 3
     assert ctx.input.count("key_down", "8") == 2
+
+
+def test_auto_turn_in_faces_marker_before_interacting(tmp_path, monkeypatch):
+    run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
+    run.auto_route = True
+    east = 1.5 * math.pi
+    heading = [east]
+    position = [(.4, .5)]
+    interaction = [TaskFlags.PREPARED | TaskFlags.NPC_CONFIGURED]
+    ctx.heading = lambda: heading[0]
+
+    def navigation(_):
+        return TravelSample(12345, 2248, 2248, (.403, .5), position[0], (1000, 1000),
+                            0, QuestState.READY, TravelFlags.KEYS_VERIFIED,
+                            run.last_sequence, interact_verified=True, task=interaction[0])
+
+    monkeypatch.setattr(quest, "decode_travel", navigation)
+    tick(QuestState.READY)
+    assert not run.arrived and ctx.input.count("key_down", "w") == 1
+    assert ctx.input.count("key_down", "f") == 0
+    position[0] = (.4018, .5)
+    tick(QuestState.READY)
+    assert run.arrived
+    heading[0] = 0
+    tick(QuestState.READY)
+    assert ctx.input.count("key_down", "right") or ctx.input.count("key_down", "left")
+    assert ctx.input.count("key_down", "f") == 0
+    heading[0] = east
+    interaction[0] |= TaskFlags.LOOT_IN_RANGE
+    tick(QuestState.READY)
+    assert ctx.input.count("key_up", "right") or ctx.input.count("key_up", "left")
+    assert ctx.input.count("key_down", "f") == 0
+    interaction[0] |= TaskFlags.NPC_CANDIDATE
+    tick(QuestState.READY)
+    assert ctx.input.count("key_down", "k") == 1
+    assert ctx.input.count("key_down", "f") == 0
+    interaction[0] |= TaskFlags.NPC_SELECTED
+    tick(QuestState.READY)
+    assert ctx.input.count("key_down", "f") == 1
+    tick(QuestState.READY, Dialogue.REWARD, 12345)
+    assert ctx.input.count("key_down", "9") == 1
+    tick(QuestState.TURNED_IN)
+    assert run.OUTCOME == "completed"
+
+
+@pytest.mark.parametrize("moved", [True, False])
+def test_auto_turn_in_takes_a_short_step_if_interact_does_not_open_dialogue(tmp_path, monkeypatch, moved):
+    run, ctx, tick = make_run(tmp_path, monkeypatch)
+    run.auto_route = True
+    position = [(.4025, .5)]
+    interaction = TaskFlags.PREPARED | TaskFlags.NPC_CANDIDATE | TaskFlags.NPC_SELECTED
+
+    def navigation(_):
+        return TravelSample(12345, 2248, 2248, (.403, .5), position[0], (1000, 1000),
+                            0, QuestState.READY, TravelFlags.KEYS_VERIFIED,
+                            run.last_sequence, interact_verified=True, task=interaction)
+
+    monkeypatch.setattr(quest, "decode_travel", navigation)
+    tick(QuestState.READY)
+    assert ctx.input.count("key_down", "f") == 1
+    tick(QuestState.READY, elapsed=1.3)
+    assert ctx.input.count("key_down", "w") == 1
+    assert ctx.input.count("key_down", "f") == 1
+    tick(QuestState.READY, elapsed=.26)
+    assert ctx.input.count("key_up", "w") == 1
+    if moved:
+        position[0] = (.404, .5)  # The NPC can be beyond the map marker.
+    tick(QuestState.READY, elapsed=.3)
+    if not moved:
+        assert run.OUTCOME == "stopped:quest_turn_in_approach_blocked"
+        assert ctx.input.count("key_down", "f") == 1
+        return
+    assert ctx.input.count("key_down", "f") == 2
+    tick(QuestState.READY, Dialogue.REWARD, 12345)
+    assert ctx.input.count("key_down", "9") == 1
+    tick(QuestState.TURNED_IN)
+    assert run.OUTCOME == "completed"
 
 
 def test_quest_refuses_other_dialogue_and_filtered_category(tmp_path, monkeypatch):

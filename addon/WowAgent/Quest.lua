@@ -30,195 +30,6 @@ local function QuestKind(id, info, mapID)
     return 0
 end
 
--- Independent navigation strip. Main quest/combat message layouts stay compatible.
-local navFrame, navRows, navSequence, navElapsed = nil, {}, 0, 0
-local navigation
-local flyingTypes = {[242]=true, [247]=true, [248]=true, [402]=true, [424]=true, [436]=true}
-local waterTypes = {[231]=true, [232]=true, [254]=true}
-local travelKeys = {6, 7, 8, 5}
-local function Public(value)
-    if secret(value) then return nil end
-    return value
-end
-local function Coordinate(value)
-    return type(value) == "number" and value == value and value >= 0 and value <= 1
-end
-local function Mount(id)
-    local api = C_MountJournal
-    if not api or not api.GetMountInfoByID or not id or id == 0 then return end
-    local name, spell, _, active, usable, _, favorite, _, _, hidden, collected = api.GetMountInfoByID(id)
-    if not name or not collected or hidden then return end
-    local _, _, _, _, mountType = api.GetMountInfoExtraByID(id)
-    return {id = id, name = name, spell = spell, active = active, usable = usable,
-            favorite = favorite, flying = flyingTypes[mountType] == true, water = waterTypes[mountType] == true}
-end
-
-function WowAgent.GetNavigationMounts(kind)
-    local result, api = {}, C_MountJournal
-    if not api or not api.GetMountIDs or not api.GetMountInfoExtraByID then return result end
-    for _, id in ipairs(api.GetMountIDs()) do
-        local mount = Mount(id)
-        if mount and not mount.water and (kind ~= "fly" or mount.flying) then
-            result[#result + 1] = {value = tostring(id), label = mount.name, favorite = mount.favorite}
-        end
-    end
-    table.sort(result, function(a, b)
-        if a.favorite ~= b.favorite then return a.favorite == true end
-        return a.label < b.label
-    end)
-    return result
-end
-
-local function ChooseMount(kind, id)
-    if id and id > 0 then
-        local mount = Mount(id)
-        if mount and mount.usable and not mount.water and (kind ~= "fly" or mount.flying) then return id end
-        return nil
-    end
-    for _, entry in ipairs(WowAgent.GetNavigationMounts(kind)) do
-        local mount = Mount(tonumber(entry.value))
-        if mount.usable then return mount.id end
-    end
-end
-
-function WowAgent.TravelMacro(kind)
-    if kind == 3 then return "WATLand", "/dismount [mounted,noflying]" end
-    local spell, name
-    if kind == 4 then
-        spell, name = 436854, "WATSteady"
-    elseif navigation and (kind == 1 or kind == 2) then
-        local mount = Mount(kind == 1 and navigation.fly or navigation.ground)
-        spell, name = mount and mount.spell, kind == 1 and "WATFly" or "WATRide"
-    end
-    local spellName = spell and C_Spell and C_Spell.GetSpellName(spell)
-    if not spellName then return end
-    return name, "#showtooltip " .. spellName .. "\n/cast "
-        .. (kind == 4 and "[nocombat,noflying] " or "[nocombat,nomounted] ") .. spellName
-end
-
-local function QuestDestination(id, mapID)
-    local api = C_QuestLog
-    if api.GetNextWaypointForMap then
-        local x, y = api.GetNextWaypointForMap(id, mapID)
-        if Coordinate(x) and Coordinate(y) then return mapID, x, y end
-    end
-    if api.GetNextWaypoint then
-        local targetMap, x, y = api.GetNextWaypoint(id)
-        if targetMap and Coordinate(x) and Coordinate(y) then return targetMap, x, y end
-    end
-    if QuestPOIGetIconInfo then
-        local _, x, y = QuestPOIGetIconInfo(id)
-        if Coordinate(x) and Coordinate(y) then return mapID, x, y end
-    end
-end
-
-local function NavigationKeys()
-    local support = WowAgent.LayoutSupport
-    if not support or not support.ActionMatches then return false end
-    for kind, key in ipairs(travelKeys) do
-        local _, body = WowAgent.TravelMacro(kind)
-        if body and not support.ActionMatches(key, nil, body) then return false end
-    end
-    return GetBindingAction("W", true) == "MOVEFORWARD"
-        and GetBindingAction("SPACE", true) == "JUMP"
-        and GetBindingAction("X", true) == "SITORSTAND"
-end
-
-local function UpdateNavigation()
-    if not navigation then return end
-    local id, mapID = navigation.quest, C_Map.GetBestMapForUnit("player") or 0
-    local active, phase = C_QuestLog.IsOnQuest(id), 1
-    if active then phase = C_QuestLog.ReadyForTurnIn(id) and 3 or 2
-    elseif C_QuestLog.IsQuestFlaggedCompleted(id) then phase = 4 end
-    local targetMap, gx, gy = QuestDestination(id, mapID)
-    local position = C_Map.GetPlayerMapPosition and C_Map.GetPlayerMapPosition(mapID, "player")
-    local px, py
-    if position then px, py = position:GetXY() end
-    px, py, gx, gy = Public(px), Public(py), Public(gx), Public(gy)
-    local _, _, height
-    if UnitPosition then _, _, height = UnitPosition("player") end
-    height = Public(height)
-    local width, depth
-    if C_Map.GetMapWorldSize then width, depth = C_Map.GetMapWorldSize(mapID) end
-    width, depth = Public(width), Public(depth)
-    local flags, meta = 0, 1 + phase * 16
-    local outdoors = IsOutdoors and IsOutdoors()
-    local flyable = IsFlyableArea and IsFlyableArea()
-    local fly, ground = Mount(navigation.fly), Mount(navigation.ground)
-    if outdoors then flags = flags + 1 end
-    if flyable then flags = flags + 2 end
-    if IsMounted() then flags = flags + 4 end
-    if IsFlying() then flags = flags + 8 end
-    if IsFalling and IsFalling() then flags = flags + 16 end
-    if IsSwimming and IsSwimming() then flags = flags + 32 end
-    if UnitAffectingCombat and UnitAffectingCombat("player") then flags = flags + 64 end
-    if UnitCastingInfo and Public(UnitCastingInfo("player")) then flags = flags + 128 end
-    if outdoors and flyable and fly and fly.usable then flags = flags + 256 end
-    if outdoors and ground and ground.usable then flags = flags + 512 end
-    if C_PlayerInfo and C_PlayerInfo.GetGlidingInfo then
-        local _, canGlide = C_PlayerInfo.GetGlidingInfo()
-        if Public(canGlide) then flags = flags + 1024 end
-    end
-    if C_Spell and C_Spell.GetSpellName(436854) then flags = flags + 2048 end
-    if NavigationKeys() then flags = flags + 4096 end
-    if Coordinate(gx) and Coordinate(gy) then meta = meta + 128 else gx, gy = 0, 0 end
-    if type(height) == "number" and height == height and height > -52428 and height < 52428 then
-        meta = meta + 256
-    else height = 0 end
-    if width and depth and width > 0 and depth > 0 and width < 104857 and depth < 104857 then
-        meta = meta + 512
-    else width, depth = 0, 0 end
-    if Coordinate(px) and Coordinate(py) then meta = meta + 1024 else px, py = 0, 0 end
-    navSequence = (navSequence + 1) % 128
-    local values = {id, targetMap or 0, math.floor(gx * 1048575 + .5), math.floor(gy * 1048575 + .5),
-                    flags + navSequence * 8192, math.floor(height * 10 + 524288 + .5),
-                    math.floor(width * 10 + .5), math.floor(depth * 10 + .5), meta,
-                    math.floor(px * 1048575 + .5), math.floor(py * 1048575 + .5), mapID}
-    for row, value in ipairs(values) do navRows[row](row + 3, value >= 0 and value <= 1048575 and value or 0) end
-end
-
-function WowAgent.PrepareQuestNavigation(id, fly, ground)
-    if InCombatLockdown() or IsFlying() then return print("WowAgent：请落地脱战后准备寻路。") end
-    if not id or not C_QuestLog.IsOnQuest(id) then return print("WowAgent：请先选择任务日志中已接取的任务。") end
-    local support = WowAgent.LayoutSupport
-    if not support or not support.SetupAction then return print("WowAgent：动作配置模块尚未加载。") end
-    navigation = {quest = id, fly = ChooseMount("fly", fly), ground = ChooseMount("ground", ground)}
-    navFrame:Hide()
-    for kind, key in ipairs(travelKeys) do
-        local name = WowAgent.TravelMacro(kind)
-        if name and not support.SetupAction("travel", kind, key) then return end
-    end
-    if not support.SetupAction("quest", id, 9) or not support.SetupAction("assist", nil, 1) then return end
-    if not NavigationKeys() then return print("WowAgent：请确认 W 为前进、空格为跳跃、X 为坐下/下降。") end
-    if C_QuestLog.AddQuestWatch then C_QuestLog.AddQuestWatch(id) end
-    WowAgent.QuestCommand("track " .. id)
-    UpdateNavigation()
-    navFrame:Show()
-    local mapID = C_Map.GetBestMapForUnit("player")
-    local targetMap, x, y = QuestDestination(id, mapID)
-    print("WowAgent：寻路已准备，优先飞行，其次坐骑，最后步行。从本地主 App 运行 navigate-quest。")
-    if targetMap and x and y then
-        print(string.format("WowAgent：任务目标地图 %d，坐标 %.2f, %.2f。", targetMap, x * 100, y * 100))
-    else print("WowAgent：任务目标坐标尚未返回，脚本会等待坐标。") end
-end
-
-function WowAgent.StopQuestNavigation()
-    if navFrame then navFrame:Hide() end
-end
-
-navFrame = CreateFrame("Frame", nil, UIParent)
-navFrame:SetSize(142, 192)
-navFrame:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 144, 0)
-navFrame:SetFrameStrata("TOOLTIP")
-for row = 1, 12 do navRows[row] = WowAgent.NewPixelRow(navFrame, (row - 1) * 16) end
-navFrame:SetScript("OnUpdate", function(_, dt)
-    navElapsed = navElapsed + dt
-    if navElapsed < .20 then return end
-    navElapsed = 0
-    UpdateNavigation()
-end)
-navFrame:Hide()
-
 local function DialogueQuests()
     local candidates = {}
     local function Add(id, phase, index)
@@ -260,7 +71,7 @@ local function Dialogue()
         if id == 0 then return 0, BLOCKED end
         if panel == "QUEST_DETAIL" then return id, DETAIL end
         if panel == "QUEST_PROGRESS" and IsQuestCompletable() then return id, PROGRESS end
-        if panel == "QUEST_COMPLETE" and GetNumQuestChoices() <= 1 then return id, REWARD end
+        if panel == "QUEST_COMPLETE" then return id, GetNumQuestChoices() <= 1 and REWARD or 7 end
         return id, BLOCKED
     end
     return 0, OFF
@@ -412,6 +223,7 @@ function WowAgent.QuestCommand(args)
         print("WowAgent：接任务已准备，数字键 9，任务 " .. id .. "。从主 App 运行 accept-quest。")
     elseif args == "off" then
         screen:Hide()
+        if WowAgent.StopQuestNavigation then WowAgent.StopQuestNavigation() end
     elseif args == "scan" then
         tracked, trackSet, cursor = {}, {}, 0
         UpdateRows()
@@ -435,3 +247,628 @@ function WowAgent.QuestCommand(args)
     end
 end
 
+-- Independent navigation strip. Main quest/combat message layouts stay compatible.
+local navFrame, navRows, writeSky, writeTask, navSequence, navElapsed = nil, {}, nil, nil, 0, 0
+local navigation
+local skyButton
+local flyingTypes = {[242]=true, [247]=true, [248]=true, [402]=true, [424]=true, [436]=true}
+local waterTypes = {[231]=true, [232]=true, [254]=true}
+local travelKeys = {6, 7, 8, 5}
+local function Public(value)
+    if secret(value) then return nil end
+    return value
+end
+local function Coordinate(value)
+    return not secret(value) and type(value) == "number" and value == value and value >= 0 and value <= 1
+end
+local function Mount(id)
+    local api = C_MountJournal
+    if not api or not api.GetMountInfoByID or not api.GetMountInfoExtraByID or not id or id == 0 then return end
+    local name, spell, _, active, usable, _, favorite, _, _, hidden, collected = api.GetMountInfoByID(id)
+    if not name or not collected or hidden then return end
+    local _, _, _, _, mountType = api.GetMountInfoExtraByID(id)
+    return {id = id, name = name, spell = spell, active = active, usable = usable,
+            favorite = favorite, flying = flyingTypes[mountType] == true, water = waterTypes[mountType] == true}
+end
+
+function WowAgent.GetNavigationMounts(kind)
+    local result, api = {}, C_MountJournal
+    if not api or not api.GetMountIDs or not api.GetMountInfoExtraByID then return result end
+    for _, id in ipairs(api.GetMountIDs()) do
+        local mount = Mount(id)
+        if mount and not mount.water and (kind ~= "fly" or mount.flying) then
+            result[#result + 1] = {value = tostring(id), label = mount.name, favorite = mount.favorite}
+        end
+    end
+    table.sort(result, function(a, b)
+        if a.favorite ~= b.favorite then return a.favorite == true end
+        return a.label < b.label
+    end)
+    return result
+end
+
+local function ChooseMount(kind, id)
+    if id and id > 0 then
+        local mount = Mount(id)
+        if mount and not mount.water and (kind ~= "fly" or mount.flying) then return id end
+        return nil
+    end
+    local fallback
+    for _, entry in ipairs(WowAgent.GetNavigationMounts(kind)) do
+        local mount = Mount(tonumber(entry.value))
+        -- A skyriding mount can replace the normal action bar even on the ground.
+        if mount and (kind ~= "ground" or not mount.flying) then
+            if mount.usable then return mount.id end
+            fallback = fallback or mount.id
+        end
+    end
+    return fallback
+end
+
+function WowAgent.TravelMacro(kind)
+    if kind == 3 then return "WATLand", "/dismount [mounted,noflying]" end
+    local spell, name
+    if kind == 4 and navigation and navigation.fly then
+        spell, name = 436854, "WATSteady"
+    elseif navigation and (kind == 1 or kind == 2) then
+        local mount = Mount(kind == 1 and navigation.fly or navigation.ground)
+        spell, name = mount and mount.spell, kind == 1 and "WATFly" or "WATRide"
+    end
+    local spellName = spell and C_Spell and C_Spell.GetSpellName(spell)
+    if not spellName then return end
+    return name, "#showtooltip " .. spellName .. "\n/cast "
+        .. (kind == 4 and "[nocombat,noflying] " or "[nocombat,nomounted] ") .. spellName
+end
+
+local function QuestDestination(id, mapID)
+    local api = C_QuestLog
+    if not mapID or mapID <= 0 then return end
+    if api.GetNextWaypointForMap then
+        local x, y = api.GetNextWaypointForMap(id, mapID)
+        if Coordinate(x) and Coordinate(y) then return mapID, x, y end
+    end
+    if api.GetQuestsOnMap then
+        for _, quest in ipairs(api.GetQuestsOnMap(mapID) or {}) do
+            if quest.questID == id and Coordinate(quest.x) and Coordinate(quest.y) then
+                return mapID, quest.x, quest.y
+            end
+        end
+    end
+    if api.GetNextWaypoint then
+        local targetMap, x, y = api.GetNextWaypoint(id)
+        targetMap = Public(targetMap)
+        if type(targetMap) == "number" and targetMap > 0 and Coordinate(x) and Coordinate(y) then return targetMap, x, y end
+    end
+    if QuestPOIGetIconInfo and api.GetMapForQuestPOIs and api.GetMapForQuestPOIs() == mapID then
+        local _, x, y = QuestPOIGetIconInfo(id)
+        if Coordinate(x) and Coordinate(y) then return mapID, x, y end
+    end
+end
+
+local movementBindings = {
+    {"W", "MOVEFORWARD", "前进"}, {"S", "MOVEBACKWARD", "后退"},
+    {"LEFT", "TURNLEFT", "左转"}, {"RIGHT", "TURNRIGHT", "右转"},
+    {"SPACE", "JUMP", "跳跃"},
+}
+
+local taskBindings = {
+    {"TAB", "TARGETNEARESTENEMY", "选敌"}, {"F", "INTERACTTARGET", "与目标互动"},
+    {"1", "ACTIONBUTTON1", "一键输出"}, {"5", "ACTIONBUTTON5", "切换飞行风格"},
+    {"6", "ACTIONBUTTON6", "飞行坐骑"}, {"7", "ACTIONBUTTON7", "地面坐骑"},
+    {"8", "ACTIONBUTTON8", "下马"}, {"9", "ACTIONBUTTON9", "任务对话"},
+}
+for _, binding in ipairs(movementBindings) do taskBindings[#taskBindings + 1] = binding end
+local taskBindingOwner
+local taskTargetButton, taskItemButton, taskDialogueButton
+local taskDialogueBody = "/run WowAgent.RunPreparedQuestAction()"
+
+function WowAgent.RunPreparedQuestAction()
+    if navigation and navigation.automatic then WowAgent.QuestAction(navigation.quest) end
+end
+
+local function TaskClickMatches(key, name)
+    local action = Public(GetBindingAction(key, true))
+    return type(action) == "string" and action:lower() == ("CLICK " .. name .. ":LeftButton"):lower()
+end
+
+local function GameTaskOptions(enable)
+    local flags = Enum and Enum.SoftTargetEnableFlags
+    if not flags or not C_CVar or not C_CVar.GetCVar then return false end
+    if enable and C_CVar.SetCVar then
+        pcall(C_CVar.SetCVar, "softTargetInteract", flags.Any)
+        pcall(C_CVar.SetCVar, "autoLootDefault", 1)
+    end
+    return tonumber(C_CVar.GetCVar("softTargetInteract")) == flags.Any
+        and C_CVar.GetCVar("autoLootDefault") == "1"
+end
+
+local function QuestItemID(id)
+    local index = C_QuestLog.GetLogIndexForQuestID(id)
+    local link = index and GetQuestLogSpecialItemInfo and Public(GetQuestLogSpecialItemInfo(index))
+    return type(link) == "string" and tonumber(link:match("item:(%d+)")) or nil
+end
+
+local function SetupTaskClicks(plan)
+    if not SetOverrideBindingClick then return false end
+    if not taskTargetButton then
+        taskTargetButton = CreateFrame("Button", "WowAgentTaskTarget", UIParent, "SecureActionButtonTemplate")
+        taskTargetButton:RegisterForClicks("AnyDown", "AnyUp")
+        taskTargetButton:SetAttribute("type", "target")
+        taskTargetButton:SetAttribute("unit", "softinteract")
+    end
+    SetOverrideBindingClick(taskBindingOwner, false, "K", "WowAgentTaskTarget", "LeftButton")
+    if plan.item then
+        if not taskItemButton then
+            taskItemButton = CreateFrame("Button", "WowAgentTaskItem", UIParent, "SecureActionButtonTemplate")
+            taskItemButton:RegisterForClicks("AnyDown", "AnyUp")
+            taskItemButton:SetAttribute("type", "item")
+        end
+        taskItemButton:SetAttribute("item", "item:" .. plan.item)
+        SetOverrideBindingClick(taskBindingOwner, false, "J", "WowAgentTaskItem", "LeftButton")
+    end
+    return true
+end
+
+local function SetupTaskDialogue(support, plan)
+    local index, reason = support.WriteMacro("WAQTask", taskDialogueBody)
+    if not index then return nil, reason end
+    if not taskDialogueButton then
+        taskDialogueButton = CreateFrame("Button", "WowAgentTaskDialogue", UIParent, "SecureActionButtonTemplate")
+        taskDialogueButton:RegisterForClicks("AnyDown", "AnyUp")
+        taskDialogueButton:SetAttribute("type", "macro")
+    end
+    taskDialogueButton:SetAttribute("macro", index)
+    SetOverrideBindingClick(taskBindingOwner, false, "9", "WowAgentTaskDialogue", "LeftButton")
+    plan.dialogueMacro = index
+    return true
+end
+
+local function InteractionFlags(plan, phase, sky)
+    if not plan.automatic then return 0 end
+    local prepared = GameTaskOptions(false) and TaskClickMatches("K", "WowAgentTaskTarget")
+        and Public(GetBindingAction("F", true)) == "INTERACTTARGET"
+        and Public(GetBindingAction("TAB", true)) == "TARGETNEARESTENEMY"
+        and TaskClickMatches("9", "WowAgentTaskDialogue")
+    if not sky then
+        prepared = prepared and plan.dialogueMacro
+            and WowAgent.LayoutSupport.ReadMacroBody(plan.dialogueMacro) == taskDialogueBody
+    end
+    local flags = prepared and 1 or 0
+    if plan.npc then flags = flags + 32 end
+    local itemBound = plan.item and TaskClickMatches("J", "WowAgentTaskItem")
+    if itemBound then flags = flags + 16 end
+    if itemBound and plan.useItem and phase == 2 and QuestItemID(plan.quest) == plan.item then
+        flags = flags + 64
+    end
+    if not prepared or not UnitGUID or not UnitIsDead
+        or (GetCursorInfo and GetCursorInfo()) or (SpellIsTargeting and SpellIsTargeting()) then return flags end
+    local soft = Public(UnitGUID("softinteract"))
+    local target = Public(UnitGUID("target"))
+    if not soft then return flags end
+    local dead = Public(UnitIsDead("softinteract"))
+    if phase == 3 and plan.npc and UnitName and dead == false and soft:match("^Creature%-")
+        and Public(UnitName("softinteract")) == plan.npc then
+        flags = flags + 2
+        if target == soft then flags = flags + 4 end
+    elseif phase == 2 and target == soft and dead == true then
+        flags = flags + 8
+    end
+    return flags
+end
+
+local function ClearTaskBindings()
+    if not taskBindingOwner then return end
+    if InCombatLockdown() then
+        taskBindingOwner:RegisterEvent("PLAYER_REGEN_ENABLED")
+    else
+        ClearOverrideBindings(taskBindingOwner)
+        taskBindingOwner:UnregisterEvent("PLAYER_REGEN_ENABLED")
+    end
+end
+
+local function ApplyTaskBindings()
+    if not SetOverrideBinding or not ClearOverrideBindings then return false end
+    if not taskBindingOwner then
+        taskBindingOwner = CreateFrame("Frame")
+        taskBindingOwner:SetScript("OnEvent", ClearTaskBindings)
+    end
+    for _, binding in ipairs(taskBindings) do
+        local key, action = unpack(binding)
+        if Public(GetBindingAction(key, true)) ~= action
+            and not pcall(SetOverrideBinding, taskBindingOwner, false, key, action) then
+            ClearTaskBindings()
+            return false
+        end
+    end
+    return true
+end
+
+function WowAgent.ReportQuestBindings()
+    for _, binding in ipairs(taskBindings) do
+        local key, action, label = unpack(binding)
+        local current = Public(GetBindingAction(key, true))
+        print("WowAgent：" .. key .. " " .. label .. " · "
+            .. (current == action and "已核对" or "当前 " .. ((current and current ~= "") and current or "未绑定")))
+    end
+end
+
+local function DescentBinding()
+    -- Codes in navigation metadata v2 are mirrored in travel_channel.py.
+    for _, key in ipairs({GetBindingKey("SITORSTAND")}) do
+        if GetBindingAction(key, true) == "SITORSTAND" then
+            if key == "UP" then return key, 1 end
+            if key == "DOWN" then return key, 2 end
+            local number = tonumber(key:match("^F(%d+)$"))
+            if number and number >= 1 and number <= 12 then return key, number + 2 end
+            if key:match("^[A-Z]$") and key ~= "F" and key ~= "S" and key ~= "W" then
+                return key, key:byte()
+            end
+        end
+    end
+end
+
+local function ClearSkyBindings()
+    if not skyButton then return end
+    if InCombatLockdown() then
+        skyButton:RegisterEvent("PLAYER_REGEN_ENABLED")
+    else
+        ClearOverrideBindings(skyButton)
+        skyButton:UnregisterEvent("PLAYER_REGEN_ENABLED")
+    end
+end
+
+-- Protocol v4 adds unused letter keys after the twelve function keys.
+local skyKeys = {}
+for number = 1, 12 do skyKeys[number] = "F" .. number end
+for key in ("ABCDEGHIJKLMNOPQRTUVXYZ"):gmatch(".") do skyKeys[#skyKeys + 1] = key end
+skyKeys[#skyKeys + 1] = "0"
+local skyClick = "CLICK WowAgentSkyDismount:LeftButton"
+
+local function EmptyAuxSlot(button)
+    local action = _G["ActionButton" .. button]
+    local slot = action and Public(action.action)
+    local hasAction = C_ActionBar and C_ActionBar.HasAction or HasAction
+    return slot and hasAction and Public(hasAction(slot)) == false
+end
+
+local function PrepareSkyBindings(plan, support)
+    if not plan.fly then return "没有已选的飞行坐骑。" end
+    if not SetOverrideBinding or not SetOverrideBindingClick or not ClearOverrideBindings
+        or not support.BoundSlot or not support.ReadAction or not support.ReadMacroBody or not GetMacroInfo then
+        return "客户端缺少临时键位接口。"
+    end
+    local kind, index = support.ReadAction(support.BoundSlot(8))
+    local name = kind == "macro" and index and Public(GetMacroInfo(index))
+    if not name then return "无法读取数字键 8 的下马宏名称。" end
+    local free, spare, spareButtons, existingPitch = {}, {}, {}, nil
+    -- Prefer function keys and reuse a supported native pitch binding when present.
+    for pass = 1, 2 do
+        local first, last = pass == 1 and 12 or #skyKeys, pass == 1 and 1 or 13
+        for code = first, last, -1 do
+            local binding = GetBindingAction(skyKeys[code], true)
+            if not secret(binding) then
+                if binding == nil or binding == "" then free[#free + 1] = code end
+                if binding == "PITCHDOWN" and not existingPitch then existingPitch = code end
+                local button = type(binding) == "string" and binding:match("^ACTIONBUTTON(1[01])$")
+                if button and EmptyAuxSlot(button) then
+                    spare[#spare + 1], spareButtons[code] = code, button
+                end
+            end
+        end
+    end
+    for _, code in ipairs(spare) do free[#free + 1] = code end
+    local pitch = existingPitch or free[1]
+    local dismount = free[existingPitch and 1 or 2]
+    if not pitch or not dismount then return "找不到可用的俯冲与下马键。" end
+    if not skyButton then
+        skyButton = CreateFrame("Button", "WowAgentSkyDismount", UIParent, "SecureActionButtonTemplate")
+        skyButton:RegisterForClicks("AnyDown", "AnyUp")
+        skyButton:SetScript("OnEvent", ClearSkyBindings)
+    end
+    skyButton:SetAttribute("type", "macro")
+    skyButton:SetAttribute("macro", name)
+    if not existingPitch then SetOverrideBinding(skyButton, false, skyKeys[pitch], "PITCHDOWN") end
+    SetOverrideBindingClick(skyButton, false, skyKeys[dismount], "WowAgentSkyDismount", "LeftButton")
+    plan.skyPitch, plan.skyDismount, plan.skyMacro = pitch, dismount, name
+    plan.skySpareButtons = spareButtons
+end
+
+local function SkyBindings()
+    local pitch, dismount = navigation.skyPitch, navigation.skyDismount
+    if not pitch then return end
+    for _, code in ipairs({pitch, dismount}) do
+        local button = navigation.skySpareButtons[code]
+        if button and not EmptyAuxSlot(button) then
+            return nil, nil, "备用键 " .. skyKeys[code] .. " 对应的动作格已占用。"
+        end
+    end
+    if Public(GetBindingAction(skyKeys[pitch], true)) ~= "PITCHDOWN" then
+        return nil, nil, "客户端未确认俯冲键 " .. skyKeys[pitch] .. "。"
+    end
+    local action = Public(GetBindingAction(skyKeys[dismount], true))
+    if type(action) ~= "string" or action:lower() ~= skyClick:lower() then
+        return nil, nil, "客户端未确认下马键 " .. skyKeys[dismount] .. "（" .. tostring(action) .. "）。"
+    end
+    local index = GetMacroIndexByName(navigation.skyMacro)
+    local body = index and index > 0 and WowAgent.LayoutSupport.ReadMacroBody(index, navigation.skyMacro)
+    if body ~= navigation.bodies[3] then
+        return nil, nil, "无法核对下马宏 " .. navigation.skyMacro .. " 的内容。"
+    end
+    return pitch, dismount
+end
+
+local function SkyActions()
+    local bar, support = C_ActionBar, WowAgent.LayoutSupport
+    if not bar or not bar.IsUsableAction or not support.BoundSlot or not support.ReadAction then return 0, 0 end
+    local ascent, halt = 0, 0
+    -- The default skyriding bar uses 1–5; prefer those over custom slots.
+    for key = 9, 1, -1 do
+        local slot = support.BoundSlot(key)
+        local kind, spell = support.ReadAction(slot)
+        if kind == "spell" and (spell == 372610 or spell == 403092) and Public(bar.IsUsableAction(slot)) == true then
+            local charges = bar.GetActionCharges and Public(bar.GetActionCharges(slot))
+            local count = charges and Public(charges.currentCharges)
+            local cooldown = bar.GetActionCooldown and Public(bar.GetActionCooldown(slot))
+            local duration = cooldown and Public(cooldown.duration)
+            if spell == 372610 and count and count > 0 then ascent = key end
+            if spell == 403092 and duration == 0 and (count == nil or count > 0) then halt = key end
+        end
+    end
+    return ascent, halt
+end
+
+local function NavigationKeys(sky)
+    local support = WowAgent.LayoutSupport
+    if not support or not support.ActionMatches then return false end
+    if not sky then
+        for kind, key in ipairs(travelKeys) do
+            local body = navigation.bodies[kind]
+            if body and not support.ActionMatches(key, nil, body) then
+                return false, "数字键 " .. key .. " 的寻路宏未通过核对，请重新准备。"
+            end
+        end
+    end
+    for _, binding in ipairs(movementBindings) do
+        local key, action, label = unpack(binding)
+        if GetBindingAction(key, true) ~= action then
+            return false, "请在游戏按键设置中把 " .. key .. " 绑定为「" .. label .. "」。"
+        end
+    end
+    return true
+end
+
+local function UpdateNavigation()
+    if not navigation then return end
+    local id, mapID = navigation.quest, C_Map.GetBestMapForUnit("player") or 0
+    local active, phase = C_QuestLog.IsOnQuest(id), 1
+    if active then phase = C_QuestLog.ReadyForTurnIn(id) and 3 or 2
+    elseif C_QuestLog.IsQuestFlaggedCompleted(id) then phase = 4 end
+    if phase == 4 and navigation.taskBindings then
+        ClearTaskBindings()
+        ClearSkyBindings()
+        navigation.taskBindings = nil
+        navigation.skyPitch, navigation.skyDismount, navigation.skyMacro = nil, nil, nil
+    end
+    local targetMap, gx, gy = QuestDestination(id, mapID)
+    local position = C_Map.GetPlayerMapPosition and C_Map.GetPlayerMapPosition(mapID, "player")
+    local px, py
+    if position then px, py = position:GetXY() end
+    px, py, gx, gy = Public(px), Public(py), Public(gx), Public(gy)
+    local height = UnitPosition and select(3, UnitPosition("player"))
+    height = Public(height)
+    local width, depth
+    if C_Map.GetMapWorldSize then width, depth = C_Map.GetMapWorldSize(mapID) end
+    width, depth = Public(width), Public(depth)
+    local _, descentCode = DescentBinding()
+    local pitch, dismount, skyError = SkyBindings()
+    if skyError then
+        ClearSkyBindings()
+        navigation.skyPitch, navigation.skyDismount, navigation.skyMacro = nil, nil, nil
+        print("WowAgent：驭空术键位已撤销。" .. skyError)
+    end
+    local flags, meta = 0, 4 + phase * 16 + (descentCode or 0) * 8192
+    local outdoors = IsOutdoors and IsOutdoors()
+    local flyable = IsFlyableArea and IsFlyableArea()
+    local fly, ground = Mount(navigation.fly), Mount(navigation.ground)
+    if outdoors then flags = flags + 1 end
+    if flyable then flags = flags + 2 end
+    if IsMounted() then flags = flags + 4 end
+    local sky, gliding
+    if C_PlayerInfo and C_PlayerInfo.GetGlidingInfo then
+        local activeGlide, canGlide = C_PlayerInfo.GetGlidingInfo()
+        gliding = Public(activeGlide)
+        sky = IsMounted() and (gliding or Public(canGlide))
+    end
+    if IsFlying() or gliding then flags = flags + 8 end
+    if IsFalling and IsFalling() then flags = flags + 16 end
+    if IsSwimming and IsSwimming() then flags = flags + 32 end
+    if UnitAffectingCombat and UnitAffectingCombat("player") then flags = flags + 64 end
+    if UnitCastingInfo and Public(UnitCastingInfo("player")) then flags = flags + 128 end
+    if (descentCode or pitch) and outdoors and flyable and fly and fly.usable and navigation.bodies[1] then
+        flags = flags + 256
+    end
+    if ground and ground.usable and navigation.bodies[2] then flags = flags + 512 end
+    if sky then flags = flags + 1024 end
+    if navigation.bodies[4] then flags = flags + 2048 end
+    if (not sky or pitch) and NavigationKeys(sky) then flags = flags + 4096 end
+    local ascent, halt = 0, 0
+    if sky and pitch then ascent, halt = SkyActions() end
+    writeSky(0, ascent + halt * 16 + (pitch or 0) * 256 + (dismount or 0) * 16384)
+    if Coordinate(gx) and Coordinate(gy) then meta = meta + 128 else gx, gy = 0, 0 end
+    if type(height) == "number" and height == height and height > -52428 and height < 52428 then
+        meta = meta + 256
+    else height = 0 end
+    if width and depth and width > 0 and depth > 0 and width < 104857 and depth < 104857 then
+        meta = meta + 512
+    else width, depth = 0, 0 end
+    if Coordinate(px) and Coordinate(py) then meta = meta + 1024 else px, py = 0, 0 end
+    if fly and fly.active then meta = meta + 2048 end
+    if GetBindingAction("F", true) == "INTERACTTARGET" then meta = meta + 4096 end
+    navSequence = (navSequence + 1) % 128
+    writeTask(1, InteractionFlags(navigation, phase, sky) + navSequence * 128)
+    local values = {id, targetMap or 0, math.floor(gx * 1048575 + .5), math.floor(gy * 1048575 + .5),
+                    flags + navSequence * 8192, math.floor(height * 10 + 524288 + .5),
+                    math.floor(width * 10 + .5), math.floor(depth * 10 + .5), meta,
+                    math.floor(px * 1048575 + .5), math.floor(py * 1048575 + .5), mapID}
+    for row, value in ipairs(values) do navRows[row](row + 3, value >= 0 and value <= 1048575 and value or 0) end
+end
+
+function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, automatic, npc, useItem)
+    if InCombatLockdown() or IsMounted() then return print("WowAgent：请下马脱战后准备寻路。") end
+    local function CanPrepare()
+        if not id or id < 1 or id > 1048575 then return false end
+        if C_QuestLog.IsOnQuest(id) then return true end
+        if not automatic then return false end
+        if panel == "QUEST_DETAIL" and GetQuestID() == id then return true end
+        for _, offered in ipairs(DialogueQuests()) do
+            if offered.id == id and offered.phase == OFFER then return true end
+        end
+        return false
+    end
+    if not CanPrepare() then return print("WowAgent：请选择已接任务，或先打开对应的接任务对话。") end
+    local support = WowAgent.LayoutSupport
+    if not support or not support.SetupAction then return print("WowAgent：动作配置模块尚未加载。") end
+    local plan = {quest = id, fly = ChooseMount("fly", fly), ground = ChooseMount("ground", ground), bodies = {},
+        automatic = automatic, npc = npc ~= "" and npc or nil, useItem = useItem}
+    if automatic then
+        if not plan.npc then return print("WowAgent：请填写交付 NPC 的准确名字。") end
+        plan.item = QuestItemID(id)
+        if useItem and not plan.item then return print("WowAgent：任务日志未提供可绑定的专用道具。") end
+    end
+    ClearSkyBindings()
+    ClearTaskBindings()
+    navigation = plan
+    navFrame:Hide()
+    local actions = {}
+    for kind, key in ipairs(travelKeys) do
+        local name, body = WowAgent.TravelMacro(kind)
+        if name then
+            actions[#actions + 1] = {kind = "travel", id = kind, key = key, body = body}
+        end
+    end
+    if automatic then
+        actions[#actions + 1] = {kind = "assist", key = 1}
+        actions[#actions + 1] = {kind = "prepared_dialogue", key = 9}
+    else
+        actions[#actions + 1] = {kind = "quest", id = id, key = 9}
+        actions[#actions + 1] = {kind = "assist", key = 1}
+    end
+    local function Publish(skyError)
+        if navigation ~= plan then return end
+        if InCombatLockdown() or IsMounted() or not CanPrepare() then
+            WowAgent.StopQuestNavigation()
+            return print("WowAgent：准备已停止，请下马脱战并确认任务仍在日志中后重试。")
+        end
+        local pitch, dismount, verifyError = SkyBindings()
+        if not pitch then
+            ClearSkyBindings()
+            plan.skyPitch, plan.skyDismount, plan.skyMacro = nil, nil, nil
+            print("WowAgent：驭空术暂不可用。" .. (skyError or verifyError or "临时键位核对失败。"))
+        end
+        if C_QuestLog.AddQuestWatch and C_QuestLog.IsOnQuest(id) then C_QuestLog.AddQuestWatch(id) end
+        if automatic and (InteractionFlags(plan, 2, false) % 2 ~= 1
+                or (plan.item and not TaskClickMatches("J", "WowAgentTaskItem"))) then
+            WowAgent.StopQuestNavigation()
+            return print("WowAgent：互动、选敌、拾取或任务对话核对失败。")
+        end
+        WowAgent.QuestCommand("track " .. id)
+        UpdateNavigation()
+        navFrame:Show()
+        local mapID = C_Map.GetBestMapForUnit("player")
+        local targetMap, x, y = QuestDestination(id, mapID)
+        local descent = DescentBinding()
+        if pitch then
+            print("WowAgent：寻路已准备，驭空术俯冲 " .. skyKeys[pitch] .. "，下马 " .. skyKeys[dismount] .. "。")
+        elseif descent then
+            print("WowAgent：寻路已准备，下降键 " .. descent .. "。优先飞行，其次坐骑，最后步行。")
+        else
+            print("WowAgent：寻路已准备。未找到可用的下降键，本次可骑乘或步行。")
+        end
+        if targetMap and x and y then
+            print(string.format("WowAgent：任务目标地图 %d，坐标 %.2f, %.2f。", targetMap, x * 100, y * 100))
+        else print("WowAgent：任务目标坐标尚未返回，脚本会等待坐标。") end
+        if automatic then
+            print("WowAgent：交付对象 " .. plan.npc .. "。互动和自动拾取已启用。"
+                .. (plan.item and ("J 已核对任务道具 " .. plan.item .. "。") or "当前任务没有专用道具键。"))
+            print("WowAgent：一键准备完成。到 macOS 菜单栏「WoW 键鼠」选择「授权并运行已准备任务」。")
+        end
+    end
+    local function Prepare(index, retries)
+        if navigation ~= plan then return end
+        if InCombatLockdown() or IsMounted() or not CanPrepare() then
+            WowAgent.StopQuestNavigation()
+            return print("WowAgent：准备已停止，请下马脱战并确认任务仍在日志中后重试。")
+        end
+        local action = actions[index]
+        if action then
+            local ok, reason
+            if action.kind == "prepared_dialogue" then
+                ok, reason = SetupTaskDialogue(support, plan)
+            else
+                ok, reason = support.SetupAction(action.kind, action.id, action.key)
+            end
+            if ok then
+                if action.body then plan.bodies[action.id] = action.body end
+                C_Timer.After(.4, function() Prepare(index + 1) end)
+            elseif reason == "macro_pending" and (retries or 0) < 2 then
+                C_Timer.After(.8, function() Prepare(index, (retries or 0) + 1) end)
+            else
+                print("WowAgent：寻路准备停在数字键 " .. action.key .. "，请查看上一条提示。")
+                WowAgent.StopQuestNavigation()
+            end
+            return
+        end
+        local verified, message = NavigationKeys()
+        if not verified then
+            WowAgent.StopQuestNavigation()
+            return print("WowAgent：" .. (message or "寻路键位未通过核对。"))
+        end
+        local skyError = PrepareSkyBindings(plan, support)
+        C_Timer.After(.25, function() Publish(skyError) end)
+    end
+    print("WowAgent：正在逐个核对寻路键位，请等待准备结果。")
+    if not useTaskBindings then return Prepare(1) end
+    if not ApplyTaskBindings() then
+        WowAgent.StopQuestNavigation()
+        return print("WowAgent：无法启用临时任务键位。")
+    end
+    plan.taskBindings = true
+    if automatic and (not GameTaskOptions(true) or not SetupTaskClicks(plan)) then
+        WowAgent.StopQuestNavigation()
+        return print("WowAgent：无法启用游戏互动、自动拾取或任务辅助键位。")
+    end
+    C_Timer.After(.25, function()
+        if navigation ~= plan then return end
+        for _, binding in ipairs(taskBindings) do
+            local key, action, label = unpack(binding)
+            if Public(GetBindingAction(key, true)) ~= action then
+                WowAgent.StopQuestNavigation()
+                return print("WowAgent：临时键位未通过核对，" .. key .. " 应为「" .. label .. "」。")
+            end
+        end
+        print("WowAgent：临时任务键位已核对，F 与目标互动，Tab 选敌。")
+        Prepare(1)
+    end)
+end
+
+function WowAgent.StopQuestNavigation()
+    navigation = nil
+    ClearTaskBindings()
+    ClearSkyBindings()
+    if navFrame then navFrame:Hide() end
+end
+
+navFrame = CreateFrame("Frame", nil, UIParent)
+navFrame:SetSize(142, 224)
+navFrame:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 144, 0)
+navFrame:SetFrameStrata("TOOLTIP")
+writeTask = WowAgent.NewPixelRow(navFrame, 0)
+writeSky = WowAgent.NewPixelRow(navFrame, 16)
+for row = 1, 12 do navRows[row] = WowAgent.NewPixelRow(navFrame, (row + 1) * 16) end
+navFrame:SetScript("OnUpdate", function(_, dt)
+    navElapsed = navElapsed + dt
+    if navElapsed < .20 then return end
+    navElapsed = 0
+    UpdateNavigation()
+end)
+navFrame:Hide()

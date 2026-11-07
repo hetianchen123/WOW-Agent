@@ -46,8 +46,8 @@ class GridRouter:
                     cells.append(current)
                     current = previous[current]
                 cells.reverse()
-                return [((x + .5) * self.cell_size / self.width,
-                         (y + .5) * self.cell_size / self.height) for x, y in cells[:-1]] + [destination]
+                return [(min(1.0, (x + .5) * self.cell_size / self.width),
+                         min(1.0, (y + .5) * self.cell_size / self.height)) for x, y in cells[:-1]] + [destination]
             x, y = current
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
                 neighbor = x + dx, y + dy
