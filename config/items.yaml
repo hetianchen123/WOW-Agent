@@ -1,0 +1,6 @@
+# 白名单：插件计数（BAG 消息）与售卖关注。itemID -> {name, reserve(保留数量)}
+# 示例（按你实际钓获/采集的物品替换，游戏内把鼠标悬停在物品上可看 itemID，
+# 或用 Auctionator 悬停提示）：
+# 173032:
+#   name: 示例鱼
+#   reserve: 0

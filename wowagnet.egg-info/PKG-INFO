@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: wowagnet
+Version: 0.1.0
+Summary: WoW retail gathering/fishing/selling automation: addon pixel channel + vision + input injection
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.26
+Requires-Dist: opencv-python>=4.9
+Requires-Dist: mss>=9.0
+Requires-Dist: pynput>=1.7.6
+Requires-Dist: sounddevice>=0.4.6
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: requests>=2.31
+Requires-Dist: psutil>=5.9

@@ -1,0 +1,60 @@
+# WowAgent 主配置 —— 由 `python -m bot.cli init-config` 生成
+# 所有坐标都是“截图像素坐标”，用 `python -m bot.cli calibrate` 采集。
+game_version: "12.x"
+dry_run: false          # true = 只感知+决策，不注入任何输入
+log_level: INFO
+game_process_names: ["World of Warcraft"]
+
+channel:
+  x: -1821              # 像素通道色条左上角（游戏内 /wagent unlock 拖动后校准）
+  y: 990
+  calibrated: true
+
+capture:
+  monitor: 2
+  control_fps: 15
+
+audio:
+  enabled: true
+  device: null          # macOS 需要装 BlackHole 并填设备号；probe-audio 可查
+  bite_threshold: 6.0
+
+input:
+  backend: auto         # auto/mac/win/mock
+  mouse_turn_gain: 900
+  invert_turn: false    # 游戏内转向方向反了就改 true
+  estop_hotkey: "<ctrl>+<alt>+<f12>"
+
+navigation:
+  facing_convention: ccw_west   # 转向镜像时改 cw_east
+
+fishing:
+  key_cast: "1"
+  key_interact: "f"
+  bite_window_min_s: 3.0
+  bite_window_max_s: 30.0
+  bobber_roi: [0, 0, 0, 0]     # 校准：鱼漂落水区域
+
+gathering:
+  minimap_roi: [0, 0, 0, 0]    # 校准：整个小地图
+  yards_per_px: 0.55
+  node_click_offset: [0, 40]
+  key_descend: "x"
+
+selling:
+  key_hearthstone: "2"
+  key_interact: "f"
+  route_to_ah: hub_to_ah
+  route_to_mail: ah_to_mail
+  route_return: hub_to_spot
+
+rhythm:
+  work_min_s: 5400
+  work_max_s: 9000
+  rest_min_s: 600
+  rest_max_s: 1800
+  maintenance_windows: [["Thu 05:00", "Thu 09:00"]]
+
+notify:
+  provider: none      # none | bark | serverchan
+  key: ""

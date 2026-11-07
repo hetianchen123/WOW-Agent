@@ -1,0 +1,6 @@
+# 采集/回城路线：record-route 录制生成，也可手写。points 为地图坐标 [x, y]。
+name: ah_to_mail
+ui_map_id: 0
+mode: fly            # fly | ground
+arrival_radius: null # null = 按相邻点中位距离自动
+points: []

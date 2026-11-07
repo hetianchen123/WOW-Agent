@@ -1,0 +1,40 @@
+[project]
+name = "wowagnet"
+version = "0.1.0"
+description = "WoW retail gathering/fishing/selling automation: addon pixel channel + vision + input injection"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "mss>=9.0",
+    "pynput>=1.7.6",
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+    "sounddevice>=0.4.6",
+    "PyYAML>=6.0",
+    "requests>=2.31",
+    "psutil>=5.9",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "bot",
+    "bot.core",
+    "bot.perception",
+    "bot.control",
+    "bot.modules",
+    "bot.data",
+    "bot.decision",
+    "bot.ops",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: synthetic end-to-end integration tests"]
+addopts = "-q"

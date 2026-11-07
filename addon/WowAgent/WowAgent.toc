@@ -1,0 +1,17 @@
+## Interface: 120000, 120105, 38002, 16001
+## Title: WowAgent
+## Notes: WowAgent 游戏内任务、战斗准备和动作栏面板
+## Author: wowagnet
+## Version: 0.2.7
+## SavedVariables: WowAgentDB
+## IconTexture: Interface\Icons\Inv_Misc_Note_01
+## AddonCompartmentFunc: WowAgent_TogglePanel
+
+Channel.lua
+RetailTalents.lua
+Panel.lua
+State.lua
+Quest.lua
+Combat.lua
+ActionLayout.lua
+Debug.lua
