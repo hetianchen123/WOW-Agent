@@ -1,4 +1,5 @@
 import json
+import math
 from contextlib import closing
 from dataclasses import replace
 
@@ -34,6 +35,31 @@ def test_fight_requires_fresh_telemetry_and_observes_death():
     assert fight.step(.40, replace(sample, sequence=3)) == ("waiting", None)
     assert fight.step(.50, replace(sample, sequence=4, target_dead=True)) == ("target_defeated", None)
     assert fight.presses == 1
+
+
+def test_facing_recovery_turns_on_new_error_and_retries_same_target():
+    fight = Fight(12345)
+    sample = CombatSample(8, 1, 1, 70783, 63, 80, 87, 12345, False, True, False, 5, 8, 1,
+                          facing=0, facing_error=0, turn_verified=True)
+    assert fight.step(0, sample) == ("waiting", None)
+    assert fight.step(.2, replace(sample, sequence=2)) == ("action", "5")
+    error = replace(sample, sequence=3, facing_error=1)
+    assert fight.step(.4, error) == ("turn", "left")
+    assert fight.step(.5, error) == ("waiting", None)
+    assert fight.step(.7, replace(error, sequence=4, facing=math.pi / 2)) == ("turn", "left")
+    assert fight.step(1.2, replace(error, sequence=5, facing=math.pi)) == ("action", "5")
+    assert fight.step(1.4, replace(error, sequence=6, facing_error=2, facing=math.pi)) == ("turn", "right")
+    assert fight.step(1.6, replace(error, sequence=7, target_id=23456)) == ("target_missing_or_changed", None)
+    assert fight.presses == 2
+
+
+def test_facing_recovery_does_not_turn_with_unverified_keys():
+    fight = Fight(12345)
+    sample = CombatSample(8, 1, 1, 70783, 63, 80, 87, 12345, False, True, False, 5, 8, 1,
+                          facing=0, facing_error=0)
+    assert fight.step(0, sample) == ("waiting", None)
+    assert fight.step(.2, replace(sample, sequence=2)) == ("action", "5")
+    assert fight.step(.4, replace(sample, sequence=3, facing_error=1)) == ("facing_feedback_unavailable", None)
 
 
 @pytest.mark.parametrize(("change", "expected"), [

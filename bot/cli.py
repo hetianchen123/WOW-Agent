@@ -39,7 +39,7 @@ from .ops.notify import Notifier
 from .ops.watchdog import Watchdog
 from .perception import channel_spec as spec
 from .perception.audio import AudioMonitor
-from .perception.capture import ScreenCapture
+from .perception.capture import CaptureError, ScreenCapture
 from .perception.channel import ChannelReader
 
 log = logging.getLogger("cli")
@@ -378,6 +378,32 @@ def cmd_record_route(args: argparse.Namespace) -> int:
 
 
 # -------------------------------------------------------------------- run ----
+def _prepared_channel_location(capture, previous, timeout):
+    from .modules.quest import game_is_frontmost, wait_for_game
+    from .perception.calibration import ChannelNotFound, startup_location
+
+    deadline = time.monotonic() + timeout
+    reported_retry = False
+    while True:
+        if not game_is_frontmost():
+            wait_for_game(activate=False, timeout=max(0, deadline - time.monotonic()))
+        remaining = deadline - time.monotonic()
+        try:
+            location = startup_location(capture, previous, scan_duration=min(5, max(0, remaining)))
+        except ChannelNotFound:
+            if time.monotonic() >= deadline:
+                raise
+            if not reported_retry:
+                log.info("主色条暂未通过核对，将继续扫描。请保持魔兽窗口可见。")
+                reported_retry = True
+            continue
+        if game_is_frontmost():
+            return location
+        if time.monotonic() >= deadline:
+            raise ValueError("魔兽未保持在前台，无法确认任务色条。")
+        previous = location
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from .control.input_helper import has_helper_socket, in_controller_app
 
@@ -413,11 +439,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         if in_controller_app() and not (cfg.dry_run or args.mock_input or cfg.input.backend == "mock"):
             if not has_helper_socket():
                 raise ValueError("请先打开 WowAgent Keyboard Mouse.app")
-            from .modules.quest import wait_for_game
+            from .modules.quest import PREPARED_FOCUS_WAIT_S, wait_for_game
 
-            wait_for_game(activate=not getattr(args, "require_prepared", False))
+            if getattr(args, "require_prepared", False):
+                from .perception.calibration import Location
+
+                previous = Location(cfg.capture.monitor, cfg.channel.x, cfg.channel.y)
+                log.info("核对当前游戏窗口的色条位置，最多等待 %s 秒。", PREPARED_FOCUS_WAIT_S)
+                capture = ScreenCapture(cfg.capture)
+                location = _prepared_channel_location(capture, previous, PREPARED_FOCUS_WAIT_S)
+                cfg.capture.monitor = location.monitor
+                cfg.channel.x, cfg.channel.y = location.x, location.y
+                cfg.channel.calibrated = True
+                if location != previous:
+                    log.info("色条位置已自动校正：显示器 %s，坐标 (%s, %s)。",
+                             location.monitor, location.x, location.y)
+            else:
+                wait_for_game()
         ctx, estop = _build_runtime(cfg, dry_run=cfg.dry_run or args.mock_input, want_audio=not quest_mode)
-    except (ValueError, OSError) as exc:
+    except (CaptureError, ValueError, OSError) as exc:
         log.error("无法启动：%s", exc)
         return 2
     caf = _maybe_caffeinate(cfg)
@@ -451,7 +491,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                                              args.require_prepared)
             else:
                 runner = QuestModule(ctx, *quest_module_args, planner=planner)
-            outcome = runner.run(args.max_duration)
+            max_duration = args.max_duration
+            if max_duration is None:
+                max_duration = 3600.0 if args.require_prepared and not args.travel_only else 600.0
+            outcome = runner.run(max_duration)
         else:
             mod = {"fisher": FisherModule, "gatherer": GathererModule, "seller": SellerModule}[args.module]
             if args.module == "gatherer" and args.route:
@@ -466,17 +509,43 @@ def cmd_run(args: argparse.Namespace) -> int:
         if getattr(args, "require_prepared", False):
             explanations = {
                 "stopped:quest_automatic_not_prepared": "请在插件里点「一键准备自动任务」，等核对成功后再启动。",
+                "stopped:quest_mount_button_unavailable": "未核对到原生驭空坐骑图标。请关闭插件面板和地图，并确认动作栏上有原生驭空坐骑图标。",
+                "stopped:quest_mount_not_confirmed": "已尝试使用原生驭空坐骑，游戏尚未确认骑乘任务进度。请查看游戏内提示及任务运行日志。",
+                "stopped:game_not_frontmost": "魔兽未保持前台，脚本已停止。点击游戏窗口后让游戏保持在前台。",
+                "stopped:quest_navigation_not_prepared": "已找到主色条，但未读取到寻路色条。请在插件里点「一键准备自动任务」，等准备完成后再启动。",
+                "stopped:quest_navigation_channel_stale": "寻路色条停止更新。请保持游戏和色条可见，再准备并启动任务。",
                 "stopped:quest_automatic_preparation_lost": "运行中失去了已经核对的任务键位或游戏设置。",
                 "stopped:quest_turn_in_npc_not_in_interact_range": "游戏没有识别到范围内的交付 NPC，请核对名字和位置。",
+                "stopped:quest_pickup_npc_not_found": "已搜索任务起点附近，仍未确认可交互的接取 NPC。",
+                "stopped:quest_pickup_npc_selection_unconfirmed": "已发现接取 NPC 并尝试选中，但游戏未确认目标，未发出互动键。",
                 "stopped:quest_turn_in_npc_lost": "靠近时失去了已确认的交付 NPC，已停止移动。",
                 "stopped:quest_turn_in_approach_blocked": "尝试靠近 NPC 时，角色位置没有变化。请检查脚下或前方是否有障碍。",
                 "stopped:quest_turn_in_approach_exhausted": "已向交付 NPC 靠近三次，仍未打开任务对话。",
+                "stopped:quest_turn_in_range_addon_required": "请重载新版 WowAgent 插件并重新准备任务，以启用 NPC 距离检查。",
+                "stopped:quest_turn_in_range_unknown": "游戏没有返回可确认的 NPC 距离，未尝试互动。",
+                "stopped:quest_turn_in_outside_five_yards": "已尝试靠近，仍在交付 NPC 的 5 码范围外。",
                 "stopped:quest_reward_choice_required": "游戏要求选择奖励，请在任务对话中选择。",
-                "stopped:quest_objective_profile_required": "当前任务目标还没有可自动执行的配置。",
+                "stopped:quest_objective_profile_required": "任务已在日志中，当前目标无法匹配已实现的动作。请查看游戏内目标后再继续。",
+                "stopped:quest_object_not_found": "已搜索任务标记附近，游戏没有返回可确认的任务物件。",
+                "stopped:quest_defense_preparation_unavailable": "遇袭后无法核对任务键位和色条，未发送战斗按键。",
+                "stopped:quest_defense_binding_or_telemetry_unavailable": "遇袭后未能确认落地状态、战斗色条或输出键，请查看任务日志。",
+                "stopped:quest_defense_timeout": "自卫超时，仍未脱战。请查看任务运行日志。",
+                "stopped:quest_round_state_changed": "本轮任务的接取或可交付状态发生变化，请在游戏中核对任务日志。",
+                "stopped:quest_round_advance_timeout": "游戏未确认切换到本轮的下一项，请查看任务日志。",
+                "stopped:quest_round_unexpected_switch": "游戏中的追踪任务或阶段已改变，请重新准备附近任务。",
+                "stopped:quest_destination_unavailable": "游戏没有返回当前目标或交付点的可用坐标。",
                 "stopped:quest_offer_not_open": "需要从当前任务的接取对话开始。",
+                "stopped:quest_accept_not_confirmed": "已经尝试接取，但任务日志未确认该任务。",
+                "stopped:quest_followup_not_confirmed": "前一任务已交付，但插件没有确认切换到后续任务。",
                 "stopped:quest_startlux_timeout": "本地 StartLux 推理超时，任务在发送按键前停止。",
                 "stopped:quest_startlux_unavailable": "本地 StartLux 请求失败，请查看本次任务日志中的错误。",
             }
+            for prefix in ("quest_combat_", "quest_defense_"):
+                explanations.update({
+                    f"stopped:{prefix}facing_feedback_unavailable": "游戏报告朝向错误，但未能核对转向键或角色朝向。",
+                    f"stopped:{prefix}facing_turn_timeout": "转向后未在时限内确认角色朝向变化。",
+                    f"stopped:{prefix}facing_unconfirmed": "尝试多个朝向后，游戏仍报告朝向错误。",
+                })
             if outcome.status in explanations:
                 print(explanations[outcome.status])
             return 0 if outcome.status == "completed" else 3
@@ -625,7 +694,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     p = sub.add_parser("navigate-quest", help="按原生任务目标坐标寻路并执行已准备任务")
     p.add_argument("--startlux-port", type=int, default=8090)
-    p.add_argument("--max-duration", type=float, default=600.0)
+    p.add_argument("--max-duration", type=float, help="最长运行秒数，自动任务默认 3600，其余默认 600")
     p.add_argument("--travel-only", action="store_true", help="只验证寻路，抵达落地后结束")
     p.add_argument("--require-prepared", action="store_true", help="仅运行插件内一键准备并核对的任务")
     p.add_argument("--dry-run", action="store_true")

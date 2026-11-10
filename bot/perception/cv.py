@@ -74,6 +74,60 @@ def absdiff_score(a_rgb: np.ndarray, b_rgb: np.ndarray) -> float:
     )
 
 
+def pumpkin_probe_points(
+    frame_rgb: np.ndarray, excluded: Iterable[tuple[float, float, float, float]] = (),
+) -> tuple[tuple[float, float], ...]:
+    """Find red-orange shapes to hover over. The game still identifies the object."""
+    if frame_rgb.size == 0:
+        return ()
+    height, width = frame_rgb.shape[:2]
+    width = round(width * 720 / height)
+    height = 720
+    frame = cv2.resize(frame_rgb, (width, height), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+    mask = cv2.inRange(hsv, (0, 65, 48), (19, 235, 240))
+    mask |= cv2.inRange(hsv, (165, 65, 48), (179, 235, 240))
+    for left, top, right, bottom in excluded:
+        x0, x1 = max(0, round(left * width)), min(width, round(right * width))
+        y0, y1 = max(0, round(top * height)), min(height, round(bottom * height))
+        if x0 < x1 and y0 < y1:
+            mask[y0:y1, x0:x1] = 0
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 5))
+    components = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(components)
+    distances = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+    candidates = []
+    for index, (x, y, w, h, area) in enumerate(stats[1:], 1):
+        if not (9 <= w <= 90 and 7 <= h <= 75 and .55 <= w / h <= 2.8
+                and area >= max(70, .33 * w * h)):
+            continue
+        region = np.s_[y:y + h, x:x + w]
+        core = np.where(labels[region] == index, distances[region], 0)
+        py, px = np.unravel_index(np.argmax(core), core.shape)
+        candidates.append((int(area), (float(x + px) / width, float(y + py) / height)))
+    return tuple(point for _, point in sorted(candidates, reverse=True)[:10])
+
+
+def minimap_quest_dots(frame_rgb: np.ndarray) -> tuple[tuple[float, float], ...]:
+    """Gold dots inside the minimap, expressed as fractions of its radius."""
+    if frame_rgb.size == 0:
+        return ()
+    size = 192
+    frame = cv2.resize(frame_rgb, (size, size), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+    gold = cv2.inRange(hsv, (20, 145, 182), (35, 255, 255))
+    _, _, stats, centers = cv2.connectedComponentsWithStats(gold)
+    radius = size / 2
+    dots = []
+    for (_, _, width, height, area), (x, y) in zip(stats[1:], centers[1:]):
+        dx, dy = float(x) / radius - 1, float(y) / radius - 1
+        if (3 <= width <= 12 and 3 <= height <= 12 and 8 <= area <= 100
+                and .5 <= width / height <= 2 and dx * dx + dy * dy <= .80 ** 2):
+            dots.append((dx, dy))
+    return tuple(dots)
+
+
 def save_snapshot(img_rgb: np.ndarray, tag: str, directory: Path = SCREENSHOT_DIR) -> Optional[Path]:
     try:
         directory.mkdir(parents=True, exist_ok=True)

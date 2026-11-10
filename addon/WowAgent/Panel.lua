@@ -626,7 +626,7 @@ local function BuildPanel()
     talents:SetScript("OnShow", refreshTalents)
 
     local navigation = NewTab(5, "任务寻路")
-    Label(navigation, "选择已接任务，或先打开 NPC 的接任务对话。", 0, 7)
+    Label(navigation, "继续当前对话、执行已接任务，或寻找同地图的附近任务。", 0, 7)
     Label(navigation, "任务", 0, 45)
     local npc, itemMode
     local navQuest = NamedSelect(navigation, "navQuest", 104, 40, 385, Quests, function()
@@ -694,16 +694,33 @@ local function BuildPanel()
     end)
     Button(navigation, "一键准备自动任务", 444, 158, 150, function()
         if WowAgent.PrepareQuestNavigation then
-            local quest = navQuest()
-            if profile and profile.navNPCQuest and profile.navNPCQuest ~= quest then
-                return WowAgent.Report("WowAgent：任务已变化，请在下拉列表重新选任务，再填写交付 NPC。")
+            local open = WowAgent.OpenQuestOfferID and WowAgent.OpenQuestOfferID()
+            local resume = WowAgent.GetQuestRoundResumeID and WowAgent.GetQuestRoundResumeID()
+            local quest = open and tostring(open) or resume and tostring(resume) or navQuest()
+            if not (tonumber(quest) and C_QuestLog.IsOnQuest(tonumber(quest)))
+                and not (open and tonumber(quest) == open) then
+                local active = WowAgent.GetActiveSupportedQuestID()
+                if active then quest = tostring(active) end
             end
-            if profile and quest and Text(npc) ~= "" then
+            local useSavedOptions = profile and (profile.navNPCQuest == quest
+                or (not profile.navNPCQuest and not open))
+            if useSavedOptions and quest and Text(npc) ~= "" then
                 profile.navQuest, profile.navNPCQuest = quest, quest
             end
             WowAgent.PrepareQuestNavigation(tonumber(quest), tonumber((fly())), tonumber((ground())),
-                true, true, Text(npc), tonumber((itemMode())) == 1)
+                true, true, useSavedOptions and Text(npc) or nil,
+                useSavedOptions and tonumber((itemMode())) == 1, true)
         end
+    end)
+    Button(navigation, "准备附近任务", 416, 80, 150, function()
+        local open = WowAgent.OpenQuestOfferID and WowAgent.OpenQuestOfferID()
+        local id = open or (WowAgent.GetNearbyQuestID and WowAgent.GetNearbyQuestID())
+            or (WowAgent.GetQuestRoundResumeID and WowAgent.GetQuestRoundResumeID())
+            or (WowAgent.GetNearbyActiveQuestID and WowAgent.GetNearbyActiveQuestID())
+        if not id then
+            return WowAgent.Report("WowAgent：当前没有查到附近可自动执行的任务。")
+        end
+        WowAgent.PrepareQuestNavigation(id, tonumber((fly())), tonumber((ground())), true, true, nil, nil, true)
     end)
     Label(navigation, "交付 NPC", 0, 246)
     npc = Field(navigation, "navNPC", 104, 241, 140)

@@ -1,6 +1,6 @@
 """Precise quest destination and travel capabilities beside the main pixel strip."""
 from dataclasses import dataclass
-from enum import IntFlag
+from enum import IntEnum, IntFlag
 
 import numpy as np
 
@@ -40,6 +40,32 @@ class TaskFlags(IntFlag):
     ITEM_BOUND = 16
     NPC_CONFIGURED = 32
     USE_ITEM = 64
+    NPC_WITHIN_5_YARDS = 128
+    NPC_RANGE_KNOWN = 256
+    MOUNT_TUTORIAL = 512
+
+
+class ObjectiveAction(IntEnum):
+    NONE = 0
+    COMBAT = 1
+    INTERACT = 2
+    ARRIVE = 3
+
+
+class RoundStage(IntEnum):
+    NONE = 0
+    PICKUP = 1
+    OBJECTIVES = 2
+    TURN_IN = 3
+    DONE = 4
+
+
+@dataclass(frozen=True)
+class MinimapGeometry:
+    center: tuple[float, float]
+    size: tuple[float, float]
+    radius: int
+    rotates: bool
 
 
 @dataclass(frozen=True)
@@ -62,17 +88,32 @@ class TravelSample:
     sky_ascent_key: str | None = None
     sky_halt_key: str | None = None
     task: TaskFlags = TaskFlags(0)
+    npc_range_supported: bool = False
+    mount_button: tuple[float, float] | None = None
+    mount_button_key: str | None = None
+    objective_action: ObjectiveAction = ObjectiveAction.NONE
+    objective_target: int = 0
+    objective_cursor: tuple[float, float] | None = None
+    round_stage: RoundStage = RoundStage.NONE
+    round_advance: bool = False
+    round_blocked: bool = False
+    round_immediate: bool = False
+    objective_pin: bool = False
+    minimap: MinimapGeometry | None = None
+    corpse_lootable: bool | None = None
+    fetch_ready: bool = False
+    precise_object: bool = False
 
 
 def travel_region(x: int, y: int) -> tuple[int, int, int, int]:
-    height = (TRAVEL_ROWS + 2) * spec.REGION_H
+    height = (TRAVEL_ROWS + 7) * spec.REGION_H
     return x + TRAVEL_OFFSET_X, y - height, spec.REGION_W, height
 
 
 def decode_travel(image: np.ndarray) -> TravelSample | None:
     row_height = spec.REGION_H
     if image.shape[1:] != (spec.REGION_W, 3) or image.shape[0] not in {
-        (TRAVEL_ROWS + extra) * row_height for extra in range(3)
+        (TRAVEL_ROWS + extra) * row_height for extra in range(8)
     }:
         return None
     offset = image.shape[0] - TRAVEL_ROWS * row_height
@@ -84,7 +125,7 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         values.append(frame[1])
     quest, goal_map, gx, gy, status, height, width, depth, meta, px, py, map_id = values
     version = meta & 15
-    if version not in (1, 2, 3, 4):
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
         return None
     flags = TravelFlags(status & 8191)
     if version == 1:
@@ -113,10 +154,63 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         return None
     task = TaskFlags(0)
     sequence = status >> 13
-    if offset == 2 * row_height:
-        extra = spec.decode_frame(spec.sample_nibbles(image, 0, 0))
-        if extra and extra[0] == 1 and extra[1] >> 7 == sequence:
-            task = TaskFlags(extra[1] & 127)
+    range_supported = False
+    mount_button = None
+    mount_button_key = None
+    action_code = 0
+    if offset >= 2 * row_height:
+        extra = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 2 * row_height))
+        task_bits = 10 if version >= 6 else (9 if version == 5 else 7)
+        packed_sequence = extra[1] >> task_bits if extra else -1
+        if version >= 7:
+            code, packed_sequence = divmod(packed_sequence, 128)
+        if extra and extra[0] == 1 and packed_sequence == sequence:
+            task = TaskFlags(extra[1] & ((1 << task_bits) - 1))
+            range_supported = version >= 5
+            action_code = code if version >= 7 else 0
+    action = ObjectiveAction.NONE
+    objective_pin = False
+    target = 0
+    cursor = None
+    if version >= 7 and offset >= 3 * row_height:
+        row = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 3 * row_height))
+        if row and row[0] == 2:
+            value = row[1]
+            point = ((value >> 10) / 1023, (value & 1023) / 1023) if value else None
+            if task & TaskFlags.MOUNT_TUTORIAL:
+                mount_button = point
+                mount_button_key = str(action_code) if point and 2 <= action_code <= 4 else None
+            elif version >= 8 and phase == QuestState.ACTIVE and 1 <= action_code <= 4:
+                objective_pin = action_code == 4
+                action = ObjectiveAction.INTERACT if objective_pin else ObjectiveAction(action_code)
+                target = value if action == ObjectiveAction.COMBAT else 0
+                cursor = point if action == ObjectiveAction.INTERACT else None
+    round_stage, round_advance, round_blocked, round_immediate = RoundStage.NONE, False, False, False
+    corpse_lootable, fetch_ready, precise_object = None, False, False
+    if version == 9:
+        if offset < 4 * row_height:
+            return None
+        row = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 4 * row_height))
+        if row is None or row[0] != 3 or ((row[1] >> 6) & 127) != sequence or (row[1] & 7) > RoundStage.DONE:
+            return None
+        round_stage = RoundStage(row[1] & 7)
+        round_advance, round_blocked = bool(row[1] & 8), bool(row[1] & 16)
+        round_immediate = bool(row[1] & 32)
+        if row[1] & 8192:
+            corpse_lootable = bool(row[1] & 16384)
+            fetch_ready = corpse_lootable and bool(row[1] & 32768)
+        precise_object = bool(row[1] & 65536) and action == ObjectiveAction.INTERACT
+    minimap = None
+    if version == 9 and offset >= 7 * row_height:
+        minimap_rows = [spec.decode_frame(spec.sample_nibbles(image, 0, offset - i * row_height))
+                        for i in (7, 6, 5)]
+        if all(frame and frame[0] == index for index, frame in enumerate(minimap_rows)):
+            center, size, info = [frame[1] for frame in minimap_rows]
+            radius = info & 1023
+            if info >> 11 == sequence and radius and (size >> 10) and (size & 1023):
+                minimap = MinimapGeometry(((center >> 10) / 1023, (center & 1023) / 1023),
+                                          ((size >> 10) / 1023, (size & 1023) / 1023),
+                                          radius, bool(info & 1024))
     return TravelSample(
         quest, map_id, goal_map,
         (gx / 1048575, gy / 1048575) if meta & 128 and goal_map else None,
@@ -124,5 +218,7 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         (width / 10, depth / 10) if meta & 512 and width and depth else None,
         (height - 524288) / 10 if meta & 256 else None,
         phase, flags, sequence, bool(meta & 2048), bool(meta & 4096), descent_key,
-        pitch, dismount, ascent, halt, task,
+        pitch, dismount, ascent, halt, task, range_supported, mount_button, mount_button_key,
+        action, target, cursor, round_stage, round_advance, round_blocked, round_immediate, objective_pin, minimap,
+        corpse_lootable, fetch_ready, precise_object,
     )

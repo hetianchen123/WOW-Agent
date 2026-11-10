@@ -19,7 +19,7 @@ from .core.paths import DATA_DIR, ROOT
 from .decision.startlux import LocalStartLux
 from .decision.terrain import STUCK_AFTER, decide_multiview, decide_terrain
 from .perception import channel_spec as spec
-from .perception.capture import ScreenCapture
+from .perception.capture import ScreenCapture, frontmost_game_bounds
 from .perception.channel import ChannelReader
 from .perception.travel_channel import TravelFlags, decode_travel, travel_region
 
@@ -72,23 +72,10 @@ def inspect_image(image: Path, *, cropped: bool = False, guard: Callable[[], Non
 
 
 def game_scene(capture: ScreenCapture):
-    import Quartz as q
-    from AppKit import NSWorkspace
-
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    if not app or app.bundleIdentifier() != "com.blizzard.worldofwarcraft":
-        raise ValueError("魔兽未在前台")
-    pid = app.processIdentifier()
-    windows = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionOnScreenOnly, q.kCGNullWindowID)
-    for window in windows:
-        bounds = window.get("kCGWindowBounds", {})
-        if (window.get("kCGWindowOwnerPID") == pid and window.get("kCGWindowLayer") == 0
-                and bounds.get("Width", 0) >= 800 and bounds.get("Height", 0) >= 500):
-            left, top, right, bottom = CROP
-            w, h = bounds["Width"], bounds["Height"]
-            return capture.grab(bounds["X"] + round(w * left), bounds["Y"] + round(h * top),
-                                round(w * right) - round(w * left), round(h * bottom) - round(h * top))
-    raise ValueError("未找到可用的魔兽窗口")
+    x, y, w, h = frontmost_game_bounds()
+    left, top, right, bottom = CROP
+    return capture.grab(x + round(w * left), y + round(h * top),
+                        round(w * right) - round(w * left), round(h * bottom) - round(h * top))
 
 
 def ground_pose(cfg, capture, guard):

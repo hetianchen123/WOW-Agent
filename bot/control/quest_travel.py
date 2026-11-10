@@ -19,9 +19,10 @@ class TravelCommand:
 
 
 class QuestTrip:
-    def __init__(self, world_size, destination, convention, *, arrival_radius=4):
+    def __init__(self, world_size, destination, convention, *, arrival_radius=4, walk_only=False):
         self.destination, self.convention = destination, convention
         self.arrival_radius = arrival_radius
+        self.walk_only = walk_only
         self.router = GridRouter(*world_size)
         self.mode = None
         self.phase, self.phase_at = "choose", 0.0
@@ -57,7 +58,7 @@ class QuestTrip:
         if not flags & Flags.KEYS_VERIFIED or position is None:
             return TravelCommand(outcome="travel_bindings_or_position_unavailable")
         distance = self.router.distance(position, self.destination)
-        if not mounted and distance <= FINAL_APPROACH_YARDS:
+        if self.walk_only or (not mounted and distance <= FINAL_APPROACH_YARDS):
             can_fly = can_ride = False
         if flags & (Flags.IN_COMBAT | Flags.SWIMMING):
             return TravelCommand(outcome="travel_state_unsafe")

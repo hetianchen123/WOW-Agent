@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 
 from bot.perception import cv as cvmod
 
@@ -37,6 +38,17 @@ def test_absdiff_score():
     assert cvmod.absdiff_score(a, c) == pytest_approx(70.0)
     d = np.zeros((10, 10, 3), dtype=np.uint8)
     assert cvmod.absdiff_score(a, d) == 255.0  # shape mismatch sentinel
+
+
+def test_pumpkin_probes_include_screen_edges_and_exclude_hud():
+    frame = np.full((720, 1280, 3), (60, 74, 48), dtype=np.uint8)
+    expected = ((800, 46), (195, 706))
+    for point in (*expected, (1160, 120)):
+        cv2.ellipse(frame, point, (18, 12), 0, 0, 360, (140, 70, 62), -1)
+    probes = cvmod.pumpkin_probe_points(frame, [(.79, 0, 1, 1)])
+    assert len(probes) == 2
+    for x, y in expected:
+        assert any(abs(u * 1280 - x) < 5 and abs(v * 720 - y) < 5 for u, v in probes)
 
 
 def pytest_approx(v):

@@ -7,7 +7,7 @@ from bot.control.pathfinding import GridRouter
 from bot.control.quest_travel import QuestTrip
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import QuestState
-from bot.perception.travel_channel import TravelFlags as Flags, TravelSample, decode_travel
+from bot.perception.travel_channel import ObjectiveAction, RoundStage, TaskFlags, TravelFlags as Flags, TravelSample, decode_travel
 
 
 def sample(**changes):
@@ -179,6 +179,68 @@ def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows()
     spec.render_frame(extended, 0, 0, spec.encode_frame(0, 2 + 4 * 16 + 12 * 256 + 15 * 16384))
     spec.render_frame(extended, 0, 9 * 16, spec.encode_frame(12, values[8] + 3))
     assert decode_travel(extended).sky_dismount_key == "c"
+    with_range = np.zeros((224, 142, 3), dtype=np.uint8)
+    with_range[16:] = extended
+    spec.render_frame(with_range, 0, 10 * 16, spec.encode_frame(12, values[8] + 4))
+    range_flags = TaskFlags.NPC_RANGE_KNOWN | TaskFlags.NPC_WITHIN_5_YARDS
+    spec.render_frame(with_range, 0, 0, spec.encode_frame(1, 3 * 512 + int(range_flags)))
+    assert decode_travel(with_range).npc_range_supported
+    assert decode_travel(with_range).task == range_flags
+    spec.render_frame(with_range, 0, 0, spec.encode_frame(1, 2 * 512 + int(range_flags)))
+    assert not decode_travel(with_range).npc_range_supported
+    assert not decode_travel(with_range).task
+    with_button = np.zeros((240, 142, 3), dtype=np.uint8)
+    with_button[16:] = with_range
+    spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 3 * 512 + int(range_flags)))
+    assert decode_travel(with_button).task == range_flags  # v5 in a v6 capture region.
+    spec.render_frame(with_button, 0, 11 * 16, spec.encode_frame(12, values[8] + 5))
+    spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 3 * 1024 + int(TaskFlags.MOUNT_TUTORIAL)))
+    spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 400 * 1024 + 990))
+    assert decode_travel(with_button).mount_button is None  # v6 exposed the macro, not the native icon.
+    spec.render_frame(with_button, 0, 11 * 16, spec.encode_frame(12, values[8] + 6))
+    spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 2 * 131072 + 3 * 1024 + int(TaskFlags.MOUNT_TUTORIAL)))
+    decoded = decode_travel(with_button)
+    assert decoded.mount_button == (400 / 1023, 990 / 1023)
+    assert decoded.mount_button_key == "2"
+    assert decoded.npc_range_supported and decoded.task == TaskFlags.MOUNT_TUTORIAL
+    spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 0))
+    assert decode_travel(with_button).mount_button is None
+    spec.render_frame(with_button, 0, 11 * 16, spec.encode_frame(12, values[8] + 7))
+    spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 131072 + 3 * 1024 + int(TaskFlags.PREPARED)))
+    spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 765432))
+    assert decode_travel(with_button).objective_action == ObjectiveAction.COMBAT
+    assert decode_travel(with_button).objective_target == 765432
+    spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 2 * 131072 + 3 * 1024 + int(TaskFlags.PREPARED)))
+    spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 400 * 1024 + 600))
+    assert decode_travel(with_button).objective_cursor == (400 / 1023, 600 / 1023)
+    with_round = np.zeros((256, 142, 3), dtype=np.uint8)
+    with_round[16:] = with_button
+    assert decode_travel(with_round).round_stage == RoundStage.NONE  # Legacy strip in a larger crop.
+    spec.render_frame(with_round, 0, 12 * 16, spec.encode_frame(12, values[8] + 8))
+    spec.render_frame(with_round, 0, 0, spec.encode_frame(3, 3 * 64 + int(RoundStage.PICKUP) + 32))
+    round_sample = decode_travel(with_round)
+    assert round_sample.round_stage == RoundStage.PICKUP and round_sample.round_immediate
+    assert not round_sample.round_advance and round_sample.objective_cursor == (400 / 1023, 600 / 1023)
+    spec.render_frame(with_round, 0, 2 * 16, spec.encode_frame(1, 4 * 131072 + 3 * 1024 + int(TaskFlags.PREPARED)))
+    pin_sample = decode_travel(with_round)
+    assert pin_sample.objective_pin and pin_sample.objective_action == ObjectiveAction.INTERACT
+    assert pin_sample.objective_cursor == round_sample.objective_cursor
+    with_minimap = np.zeros((304, 142, 3), dtype=np.uint8)
+    with_minimap[48:] = with_round
+    spec.render_frame(with_minimap, 0, 0, spec.encode_frame(0, 900 * 1024 + 132))
+    spec.render_frame(with_minimap, 0, 16, spec.encode_frame(1, 100 * 1024 + 170))
+    spec.render_frame(with_minimap, 0, 32, spec.encode_frame(2, 3 * 2048 + 1024 + 233))
+    geometry = decode_travel(with_minimap).minimap
+    assert geometry.center == (900 / 1023, 132 / 1023)
+    assert geometry.size == (100 / 1023, 170 / 1023)
+    assert geometry.radius == 233 and geometry.rotates
+    spec.render_frame(with_minimap, 0, 48, spec.encode_frame(3, 3 * 64 + int(RoundStage.OBJECTIVES) + 57344 + 65536))
+    telemetry = decode_travel(with_minimap)
+    assert telemetry.corpse_lootable and telemetry.fetch_ready and telemetry.precise_object
+    spec.render_frame(with_minimap, 0, 32, spec.encode_frame(2, 2 * 2048 + 233))
+    assert decode_travel(with_minimap).minimap is None
+    spec.render_frame(with_round, 0, 0, spec.encode_frame(3, 2 * 64 + int(RoundStage.PICKUP)))
+    assert decode_travel(with_round) is None
     extended[:16] = extended[16:32]
     assert decode_travel(extended) is None
     image[16:32] = image[:16]

@@ -17,6 +17,10 @@ LEVEL_TOLERANCE = 38
 BLUE_LIMIT = 64
 
 
+class ChannelNotFound(ValueError):
+    """No live channel was found within the scan window."""
+
+
 @dataclass(frozen=True)
 class Location:
     monitor: int
@@ -82,6 +86,31 @@ def find_rows(img: np.ndarray) -> list[tuple[int, int]]:
         if read_row(img, x, y) is not None:
             rows.append((x, y))
     return rows
+
+
+def startup_location(capture, previous: Location, *, scan_duration: float = 5) -> Location:
+    """Verify the saved row or find its new position before enabling input."""
+    monitors = capture.monitor_regions()
+    if 1 <= previous.monitor <= len(monitors):
+        left, top, width, height = monitors[previous.monitor - 1]
+        if (left <= previous.x <= left + width - spec.REGION_W
+                and top <= previous.y <= top + height - spec.REGION_H):
+            evidence = Evidence()
+            deadline = time.monotonic() + 1.25
+            while time.monotonic() < deadline:
+                frame = read_row(capture.grab(*previous.region))
+                if frame is None:
+                    break
+                evidence.record(frame)
+                if evidence.verified:
+                    return previous
+                time.sleep(.018)
+    confirmed = locate_channel(capture, monitors, scan_duration)
+    if not confirmed:
+        raise ChannelNotFound("找不到正在更新的 WowAgent 主色条。请确认魔兽窗口可见，且插件主色条已开启。")
+    if len(confirmed) != 1:
+        raise ValueError("检测到多个 WowAgent 主色条。请只保留当前任务角色的游戏窗口可见。")
+    return next(iter(confirmed))
 
 
 def locate_channel(capture, monitors: list[Rect], duration: float) -> dict[Location, Evidence]:

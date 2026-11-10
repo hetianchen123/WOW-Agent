@@ -1,4 +1,5 @@
-"""Six atomic combat rows located above the optional quest strip."""
+"""Combat rows and optional facing feedback above the quest strip."""
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,6 +8,7 @@ from . import channel_spec as spec
 from .quest_channel import QUEST_ROWS
 
 COMBAT_ROWS = 6
+COMBAT_CAPTURE_ROWS = COMBAT_ROWS + 1
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,10 @@ class CombatSample:
     key: int
     state_epoch: int
     sequence: int
+    target_engaged: bool = False
+    facing: float | None = None
+    facing_error: int | None = None
+    turn_verified: bool = False
 
     @property
     def identity(self) -> tuple[int, ...]:
@@ -33,23 +39,35 @@ class CombatSample:
 
 
 def combat_region(x: int, y: int) -> tuple[int, int, int, int]:
-    return (x, y - (QUEST_ROWS + COMBAT_ROWS) * spec.REGION_H,
-            spec.REGION_W, COMBAT_ROWS * spec.REGION_H)
+    return (x, y - (QUEST_ROWS + COMBAT_CAPTURE_ROWS) * spec.REGION_H,
+            spec.REGION_W, COMBAT_CAPTURE_ROWS * spec.REGION_H)
 
 
 def decode_combat(img: np.ndarray) -> CombatSample | None:
-    if img.shape != (COMBAT_ROWS * spec.REGION_H, spec.REGION_W, 3):
+    if img.shape not in {(rows * spec.REGION_H, spec.REGION_W, 3)
+                         for rows in (COMBAT_ROWS, COMBAT_CAPTURE_ROWS)}:
         return None
+    offset = img.shape[0] - COMBAT_ROWS * spec.REGION_H
     values = []
     for row in range(COMBAT_ROWS):
-        frame = spec.decode_frame(spec.sample_nibbles(img, 0, row * spec.REGION_H))
+        frame = spec.decode_frame(spec.sample_nibbles(img, 0, offset + row * spec.REGION_H))
         if frame is None or frame[0] != 0xA + row:
             return None
         values.append(frame[1])
     identity, build, spec_level, config, target, status = values
+    sequence = status >> 13
+    facing, facing_error, turn_verified = None, None, False
+    if offset:
+        frame = spec.decode_frame(spec.sample_nibbles(img, 0, 0))
+        if frame and frame[0] == 9 and (frame[1] >> 9) & 127 == sequence:
+            angle = frame[1] & 511
+            facing = (angle - 1) * math.tau / 511 if angle else None
+            facing_error = (frame[1] >> 16) & 7
+            turn_verified = bool(frame[1] & 524288)
     return CombatSample(
         identity & 31, (identity >> 5) & 255, identity >> 13,
-        build, spec_level & 4095, spec_level >> 12, config, target,
+        build, spec_level & 4095, (spec_level >> 12) & 127, config, target,
         bool(status & 1), bool(status & 2), bool(status & 4),
-        (status >> 3) & 15, (status >> 7) & 63, status >> 13,
+        (status >> 3) & 15, (status >> 7) & 63, sequence, bool(spec_level & 524288),
+        facing, facing_error, turn_verified,
     )

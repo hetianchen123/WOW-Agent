@@ -2,9 +2,11 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import yaml
 
-from bot import calibrate_cli
+from bot import calibrate_cli, cli
+from bot.modules import quest
 from bot.perception import calibration, channel_spec as wire
 
 
@@ -66,6 +68,33 @@ def test_frozen_desktop_never_calibrates(monkeypatch):
     monkeypatch.setattr(calibration, "time", SimpleNamespace(monotonic=lambda: screen.now, sleep=screen.sleep))
     assert calibration.locate_channel(screen, screen.regions, 3) == {}
     assert screen.now >= 3
+
+
+def test_task_start_relocates_moved_channel(monkeypatch):
+    screen = Desktop()
+    monkeypatch.setattr(calibration, "time", SimpleNamespace(monotonic=lambda: screen.now, sleep=screen.sleep))
+    old = calibration.Location(2, -309, -42)
+    current = calibration.Location(2, -301, -15)
+    assert calibration.startup_location(screen, old) == current
+    monkeypatch.setattr(calibration, "locate_channel", lambda *_: pytest.fail("saved live row triggered full scan"))
+    assert calibration.startup_location(screen, current) == current
+
+
+def test_prepared_start_retries_if_channel_becomes_live_after_first_scan(monkeypatch):
+    screen = Desktop(frozen=True)
+
+    def sleep(duration):
+        screen.sleep(duration)
+        screen.frozen = screen.now < 7
+
+    clock = SimpleNamespace(monotonic=lambda: screen.now, sleep=sleep)
+    monkeypatch.setattr(calibration, "time", clock)
+    monkeypatch.setattr(cli, "time", clock)
+    monkeypatch.setattr(quest, "game_is_frontmost", lambda: True)
+    assert cli._prepared_channel_location(screen, calibration.Location(2, -309, -42), 20) == (
+        calibration.Location(2, -301, -15)
+    )
+    assert screen.now >= 7
 
 
 def test_cli_preserves_yaml_and_refuses_ambiguous_results(tmp_path, monkeypatch, capsys):

@@ -19,6 +19,24 @@ class CaptureError(RuntimeError):
     pass
 
 
+def frontmost_game_bounds() -> tuple[float, float, float, float]:
+    """Return the foremost WoW window in desktop coordinates."""
+    import Quartz as q
+    from AppKit import NSWorkspace
+
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if not app or app.bundleIdentifier() != "com.blizzard.worldofwarcraft":
+        raise ValueError("魔兽未在前台")
+    pid = app.processIdentifier()
+    windows = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionOnScreenOnly, q.kCGNullWindowID)
+    for window in windows or ():
+        bounds = window.get("kCGWindowBounds", {})
+        if (window.get("kCGWindowOwnerPID") == pid and window.get("kCGWindowLayer") == 0
+                and bounds.get("Width", 0) >= 800 and bounds.get("Height", 0) >= 500):
+            return bounds["X"], bounds["Y"], bounds["Width"], bounds["Height"]
+    raise ValueError("未找到可用的魔兽窗口")
+
+
 class ScreenCapture:
     """Grabs screen regions as RGB numpy arrays via mss.
 

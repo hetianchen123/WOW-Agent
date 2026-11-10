@@ -1,6 +1,8 @@
 -- Read-only player telemetry, explicit out-of-combat macro/loadout commands.
 local print = WowAgent.Report or print
 local rows, armed, sequence, stateEpoch = {}, nil, 0, 0
+local facingError = 0
+local writeFacing
 local pendingSetup
 local screen = CreateFrame("Frame", nil, UIParent)
 local secret = issecretvalue or function() return false end
@@ -315,8 +317,17 @@ local function HostileTarget()
     return tonumber(id), dead
 end
 
+local function IsEngagedTarget()
+    if UnitIsUnit and (Public(UnitIsUnit("targettarget", "player")) == true
+        or Public(UnitIsUnit("targettarget", "pet")) == true) then return true end
+    if not UnitThreatSituation then return false end
+    return type(Public(UnitThreatSituation("player", "target"))) == "number"
+        or type(Public(UnitThreatSituation("pet", "target"))) == "number"
+end
+
 local function Disarm()
     armed = nil
+    facingError = 0
     stateEpoch = (stateEpoch + 1) % 64
 end
 
@@ -432,6 +443,11 @@ end
 local function Update()
     local p = Identity()
     local target, dead = HostileTarget()
+    -- The supported clients use seven bits for the character level.
+    local specLevel = p.spec + p.level * 4096
+    if p.level < 128 and target > 0 and not dead and IsEngagedTarget() then
+        specLevel = specLevel + 524288
+    end
     local flags = dead and 1 or 0
     if armed and (armed.spell ~= "assist" or (armed.body and AssistMacro() == armed.body))
         and ActionMatches(armed.key, armed.spell, armed.body) then
@@ -440,10 +456,16 @@ local function Update()
     if Public(UnitIsDead("player")) ~= false or Public(UnitIsGhost("player")) ~= false
         or (IsFlying and Public(IsFlying()) ~= false) then flags = flags + 4 end
     sequence = (sequence + 1) % 128
+    local facing = GetPlayerFacing and Public(GetPlayerFacing())
+    local angle = type(facing) == "number" and facing == facing
+        and (math.floor(facing * 511 / (2 * math.pi) + .5) % 511 + 1) or 0
+    local turnVerified = GetBindingAction and Public(GetBindingAction("LEFT", true)) == "TURNLEFT"
+        and Public(GetBindingAction("RIGHT", true)) == "TURNRIGHT"
+    writeFacing(9, angle + sequence * 512 + facingError * 65536 + (turnVerified and 524288 or 0))
     local key = armed and armed.key or 0
     local info = flags + key * 8 + stateEpoch * 128 + sequence * 8192
     local values = {p.class + p.race * 32 + p.project * 8192, p.build,
-        p.spec + p.level * 4096, p.config, target, info}
+        specLevel, p.config, target, info}
     for i, value in ipairs(values) do
         rows[i](i + 9, value >= 0 and value <= 1048575 and value or 0)
     end
@@ -550,10 +572,11 @@ local function SetupAction(kind, id, requestedKey)
     end
 end
 
-screen:SetSize(142, 96)
+screen:SetSize(142, 112)
 screen:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 0, 80)
 screen:SetFrameStrata("TOOLTIP")
-for i = 1, 6 do rows[i] = WowAgent.NewPixelRow(screen, (i - 1) * 16) end
+writeFacing = WowAgent.NewPixelRow(screen, 0)
+for i = 1, 6 do rows[i] = WowAgent.NewPixelRow(screen, i * 16) end
 local elapsed = 0
 screen:SetScript("OnUpdate", function(_, dt)
     elapsed = elapsed + dt
@@ -566,12 +589,26 @@ screen:Hide()
 local events = CreateFrame("Frame")
 for _, name in ipairs({"PLAYER_TARGET_CHANGED", "PLAYER_ENTERING_WORLD", "PLAYER_SPECIALIZATION_CHANGED",
                        "TRAIT_CONFIG_UPDATED", "ACTIVE_TALENT_GROUP_CHANGED", "CHARACTER_POINTS_CHANGED",
-                       "SPELLS_CHANGED", "PLAYER_EQUIPMENT_CHANGED"}) do
+                       "SPELLS_CHANGED", "PLAYER_EQUIPMENT_CHANGED", "UI_ERROR_MESSAGE"}) do
     pcall(events.RegisterEvent, events, name)
 end
-events:SetScript("OnEvent", function(_, event, unit)
-    if event == "PLAYER_TARGET_CHANGED" then
+events:SetScript("OnEvent", function(_, event, unit, message)
+    if event == "UI_ERROR_MESSAGE" then
+        if not armed then return end
+        local code = Public(unit)
+        message = Public(message)
+        local wrongFacing = (type(message) == "string" and
+            (message == SPELL_FAILED_UNIT_NOT_INFRONT or message == ERR_BADATTACKFACING
+                or message == ERR_WRONG_DIRECTION_FOR_ATTACK))
+            or (type(code) == "number" and (code == LE_GAME_ERR_BADATTACKFACING
+                or code == LE_GAME_ERR_WRONG_DIRECTION_FOR_ATTACK or code == LE_GAME_ERR_SPELL_FAILED_UNIT_NOT_INFRONT))
+        if wrongFacing then
+            local target, dead = HostileTarget()
+            if target > 0 and not dead then facingError = (facingError + 1) % 8 end
+        end
+    elseif event == "PLAYER_TARGET_CHANGED" then
         stateEpoch = (stateEpoch + 1) % 64
+        facingError = 0
     elseif event == "SPELLS_CHANGED" and armed and armed.spell == "assist" then
         -- Mount and action-bar transitions can temporarily hide Assisted Combat.
         -- Update verifies the current spell and action before publishing the key.

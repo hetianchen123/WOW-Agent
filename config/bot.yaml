@@ -6,8 +6,8 @@ log_level: INFO
 game_process_names: ["World of Warcraft"]
 
 channel:
-  x: -1832              # 像素通道色条左上角（游戏内 /wagent unlock 拖动后校准）
-  y: 963
+  x: -1824              # 像素通道色条左上角（游戏内 /wagent unlock 拖动后校准）
+  y: 990
   calibrated: true
 
 capture:
