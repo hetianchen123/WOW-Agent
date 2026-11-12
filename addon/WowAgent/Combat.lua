@@ -2,7 +2,9 @@
 local print = WowAgent.Report or print
 local rows, armed, sequence, stateEpoch = {}, nil, 0, 0
 local facingError = 0
-local writeFacing
+local writeFacing, writeReach
+local rangeErrorUntil = 0
+local liveTargetGUID, liveTargetEpoch, previousTargetGUID, previousTargetEpoch
 local pendingSetup
 local screen = CreateFrame("Frame", nil, UIParent)
 local secret = issecretvalue or function() return false end
@@ -314,7 +316,7 @@ local function HostileTarget()
     if dead == nil or not guid or (not dead and attackable ~= true) then return 0, false end
     local kind, id = guid:match("^(%a+)%-%d+%-%d+%-%d+%-%d+%-(%d+)%-")
     if kind ~= "Creature" or not id then return 0, false end
-    return tonumber(id), dead
+    return tonumber(id), dead, guid
 end
 
 local function IsEngagedTarget()
@@ -328,6 +330,8 @@ end
 local function Disarm()
     armed = nil
     facingError = 0
+    rangeErrorUntil = 0
+    liveTargetGUID, liveTargetEpoch, previousTargetGUID, previousTargetEpoch = nil, nil, nil, nil
     stateEpoch = (stateEpoch + 1) % 64
 end
 
@@ -440,9 +444,35 @@ local function PrepStatus()
     Gear()
 end
 
+local function ReadRangeValue(api, ...)
+    if not api then return nil end
+    local ok, value = pcall(api, ...)
+    if ok then return Public(value) end
+end
+
+local function AttackRange()
+    local spell = armed.spell
+    if spell == "assist" then
+        local nextSpell = C_AssistedCombat and C_AssistedCombat.GetNextCastSpell
+        spell = ReadRangeValue(nextSpell)
+    end
+    local check = C_Spell and C_Spell.IsSpellInRange or IsSpellInRange
+    local inRange
+    if type(spell) == "number" then inRange = ReadRangeValue(check, spell, "target") end
+    if inRange == nil then
+        local actionCheck = C_ActionBar and C_ActionBar.IsActionInRange or IsActionInRange
+        local slot = BoundSlot(armed.key)
+        if slot then inRange = ReadRangeValue(actionCheck, slot, "target") end
+    end
+    if inRange == false or inRange == 0 then return 2 end
+    if inRange == true or inRange == 1 then return 1 end
+    return GetTime and GetTime() < rangeErrorUntil and 2 or 0
+end
+
 local function Update()
     local p = Identity()
-    local target, dead = HostileTarget()
+    local target, dead, guid = HostileTarget()
+    if target > 0 and not dead then liveTargetGUID, liveTargetEpoch = guid, stateEpoch end
     -- The supported clients use seven bits for the character level.
     local specLevel = p.spec + p.level * 4096
     if p.level < 128 and target > 0 and not dead and IsEngagedTarget() then
@@ -462,6 +492,9 @@ local function Update()
     local turnVerified = GetBindingAction and Public(GetBindingAction("LEFT", true)) == "TURNLEFT"
         and Public(GetBindingAction("RIGHT", true)) == "TURNRIGHT"
     writeFacing(9, angle + sequence * 512 + facingError * 65536 + (turnVerified and 524288 or 0))
+    local range = flags % 4 == 2 and target > 0 and not dead and AttackRange() or 0
+    local restoredEpoch = dead and guid and guid == previousTargetGUID and previousTargetEpoch + 1 or 0
+    writeReach(8, range + restoredEpoch * 4 + sequence * 1024)
     local key = armed and armed.key or 0
     local info = flags + key * 8 + stateEpoch * 128 + sequence * 8192
     local values = {p.class + p.race * 32 + p.project * 8192, p.build,
@@ -572,11 +605,12 @@ local function SetupAction(kind, id, requestedKey)
     end
 end
 
-screen:SetSize(142, 112)
+screen:SetSize(142, 128)
 screen:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 0, 80)
 screen:SetFrameStrata("TOOLTIP")
-writeFacing = WowAgent.NewPixelRow(screen, 0)
-for i = 1, 6 do rows[i] = WowAgent.NewPixelRow(screen, i * 16) end
+writeReach = WowAgent.NewPixelRow(screen, 0)
+writeFacing = WowAgent.NewPixelRow(screen, 16)
+for i = 1, 6 do rows[i] = WowAgent.NewPixelRow(screen, (i + 1) * 16) end
 local elapsed = 0
 screen:SetScript("OnUpdate", function(_, dt)
     elapsed = elapsed + dt
@@ -606,9 +640,18 @@ events:SetScript("OnEvent", function(_, event, unit, message)
             local target, dead = HostileTarget()
             if target > 0 and not dead then facingError = (facingError + 1) % 8 end
         end
+        if GetTime and (message ~= nil and (message == SPELL_FAILED_OUT_OF_RANGE or message == ERR_OUT_OF_RANGE)
+            or code ~= nil and (code == LE_GAME_ERR_OUT_OF_RANGE or code == LE_GAME_ERR_SPELL_FAILED_OUT_OF_RANGE)) then
+            rangeErrorUntil = GetTime() + 1.2
+        end
     elseif event == "PLAYER_TARGET_CHANGED" then
+        if liveTargetGUID then
+            previousTargetGUID, previousTargetEpoch = liveTargetGUID, liveTargetEpoch
+            liveTargetGUID, liveTargetEpoch = nil, nil
+        end
         stateEpoch = (stateEpoch + 1) % 64
         facingError = 0
+        rangeErrorUntil = 0
     elseif event == "SPELLS_CHANGED" and armed and armed.spell == "assist" then
         -- Mount and action-bar transitions can temporarily hide Assisted Combat.
         -- Update verifies the current spell and action before publishing the key.

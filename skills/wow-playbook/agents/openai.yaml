@@ -1,0 +1,4 @@
+interface:
+  display_name: "魔兽任务操作准则"
+  short_description: "维护寻路避障、找怪战斗、拾取与批量交接任务规则，并用于脚本开发和实机排错"
+  default_prompt: "使用 $wow-playbook 分析当前任务日志，按玩家操作准则修复脚本并更新对应规则和测试。"

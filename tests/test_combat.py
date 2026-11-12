@@ -8,7 +8,7 @@ import pytest
 
 from bot.combat_cli import ability, class_catalog, rotation, saved_profile, spell_macro
 from bot.data.combat import EDITIONS, build_catalog, open_catalog
-from bot.modules.combat import Fight
+from bot.modules.combat import Fight, QuestHunt
 from bot.perception import channel_spec as wire
 from bot.perception.combat_channel import CombatSample, decode_combat
 
@@ -46,10 +46,12 @@ def test_facing_recovery_turns_on_new_error_and_retries_same_target():
     error = replace(sample, sequence=3, facing_error=1)
     assert fight.step(.4, error) == ("turn", "left")
     assert fight.step(.5, error) == ("waiting", None)
-    assert fight.step(.7, replace(error, sequence=4, facing=math.pi / 2)) == ("turn", "left")
-    assert fight.step(1.2, replace(error, sequence=5, facing=math.pi)) == ("action", "5")
-    assert fight.step(1.4, replace(error, sequence=6, facing_error=2, facing=math.pi)) == ("turn", "right")
-    assert fight.step(1.6, replace(error, sequence=7, target_id=23456)) == ("target_missing_or_changed", None)
+    assert fight.step(.7, replace(error, sequence=4, facing=math.pi / 2)) == ("waiting", None)
+    assert fight.step(.9, replace(error, sequence=5, facing=math.pi / 2)) == ("turn", "left")
+    assert fight.step(1.2, replace(error, sequence=6, facing=math.pi)) == ("waiting", None)
+    assert fight.step(1.5, replace(error, sequence=7, facing=math.pi)) == ("action", "5")
+    assert fight.step(1.7, replace(error, sequence=8, facing_error=2, facing=math.pi)) == ("turn", "right")
+    assert fight.step(1.9, replace(error, sequence=9, target_id=23456)) == ("target_missing_or_changed", None)
     assert fight.presses == 2
 
 
@@ -60,6 +62,36 @@ def test_facing_recovery_does_not_turn_with_unverified_keys():
     assert fight.step(0, sample) == ("waiting", None)
     assert fight.step(.2, replace(sample, sequence=2)) == ("action", "5")
     assert fight.step(.4, replace(sample, sequence=3, facing_error=1)) == ("facing_feedback_unavailable", None)
+
+
+def test_hunt_sweeps_before_retabbing_and_locks_target_until_in_range():
+    hunt = QuestHunt(frozenset({12345}))
+    base = CombatSample(8, 1, 1, 70783, 63, 80, 87, 0, False, True, False, 5, 8, 1,
+                        facing=0, turn_verified=True)
+    assert hunt.step(0, base, 0, False) == ("select_target", "tab")
+    assert hunt.step(1.1, replace(base, sequence=2), 0, False) == ("search_turn", "left")
+    sector = replace(base, sequence=3, facing=math.radians(20))
+    assert hunt.step(1.25, sector, 0, False) == ("waiting", None)
+    assert hunt.step(1.45, replace(sector, sequence=4), 0, False) == ("waiting", None)
+    assert hunt.step(1.65, replace(sector, sequence=5), 0, False) == ("select_target", "tab")
+    target = replace(sector, sequence=6, target_id=12345, in_range=False)
+    assert hunt.step(1.7, target, 0, False) == ("waiting", None)
+    assert hunt.step(1.9, replace(target, sequence=7), 0, False) == ("approach", "w")
+    assert hunt.step(2.3, replace(target, sequence=8), 0, False) == ("approach", "w")
+    assert hunt.fight.presses == 0
+    assert hunt.step(2.6, replace(target, sequence=9, in_range=True), 0, False) == ("action", "5")
+
+
+def test_search_does_not_reverse_rapidly_on_overshoot():
+    hunt = QuestHunt(frozenset({12345}))
+    base = CombatSample(8, 1, 1, 70783, 63, 80, 87, 0, False, True, False, 5, 8, 1,
+                        facing=0, turn_verified=True)
+    assert hunt.step(0, base, 0, False) == ("select_target", "tab")
+    assert hunt.step(1.1, replace(base, sequence=2), 0, False) == ("search_turn", "left")
+    overshoot = replace(base, facing=math.radians(32))
+    for seq, now in enumerate((1.2, 1.3, 1.4), 3):
+        assert hunt.step(now, replace(overshoot, sequence=seq), 0, False) == ("waiting", None)
+    assert hunt.step(1.6, replace(overshoot, sequence=6), 0, False) == ("search_turn", "right")
 
 
 @pytest.mark.parametrize(("change", "expected"), [

@@ -92,6 +92,12 @@ class HelperInput(InputBase):
     def _mouse_up_raw(self, button: str) -> None:
         self._request("mouse_up", button=button)
 
+    def click_world_object(self) -> None:
+        self._request("world_click")
+
+    def click_ui(self) -> None:
+        self._request("ui_click")
+
     def position(self) -> tuple[int, int]:
         reply = self._request("position")
         return int(reply["x"]), int(reply["y"])
@@ -122,13 +128,29 @@ def _smoke() -> None:
         pass
     else:
         raise AssertionError("outside-window move accepted")
+    try:
+        backend.click_world_object()
+    except OSError:
+        pass
+    else:
+        raise AssertionError("world interaction accepted while moving")
     backend.release_all()
     assert backend._request("info")["events"] == 8
+    backend.click_world_object()
+    assert backend._request("info")["events"] == 10
+    backend.click_ui()
+    assert backend._request("info")["events"] == 12
     backend.down("w")
+    try:
+        backend.click_ui()
+    except OSError:
+        pass
+    else:
+        raise AssertionError("UI click accepted while moving")
     backend._request("simulate_blur")
     assert backend.interrupted()
     info = backend._request("info")
-    assert info["events"] == 10 and not info["armed"]
+    assert info["events"] == 14 and not info["armed"]
     print("Signed controller, simulated input, window bounds, focus loss and key release passed")
 
 

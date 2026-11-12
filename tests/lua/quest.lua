@@ -54,6 +54,8 @@ WowAgent = {
     end},
 }
 dofile("addon/WowAgent/RetailQuestData.lua")
+dofile("addon/WowAgent/APRQuestData.lua")
+dofile("addon/WowAgent/Recovery.lua")
 dofile("addon/WowAgent/Quest.lua")
 local function event(name) frames[1].scripts.OnEvent(nil, name) end
 event("GOSSIP_SHOW")
@@ -604,8 +606,14 @@ event("QUEST_FINISHED")
 C_QuestLog.GetQuestsOnMap = function()
     return {{questID = 90885, x = .52, y = .59}}
 end
+local pumpkins = 0
 C_QuestLog.GetQuestObjectives = function()
-    return {{type = "item", text = "找回稀有的南瓜：0/4", numFulfilled = 0, numRequired = 4}}
+    return {{type = "item", text = "找回稀有的南瓜：0/4", numFulfilled = pumpkins, numRequired = 4}}
+end
+function CreateVector2D(x, y) return {x = x, y = y} end
+C_Map.GetWorldPosFromMapPos = function(map, point)
+    assert(map == 2451)
+    return 7, {x = -1000 - point.y * 1000, y = -2500 - point.x * 1000}
 end
 local tooltipObject = "其他南瓜"
 C_TooltipInfo.GetWorldCursor = function()
@@ -626,12 +634,38 @@ WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
 while #timers > 0 do table.remove(timers, 1)() end
 assert(math.floor(values[1] / 131072) == 4 and values[2] == 0)
 assert(values[6] == math.floor(.56 * 1048575 + .5))
+assert(math.floor(values[3] / 131072) % 2 == 0)
+assert(math.floor(values[3] / 262144) % 2 == 1)
 tooltipObject = "稀有的南瓜"
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[1] / 131072) == 4 and values[2] == 307 * 1024 + 962)
+C_TooltipInfo.GetWorldCursor = function() return nil end
+local displayedGetter = "GetItemByID"
+GameTooltip = {
+    IsShown = function() return true end,
+    GetPrimaryTooltipInfo = function() return {getterName = displayedGetter} end,
+}
+GameTooltipTextLeft1 = {GetText = function() return "|cffffd100稀有的南瓜|r" end}
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[2] == 0)
+displayedGetter = "GetWorldCursor"
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[2] == 307 * 1024 + 962)
+displayedGetter = nil
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[2] == 0)
+GameTooltip, GameTooltipTextLeft1 = nil, nil
 C_VignetteInfo = nil
 frames[3].scripts.OnUpdate(nil, .2)
-assert(math.floor(values[1] / 131072) == 2 and values[6] == math.floor(.52 * 1048575 + .5))
+assert(math.floor(values[1] / 131072) == 2 and values[6] == math.floor(.5029 * 1048575 + .5))
+assert(values[7] == math.floor(.5348 * 1048575 + .5) and math.floor(values[3] / 131072) % 2 == 1)
+pumpkins = 1
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[6] == math.floor(.4596 * 1048575 + .5) and values[7] == math.floor(.5538 * 1048575 + .5))
+pumpkins = 4
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[6] == math.floor(.52 * 1048575 + .5) and math.floor(values[3] / 131072) % 2 == 0)
+C_Map.GetWorldPosFromMapPos, CreateVector2D = nil, nil
 Minimap = {
     IsVisible = function() return true end, GetCenter = function() return 900, 425 end,
     GetWidth = function() return 100 end, GetHeight = function() return 85 end,
@@ -643,7 +677,7 @@ frames[3].scripts.OnUpdate(nil, .2)
 assert(rowValues[0] == 921 * 1024 + 153 and rowValues[16] == 102 * 1024 + 174)
 assert(rowValues[32] % 2048 == 233 + 1024)
 assert(math.floor(rowValues[32] / 2048) == math.floor(values[8] / 8192))
-assert(math.floor(values[3] / 65536) == 1)
+assert(math.floor(values[3] / 65536) % 2 == 1)
 WowAgent.StopQuestNavigation()
 
 -- Fetch is armed only for a known skill and a lootable corpse with a live pet.
@@ -660,10 +694,70 @@ end
 WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
 while #timers > 0 do table.remove(timers, 1)() end
 assert(overrides.L == "CLICK WowAgentTaskFetch:LeftButton")
-assert(namedFrames.WowAgentTaskFetch.attributes.macrotext == "/cast [@target,exists,dead] 拾回")
+assert(namedFrames.WowAgentTaskFetch.attributes.macrotext == "/cast 拾回")
 assert(math.floor(values[3] / 8192) % 8 == 7)
 canLoot = false
 frames[3].scripts.OnUpdate(nil, .2)
-assert(math.floor(values[3] / 8192) % 8 == 1)
+assert(math.floor(values[3] / 8192) % 8 == 5)
+selected = nil
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[3] / 8192) % 8 == 4)
 WowAgent.StopQuestNavigation()
 assert(not overrides.L)
+
+-- The same navigation strip reports verified spell keys and the native death dialog.
+local playerDead, playerGhost, petDead, aura = false, false, true, nil
+function UnitClass() return "Hunter", "HUNTER" end
+function UnitIsDead(unit) return unit == "pet" and petDead or unit == "player" and playerDead end
+function UnitIsGhost() return playerGhost end
+function GetCallPetSpellInfo(id) if id == 83242 then return 2, "Wolf" end end
+C_SpellBook.IsSpellInSpellBook = function(id) return id == 982 end
+C_SpellBook.IsSpellKnown = function(id) return id == 125050 or id == 1459 end
+C_Spell.GetSpellName = function(id)
+    return ({[982] = "Revive Pet", [83242] = "Call Pet 2", [1459] = "Arcane Intellect",
+        [125050] = "Fetch"})[id] or spellName(id)
+end
+C_UnitAuras = {GetPlayerAuraBySpellID = function() return aura end}
+WowAgent.QuestCommand("recovery buff 1459")
+WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(overrides.F9 == "CLICK WowAgentRecoveryFollow:LeftButton")
+assert(namedFrames.WowAgentRecoverySummon.attributes.macrotext == "/cast Call Pet 2")
+assert(namedFrames.WowAgentRecoveryRevive.attributes.macrotext == "/cast Revive Pet")
+assert(namedFrames.WowAgentRecoveryBuff.attributes.macrotext == "/cast [@player] Arcane Intellect")
+assert(values[12] % 16 == 10)
+local state = rowValues[-64] % 8192
+assert(state == 1 + 12 + 16 + 32 + 64 + 128 + 512)
+aura = {}
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-64] % 8192 == state - 128)
+playerDead = true
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-64] % 8192 == 2)
+playerGhost = true
+C_DeathInfo = {GetCorpseMapPosition = function()
+    return {GetXY = function() return .43, .5 end}
+end}
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-64] % 8192 == 3 + 512 and rowValues[-48] > 0)
+local enabled = false
+local button = {
+    IsVisible = function() return true end,
+    IsEnabled = function() return enabled end,
+    GetCenter = function() return 800, 450 end,
+    GetEffectiveScale = function() return 1 end,
+    IsMouseOver = function() return true end,
+}
+function StaticPopup_FindVisible(which)
+    if which == "RECOVER_CORPSE" then
+        return {IsVisible = function() return true end, GetButton1 = function() return button end}
+    end
+end
+function GetMouseFoci() return {button} end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-64] % 8192 == 3 + 512 + 1024 and rowValues[-32] == 0)
+enabled = true
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-64] % 8192 == 3 + 512 + 1024 + 2048 + 4096 and rowValues[-32] > 0)
+WowAgent.StopQuestNavigation()
+assert(not overrides.F9 and not overrides.F10 and not overrides.F11 and not overrides.F12)

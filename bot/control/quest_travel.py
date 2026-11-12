@@ -16,6 +16,7 @@ class TravelCommand:
     keys: frozenset[str] = frozenset()
     tap: str | None = None
     outcome: str | None = None
+    hold_s: float | None = None
 
 
 class QuestTrip:
@@ -35,6 +36,7 @@ class QuestTrip:
         self.sky_started = None
         self.sky_landing_target = None
         self.sky_land_height = None
+        self.precision_sequence = None
 
     def enter(self, phase, now):
         self.phase, self.phase_at = phase, now
@@ -71,6 +73,17 @@ class QuestTrip:
                 return self.fail_mode(now)
         if flying and flags & Flags.SKYRIDING:
             return TravelCommand(outcome="steady_flight_not_confirmed")
+        if self.phase == "recover_turn":
+            if flags & Flags.FALLING:
+                return TravelCommand()
+            self.enter("recover_jump", now)
+            return TravelCommand(frozenset({"w"}), tap="space")
+        if self.phase.startswith("recover_"):
+            recovery_key = {"recover_jump": "w", "recover_strafe_left": "q",
+                            "recover_strafe_right": "e", "recover_backtrack": "s"}[self.phase]
+            if now - self.phase_at < .60 and (recovery_key not in {"q", "e"} or sample.strafe_verified):
+                return TravelCommand(frozenset({recovery_key}))
+            self.enter("choose", now)
         if flags & Flags.FALLING and not flying:
             return TravelCommand()
 
@@ -104,10 +117,6 @@ class QuestTrip:
         if self.phase == "mount":
             if not mounted:
                 return self.fail_mode(now) if elapsed > 5 else TravelCommand()
-            self.enter("choose", now)
-        if self.phase == "recover":
-            if elapsed < .6:
-                return TravelCommand(frozenset({"s"}))
             self.enter("choose", now)
         if self.phase == "takeoff":
             if not flying:
@@ -163,7 +172,8 @@ class QuestTrip:
             return self.fail_mode(now)
         if self.mode == "mount" and not mounted:
             return self.fail_mode(now)
-        return self.steer(now, position, heading, sample.height, descent_key)
+        return self.steer(now, position, heading, sample.height, descent_key, sample.sequence,
+                          sample.strafe_verified)
 
     def sky_step(self, now, sample, heading, mounted, flying):
         target = self.sky_landing_target or self.destination
@@ -274,7 +284,7 @@ class QuestTrip:
         left = (turn > 0) == (self.convention == "ccw_west")
         return frozenset({"left" if left else "right"})
 
-    def steer(self, now, position, heading, height, descent_key):
+    def steer(self, now, position, heading, height, descent_key, sequence, strafe_verified=False):
         if self.mode == "fly" and not self.path:
             self.path = [self.destination]
         if not self.path:
@@ -283,8 +293,14 @@ class QuestTrip:
             self.path.pop(0)
         target = self.path[0]
         turn = self.turn_error(position, target, heading)
-        keys = set(self.turn_keys(turn, math.radians(5)))
-        if abs(turn) < math.radians(25):
+        remaining = self.router.distance(position, self.destination)
+        precision = self.mode == "walk" and self.arrival_radius <= 4 and len(self.path) == 1 and remaining <= 8
+        if precision and sequence == self.precision_sequence:
+            return TravelCommand()
+        if precision:
+            self.precision_sequence = sequence
+        keys = set(self.turn_keys(turn, math.radians(8 if precision else 5)))
+        if abs(turn) <= math.radians(8 if precision else 25 if self.mode == "fly" else 15):
             keys.add("w")
         if self.mode == "fly":
             if height is None:
@@ -304,10 +320,26 @@ class QuestTrip:
                 self.altitude += 12
                 self.enter("climb", now)
                 return TravelCommand(frozenset({"space"}))
-            if self.detours >= 5:
+            actions = ["jump", "turn"]
+            if strafe_verified:
+                actions.extend(("strafe_left", "strafe_right"))
+            actions.append("backtrack")
+            if self.detours >= len(actions):
                 return TravelCommand(outcome="route_blocked")
+            action = actions[self.detours]
             self.detours += 1
+            self.enter("recover_" + action, now)
+            if action == "jump":
+                return TravelCommand(frozenset({"w"}), tap="space")
+            if action == "turn":
+                return TravelCommand(tap="left" if turn >= 0 else "right", hold_s=.20)
+            if action.startswith("strafe"):
+                return TravelCommand(frozenset({"q" if action == "strafe_left" else "e"}))
             self.router.block_ahead(position, target)
-            self.enter("recover", now)
             return TravelCommand(frozenset({"s"}))
+        if precision and keys:
+            if "w" in keys:
+                hold = min(.16, max(.055, (remaining - self.arrival_radius) / 8))
+                return TravelCommand(tap="w", hold_s=hold)
+            return TravelCommand(tap=next(iter(keys)), hold_s=.08)
         return TravelCommand(frozenset(keys))

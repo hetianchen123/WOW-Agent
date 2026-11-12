@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,7 +11,10 @@ from bot.modules import quest
 from bot.perception import channel_spec as spec
 from bot.perception.combat_channel import combat_region
 from bot.perception.quest_channel import Dialogue, Objective, QuestKind, QuestState, decode_quest
-from bot.perception.travel_channel import MinimapGeometry, ObjectiveAction, RoundStage, TaskFlags, TravelFlags, TravelSample
+from bot.perception.travel_channel import (
+    LifeState, MinimapGeometry, ObjectiveAction, PetState, RecoverySample, RoundStage,
+    TaskFlags, TravelFlags, TravelSample,
+)
 
 
 def image(sequence, state, dialogue=Dialogue.CLOSED, dialogue_id=0, done=0, kind=QuestKind.CAMPAIGN,
@@ -332,7 +336,7 @@ def test_unknown_quest_accepts_interacts_and_turns_in_with_live_evidence(tmp_pat
     run.steps = [quest.QuestStep(67890, "9", None, None, None, None)]
     ctx.cfg.channel.x, ctx.cfg.channel.y = -1822, 982
     monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (-1920, 0, 1920, 1080))
-    phase, cursor, destination = [QuestState.PENDING], [None], [(.4, .5)]
+    phase, cursor, destination = [QuestState.PENDING], [(.52, .50)], [(.4, .5)]
 
     def navigation(_):
         task = TaskFlags.PREPARED
@@ -350,15 +354,11 @@ def test_unknown_quest_accepts_interacts_and_turns_in_with_live_evidence(tmp_pat
     tick(QuestState.ACTIVE, quest_id=67890)
     tick(QuestState.ACTIVE, quest_id=67890)
     assert ctx.input.count("move") == 1 and not ctx.input.count("mouse_down")
-    cursor[0] = (.9, .9)  # An unrelated cursor sample cannot cause an interaction.
-    tick(QuestState.ACTIVE, quest_id=67890)
-    assert ctx.input.count("move") == 2 and not ctx.input.count("mouse_down")
-    cursor[0] = quest.OBJECT_PROBES[1]
     tick(QuestState.ACTIVE, quest_id=67890)
     assert ctx.input.count("mouse_down", "right") == 1
     cursor[0], destination[0] = None, (.43, .5)
     tick(QuestState.ACTIVE, quest_id=67890)
-    assert ctx.input.count("move") == 2 and run.trip.destination == (.4, .5)
+    assert ctx.input.count("move") == 1 and run.trip.destination == (.4, .5)
     tick(QuestState.ACTIVE, quest_id=67890, done=1)
     assert run.trip.destination == (.43, .5)
     assert not ctx.input.count("key_down", "tab")
@@ -385,7 +385,7 @@ def test_object_quest_walks_to_minimap_dot_before_clicking(tmp_path, monkeypatch
     monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (-1920, 0, 1920, 1080))
     dots = [dot]
     monkeypatch.setattr(quest, "minimap_quest_dots", lambda _: tuple(dots))
-    probe = (.52, .50) if quest_id == 90885 else quest.OBJECT_PROBES[0]
+    probe = (.52, .50)
     monkeypatch.setattr(quest, "pumpkin_probe_points", lambda *_: (probe,))
 
     position = [(.4, .5)]
@@ -417,6 +417,198 @@ def test_object_quest_walks_to_minimap_dot_before_clicking(tmp_path, monkeypatch
     tick(QuestState.ACTIVE, quest_id=quest_id, elapsed=5.1)
     assert not run.arrived and run.object_approach_yards == 1.25
     assert ctx.input.count("mouse_down", "right") == 1
+
+
+@pytest.mark.parametrize("player_x,keep_target", [(.413, False), (.427, True)])
+def test_minimap_recheck_refuses_to_redirect_to_a_different_dot(tmp_path, monkeypatch, player_x, keep_target):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route = True
+    run.object_target, run.object_check_origin = (.44, .5), (.4, .5)
+    monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (0, 0, 1920, 1080))
+    nav = TravelSample(90885, 2248, 2248, (.4, .5), (player_x, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1)
+    attempts = []
+
+    def find_dot(*_, near):
+        attempts.append(near)
+        return None
+
+    monkeypatch.setattr(run, "object_minimap_target", find_dot)
+    assert not run.recheck_object_target(ctx, 10, nav, 0) and not attempts
+    assert not run.recheck_object_target(ctx, 10.4, nav, 0) and not attempts
+    assert run.recheck_object_target(ctx, 10.8, replace(nav, sequence=2), 0) == keep_target
+    assert attempts == [(.44, .5)]
+    assert run.object_target == ((.44, .5) if keep_target else None)
+    assert run.object_targets_tried == ([] if keep_target else [(.44, .5)])
+
+
+def test_object_hover_miss_refines_approach_without_clicking(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route = run.arrived = run.object_minimap_checked = True
+    run.object_target = (.44, .5)
+    run.object_points, run.object_probe, run.object_probe_sequence = ((.5, .6),), 1, 1
+    ctx.cfg.channel.x, ctx.cfg.channel.y = 40, 980
+    monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (0, 0, 1920, 1080))
+    monkeypatch.setattr(run, "object_minimap_target", lambda *args, **kwargs: None)
+    nav = TravelSample(90885, 2248, 2248, (.4, .5), (.4376, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 2, precise_object=True)
+
+    run.search_object(ctx, 10, nav, 0)
+
+    assert not run.arrived and run.object_approach_yards == quest.OBJECT_REFINE_YARDS
+    assert run.object_target == (.44, .5) and not ctx.input.count("mouse_down")
+
+
+@pytest.mark.parametrize("quest_id,failed_capture", [(67890, False), (90885, False), (90885, True)])
+def test_missing_object_detection_never_falls_back_to_mouse_grid(tmp_path, monkeypatch, quest_id, failed_capture):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route = run.arrived = True
+    ctx.cfg.channel.x, ctx.cfg.channel.y = 40, 980
+    monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (0, 0, 1920, 1080))
+
+    def detect(*_):
+        if failed_capture:
+            raise quest.CaptureError("capture unavailable")
+        return ()
+
+    monkeypatch.setattr(quest, "pumpkin_probe_points", detect)
+    nav = TravelSample(quest_id, 2451, 2451, (.44, .5), (.44, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, objective_pin=True)
+    run.search_object(ctx, 10, nav, 0)
+    assert run.OUTCOME == "stopped:quest_object_visual_target_required"
+    assert not ctx.input.count("move") and not ctx.input.count("mouse_down")
+
+
+def test_visual_candidate_requires_matching_hover_and_has_no_grid_tail(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route = run.arrived = True
+    ctx.cfg.channel.x, ctx.cfg.channel.y = 40, 980
+    monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (0, 0, 1920, 1080))
+    candidates = ((.5, .55), (.52, .56))
+    monkeypatch.setattr(quest, "pumpkin_probe_points", lambda *_: candidates)
+    nav = TravelSample(90885, 2451, 2451, (.44, .5), (.44, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, objective_pin=True)
+    run.search_object(ctx, 10, nav, 0)
+    run.search_object(ctx, 11, replace(nav, sequence=2, objective_cursor=(.9, .9)), 0)
+    assert run.object_points == candidates and ctx.input.count("move") == 2
+    assert not ctx.input.count("mouse_down")
+    run.search_object(ctx, 12, replace(nav, sequence=3, objective_cursor=candidates[1]), 0)
+    assert ctx.input.count("mouse_down", "right") == 1
+
+
+def test_failed_mob_search_remains_combat_search_without_mouse_fallback(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.steps = [quest.QuestStep(12345, "9", None, None, None, None)]
+    run.hunt = SimpleNamespace(fight=None, step=lambda *_: ("target_not_found", None))
+    monkeypatch.setattr(quest, "decode_combat", lambda _: None)
+    nav = TravelSample(12345, 2451, 2451, (.44, .5), (.44, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1)
+    run.hunt_tick(ctx, 10, 0, False, nav)
+    assert isinstance(run.hunt, quest.QuestHunt) and run.search_waypoint is not None
+    assert not ctx.input.count("move")
+
+
+def test_npc_search_releases_turn_between_pulses(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route, run.phase = True, QuestState.READY
+    nav = TravelSample(12345, 2451, 2451, (.45, .5), (.44, .5), (1000, 1000), 0,
+                       QuestState.READY, TravelFlags.KEYS_VERIFIED, 1)
+    for now in (10, 10.1, 10.2, 10.3):
+        run.search_quest_npc(ctx, now, nav, 0)
+    assert ctx.input.count("key_down", "right") == 1
+    assert ctx.input.count("key_up", "right") == 1 and not run.travel_keys
+    run.search_quest_npc(ctx, 10.6, nav, 0)
+    assert ctx.input.count("key_down", "right") == 2
+
+
+def test_legacy_route_turn_is_small_and_paced(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    turns = []
+    monkeypatch.setattr(ctx.input, "rmb_turn", turns.append)
+    run.turn(ctx, math.pi, 10)
+    run.turn(ctx, -math.pi, 10.1)
+    run.turn(ctx, math.pi, 10.3)
+    assert len(turns) == 1 and abs(turns[0]) <= 40
+    run.turn(ctx, -math.pi, 10.6)
+    assert len(turns) == 2 and abs(turns[1]) <= 40
+
+
+def test_quest_runs_to_corpse_confirms_popup_and_prepares_before_resuming(tmp_path, monkeypatch):
+    run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
+    run.auto_route = run.require_prepared = True
+    run.steps = [quest.QuestStep(12345, "9", None, None, None, None, frozenset({244669}))]
+    ctx.heading = lambda: 1.5 * math.pi
+    monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (0, 0, 1600, 925))
+    alive = RecoverySample(LifeState.ALIVE)
+    release = RecoverySample(LifeState.DEAD, button=(.5, .4), ui_aspect=.5625, dialog=True)
+    ghost = RecoverySample(LifeState.GHOST, corpse=(.43, .5))
+    current = [alive]
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED)
+    monkeypatch.setattr(quest, "decode_travel", lambda _: replace(
+        nav, sequence=ctx.frame_sequence(), recovery=current[0]))
+
+    tick(QuestState.ACTIVE)
+    current[0] = release
+    tick(QuestState.ACTIVE)
+    assert ctx.input.last("move")[1] == (800, 385)
+    assert not ctx.input.count("mouse_down")
+    current[0] = replace(release, hovered=True)
+    tick(QuestState.ACTIVE, elapsed=.3)
+    assert ctx.input.count("mouse_down", "left") == 1
+    current[0] = ghost
+    tick(QuestState.ACTIVE, elapsed=.3)
+    assert ctx.input.count("key_down", "w") == 1
+    current[0] = replace(ghost, dialog=True)
+    tick(QuestState.ACTIVE, elapsed=.3)
+    assert ctx.input.count("key_up", "w") == 1 and ctx.input.count("mouse_down", "left") == 1
+    current[0] = replace(ghost, dialog=True, button=(.5, .45), ui_aspect=.5625)
+    tick(QuestState.ACTIVE)
+    current[0] = replace(current[0], hovered=True)
+    tick(QuestState.ACTIVE, elapsed=.3)
+    assert ctx.input.count("mouse_down", "left") == 2
+
+    prep = replace(alive, pet=PetState.ABSENT, pet_expected=True, follow=True, summon=True,
+                   revive=True, buff_missing=True)
+    current[0] = prep
+    tick(QuestState.ACTIVE)
+    tick(QuestState.ACTIVE, elapsed=.7)
+    assert ctx.input.count("key_down", "f10") == 1
+    assert not ctx.input.count("key_down", "f11")
+    tick(QuestState.ACTIVE, elapsed=7.1)
+    assert ctx.input.count("key_down", "f11") == 1
+    current[0] = replace(prep, pet=PetState.ALIVE)
+    tick(QuestState.ACTIVE, elapsed=.4)
+    assert ctx.input.count("key_down", "f9") == 1
+    tick(QuestState.ACTIVE, elapsed=.7)
+    assert ctx.input.count("key_down", "f12") == 1 and run.recovery is not None
+    assert not ctx.input.count("key_down", "tab")
+    current[0] = replace(current[0], buff_missing=False)
+    tick(QuestState.ACTIVE, elapsed=.4)
+    assert run.recovery is None and ctx.stats["quest_recoveries"] == 1
+    tick(QuestState.ACTIVE)
+    assert run.OUTCOME is None and run.arrived
+
+
+def test_apr_search_point_can_pick_up_confirmed_object_without_minimap_dot(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route = run.arrived = True
+    ctx.cfg.channel.x, ctx.cfg.channel.y = 40, 980
+    probe = (.54, .55)
+    monkeypatch.setattr(quest, "frontmost_game_bounds", lambda: (0, 0, 1920, 1080))
+    monkeypatch.setattr(quest, "pumpkin_probe_points", lambda *_: (probe,))
+    nav = TravelSample(90885, 2451, 2451, (.44, .5), (.437, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, precise_object=True, apr_waypoint=True)
+
+    run.search_object(ctx, 10, nav, 0)
+    assert run.arrived and ctx.input.count("move") == 1 and not ctx.input.count("mouse_down")
+    run.search_object(ctx, 11, replace(nav, sequence=2, objective_cursor=probe), 0)
+    assert ctx.input.count("mouse_down", "right") == 1
+    run.search_object(ctx, 16.1, replace(nav, sequence=3, objective_cursor=probe), 0)
+    assert ctx.input.count("mouse_down", "right") == 2 and ctx.input.count("move") == 1
+    run.search_object(ctx, 21.2, replace(nav, sequence=4, objective_cursor=probe), 0)
+    assert run.OUTCOME == "stopped:quest_object_interaction_unconfirmed"
+    assert ctx.input.count("move") == 1 and run.search_waypoint is None
 
 
 @pytest.mark.parametrize("immediate", [False, True])
@@ -585,6 +777,54 @@ def test_combat_quest_requires_allowlisted_target_and_credit_before_turn_in(tmp_
     assert run.OUTCOME == "completed" and ctx.stats["quests_done"] == 1
 
 
+def test_combat_target_gap_before_leaving_combat_preserves_corpse_loot(tmp_path, monkeypatch):
+    run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
+    run.auto_route = run.require_prepared = True
+    run.steps = [quest.QuestStep(12345, "9", None, None, None, None, frozenset({244669}))]
+
+    def navigation(_):
+        return TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+                            QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, ctx.frame_sequence(),
+                            task=TaskFlags.PREPARED, objective_action=ObjectiveAction.COMBAT,
+                            fetch_ready=True, corpse_lootable=True)
+
+    monkeypatch.setattr(quest, "decode_travel", navigation)
+    for _ in range(3):
+        tick(QuestState.ACTIVE, target=244669)
+    assert ctx.input.count("key_down", "4") == 1
+    tick(QuestState.ACTIVE, target=0, fighting=True, elapsed=.2)
+    assert run.hunt.fight.target_id == 244669 and run.defense is None
+    assert not ctx.input.count("key_down", "tab")
+    tick(QuestState.ACTIVE, target=244669, dead=True, elapsed=.9)
+    assert ctx.input.count("key_down", "l") == 1 and run.OUTCOME is None
+
+
+@pytest.mark.parametrize("corpse_returns", [True, False])
+def test_lost_corpse_reselects_once_then_tries_fetch(tmp_path, monkeypatch, corpse_returns):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.hunt = quest.QuestHunt(frozenset({244676}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=244676, state_epoch=2)
+    navigation = SimpleNamespace(phase=QuestState.ACTIVE, task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE,
+                                 flags=TravelFlags.KEYS_VERIFIED, last_target_verified=True,
+                                 fetch_ready=True, corpse_lootable=True)
+    missing = SimpleNamespace(target_dead=False, target_id=0, unsafe=False, key_verified=True)
+    assert run.loot_corpse(ctx, 0, 0, missing, navigation)
+    assert run.loot_corpse(ctx, .3, 0, missing, navigation)
+    assert ctx.input.count("key_down", "p") == 1
+    corpse = SimpleNamespace(target_dead=True, target_id=244676, state_epoch=4,
+                             previous_target_epoch=None, unsafe=False)
+    assert run.loot_corpse(ctx, .6, 0, corpse, navigation)
+    assert not ctx.input.count("key_down", "l") and not ctx.input.count("key_down", "f")
+    if corpse_returns:
+        corpse.previous_target_epoch = 2
+        assert run.loot_corpse(ctx, .9, 0, corpse, navigation)
+    else:
+        navigation.corpse_lootable = None
+        assert run.loot_corpse(ctx, 1.6, 0, missing, navigation)
+        assert run.loot_corpse(ctx, 2, 0, missing, navigation)
+    assert ctx.input.count("key_down", "l") == 1
+
+
 def test_prepared_collection_defends_after_dismount_and_resumes(tmp_path, monkeypatch):
     run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
     run.auto_route = run.require_prepared = True
@@ -596,7 +836,7 @@ def test_prepared_collection_defends_after_dismount_and_resumes(tmp_path, monkey
     def navigation(_):
         return TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
                             QuestState.ACTIVE, flags[0], ctx.frame_sequence(), task=TaskFlags.PREPARED,
-                            objective_action=ObjectiveAction.INTERACT)
+                            objective_action=ObjectiveAction.INTERACT, objective_cursor=(.5, .6))
 
     monkeypatch.setattr(quest, "decode_travel", navigation)
     tick(QuestState.ACTIVE)
@@ -645,7 +885,7 @@ def test_fetch_is_bounded_and_falls_back_to_normal_loot(tmp_path, monkeypatch, l
     run.hunt.fight = SimpleNamespace(presses=1, target_id=244669, state_epoch=2)
     corpse = SimpleNamespace(target_dead=True, target_id=244669, state_epoch=2, unsafe=False)
     navigation = SimpleNamespace(task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE,
-                                 fetch_ready=True, corpse_lootable=True)
+                                 flags=TravelFlags.KEYS_VERIFIED, fetch_ready=True, corpse_lootable=True)
     assert run.loot_corpse(ctx, 0, 0, corpse, navigation)
     assert ctx.input.count("key_down", "l") == 1
     assert run.loot_corpse(ctx, 4, 0, corpse, navigation)
@@ -655,3 +895,51 @@ def test_fetch_is_bounded_and_falls_back_to_normal_loot(tmp_path, monkeypatch, l
     assert ctx.input.count("key_down", "f") == int(not looted)
     assert not run.loot_corpse(ctx, 9, 0, corpse, navigation)
     assert ctx.input.count("key_down", "l") == 1
+
+
+@pytest.mark.parametrize("lootable", [False, None])
+def test_fetch_attempts_despite_negative_loot_flag_and_requires_feedback(tmp_path, monkeypatch, lootable):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.hunt = quest.QuestHunt(frozenset({244676}))
+    fight = run.hunt.fight = SimpleNamespace(presses=1, target_id=244676, state_epoch=2)
+    # Replay the live failure: P restored the killed mob, Fetch ready, lootable=False.
+    run.corpse_restore = fight, 0
+    corpse = SimpleNamespace(target_dead=True, target_id=244676, state_epoch=4,
+                             previous_target_epoch=2, unsafe=False)
+    navigation = SimpleNamespace(task=TaskFlags.PREPARED, flags=TravelFlags.KEYS_VERIFIED,
+                                 fetch_ready=True, corpse_lootable=lootable)
+    assert run.loot_corpse(ctx, 2, 0, corpse, navigation)
+    assert ctx.input.count("key_down", "l") == 1
+    assert run.loot_corpse(ctx, 2.2, 0, corpse, navigation)
+    assert run.loot_for_fight is None and run.fetch_attempt is not None
+    assert not run.loot_corpse(ctx, 3, 1, corpse, navigation)
+    assert run.loot_for_fight is fight and run.fetch_attempt is None
+    assert ctx.input.count("key_down", "l") == 1
+
+
+def test_fetch_negative_flag_without_feedback_times_out_without_retry(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.hunt = quest.QuestHunt(frozenset({244676}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=244676, state_epoch=2)
+    corpse = SimpleNamespace(target_dead=True, target_id=244676, state_epoch=2, unsafe=False)
+    navigation = SimpleNamespace(task=TaskFlags.PREPARED, flags=TravelFlags.KEYS_VERIFIED,
+                                 fetch_ready=True, corpse_lootable=False)
+    assert run.loot_corpse(ctx, 0, 0, corpse, navigation)
+    assert run.loot_corpse(ctx, 7.9, 0, corpse, navigation)
+    assert not run.loot_corpse(ctx, 8.1, 0, corpse, navigation)
+    assert not run.loot_corpse(ctx, 9, 0, corpse, navigation)
+    assert ctx.input.count("key_down", "l") == 1
+    assert run.loot_for_fight is None and run.fetch_attempt is None
+
+
+@pytest.mark.parametrize("flag", [TravelFlags.MOUNTED, TravelFlags.FLYING, TravelFlags.FALLING,
+                                  TravelFlags.SWIMMING, TravelFlags.CASTING, TravelFlags.IN_COMBAT])
+def test_fetch_does_not_cast_in_blocked_state(tmp_path, monkeypatch, flag):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.hunt = quest.QuestHunt(frozenset({244676}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=244676, state_epoch=2)
+    corpse = SimpleNamespace(target_dead=True, target_id=244676, state_epoch=2, unsafe=False)
+    navigation = SimpleNamespace(task=TaskFlags.PREPARED, flags=flag,
+                                 fetch_ready=True, corpse_lootable=False)
+    assert not run.loot_corpse(ctx, 0, 0, corpse, navigation)
+    assert not ctx.input.actions

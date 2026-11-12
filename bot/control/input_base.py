@@ -76,6 +76,14 @@ class InputBase:
     def right_click(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
         self.click(x, y, button="right")
 
+    def click_world_object(self) -> None:
+        """Interact at the current, already verified hover position."""
+        self.right_click()
+
+    def click_ui(self) -> None:
+        """Click the current, already verified UI button without moving it."""
+        self.click()
+
     def rmb_turn(self, dx_px: int) -> None:
         """Hold RMB and move mouse horizontally by dx_px (character yaw)."""
         if dx_px == 0:

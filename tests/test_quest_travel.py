@@ -7,7 +7,9 @@ from bot.control.pathfinding import GridRouter
 from bot.control.quest_travel import QuestTrip
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import QuestState
-from bot.perception.travel_channel import ObjectiveAction, RoundStage, TaskFlags, TravelFlags as Flags, TravelSample, decode_travel
+from bot.perception.travel_channel import (
+    LifeState, ObjectiveAction, RoundStage, TaskFlags, TravelFlags as Flags, TravelSample, decode_travel,
+)
 
 
 def sample(**changes):
@@ -15,6 +17,24 @@ def sample(**changes):
                         QuestState.ACTIVE, Flags.CAN_FLY | Flags.CAN_MOUNT | Flags.KEYS_VERIFIED, 1,
                         descent_key="c")
     return replace(base, **changes)
+
+
+def test_ground_stall_tries_jump_turn_jump_and_both_strafes():
+    grounded = sample(flags=Flags.KEYS_VERIFIED, strafe_verified=True)
+    trip = QuestTrip(grounded.world_size, grounded.destination, "ccw_west")
+    east = 3 * math.pi / 2
+    assert trip.step(0, grounded, east).keys == {"w"}
+    jump = trip.step(3.1, grounded, east)
+    assert jump.keys == {"w"} and jump.tap == "space"
+    assert trip.step(3.8, grounded, east).keys == {"w"}
+    turn = trip.step(7, grounded, east)
+    assert not turn.keys and turn.tap in {"left", "right"}
+    jump = trip.step(7.2, grounded, east)
+    assert jump.keys == {"w"} and jump.tap == "space"
+    assert trip.step(7.9, grounded, east).keys == {"w"}
+    assert trip.step(11, grounded, east).keys == {"q"}
+    assert trip.step(11.7, grounded, east).keys == {"w"}
+    assert trip.step(14.9, grounded, east).keys == {"e"}
 
 
 def test_fly_before_mount_and_land_before_dismount():
@@ -134,12 +154,29 @@ def test_ground_route_steers_in_map_scale_and_replans_after_blockage():
     trip = QuestTrip(start.world_size, start.destination, "ccw_west")
     east = 3 * math.pi / 2
     assert trip.step(0, start, east).keys == {"w"}
-    assert trip.step(3.2, start, east).keys == {"s"}
-    command = trip.step(4, start, east)
+    assert trip.step(3.2, start, east).tap == "space"
+    assert trip.step(4, start, east).keys == {"w"}
+    assert trip.step(7.2, start, east).tap in {"left", "right"}
+    assert trip.step(7.4, start, east).tap == "space"
+    assert trip.step(8.2, start, east).keys == {"w"}
+    assert trip.step(11.4, start, east).keys == {"s"}
+    command = trip.step(12.2, start, east)
     assert trip.path[-1] == start.destination
     assert any(point[1] != start.position[1] for point in trip.path[:-1])
     assert all(trip.router.cell(point) not in trip.router.blocked for point in trip.path)
     assert command.keys & {"left", "right"}
+
+
+def test_ground_approach_releases_movement_and_pulses_only_on_fresh_frames():
+    start = sample(position=(.294, .2), flags=Flags.KEYS_VERIFIED)
+    trip = QuestTrip(start.world_size, start.destination, "ccw_west", arrival_radius=2.5)
+    east = 3 * math.pi / 2
+    turn = trip.step(0, start, east + math.radians(20))
+    assert turn.tap == "right" and turn.hold_s == .08 and not turn.keys
+    assert trip.step(.1, start, east).tap is None
+    move = trip.step(.3, replace(start, sequence=2), east)
+    assert move.tap == "w" and 0 < move.hold_s <= .16 and not move.keys
+    assert trip.step(.6, replace(start, position=(.298, .2), sequence=3), east).outcome == "arrived"
 
 
 def test_grid_search_never_routes_through_a_blocked_goal_cell():
@@ -237,6 +274,23 @@ def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows()
     spec.render_frame(with_minimap, 0, 48, spec.encode_frame(3, 3 * 64 + int(RoundStage.OBJECTIVES) + 57344 + 65536))
     telemetry = decode_travel(with_minimap)
     assert telemetry.corpse_lootable and telemetry.fetch_ready and telemetry.precise_object
+    spec.render_frame(with_minimap, 0, 48, spec.encode_frame(3, 3 * 64 + 65536 + 131072))
+    assert not decode_travel(with_minimap).apr_waypoint  # An exact object pin takes precedence.
+    spec.render_frame(with_minimap, 0, 80, spec.encode_frame(1, 2 * 131072 + 3 * 1024 + int(TaskFlags.PREPARED)))
+    assert decode_travel(with_minimap).apr_waypoint
+    recovery_strip = np.zeros((368, 142, 3), dtype=np.uint8)
+    recovery_strip[64:] = with_minimap
+    assert decode_travel(recovery_strip).recovery is None  # Existing v9 clients.
+    spec.render_frame(recovery_strip, 0, 19 * 16, spec.encode_frame(12, values[8] + 9))
+    recovery_rows = (3 * 8192 + 3 + 512 + 1024 + 2048 + 4096, 200 * 1024 + 300, 500 * 1024 + 400, 56250)
+    for index, value in enumerate(recovery_rows):
+        spec.render_frame(recovery_strip, 0, index * 16, spec.encode_frame(12 + index, value))
+    recovery = decode_travel(recovery_strip).recovery
+    assert recovery.life == LifeState.GHOST and recovery.dialog and recovery.hovered
+    assert recovery.corpse == (200 / 1023, 300 / 1023)
+    assert recovery.button == (500 / 1023, 400 / 1023) and recovery.ui_aspect == .5625
+    spec.render_frame(recovery_strip, 0, 0, spec.encode_frame(12, recovery_rows[0] - 8192))
+    assert decode_travel(recovery_strip) is None
     spec.render_frame(with_minimap, 0, 32, spec.encode_frame(2, 2 * 2048 + 233))
     assert decode_travel(with_minimap).minimap is None
     spec.render_frame(with_round, 0, 0, spec.encode_frame(3, 2 * 64 + int(RoundStage.PICKUP)))

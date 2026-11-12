@@ -345,6 +345,10 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
             return ["ok": true, "x": Int(p.x), "y": Int(p.y)]
         case "move", "mouse_down", "mouse_up", "scroll":
             return mouse(op, request, pid)
+        case "world_click":
+            return clickVerifiedTarget(pid, right: true)
+        case "ui_click":
+            return clickVerifiedTarget(pid, right: false)
         default:
             return error("未知键鼠操作")
         }
@@ -379,6 +383,11 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
                                 mouseButton: right ? .right : .left)
             event?.setIntegerValueField(.mouseEventDeltaX, value: Int64(next.x - current.x))
             event?.setIntegerValueField(.mouseEventDeltaY, value: Int64(next.y - current.y))
+            // A targeted move carries coordinates but does not set the system pointer
+            // that the game reads for world hover. Keep relative camera drags separate.
+            if !simulate && buttons.isEmpty && CGWarpMouseCursorPosition(next) != .success {
+                return error("无法将系统鼠标移动到魔兽窗口内的目标")
+            }
             guard send(event, to: pid) else { return error("无法构造鼠标事件") }
             point = next
         } else if op == "scroll" {
@@ -398,6 +407,38 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
                 if down { buttons.insert(button) } else { buttons.remove(button) }
             }
         }
+        return ["ok": true]
+    }
+
+    private func clickVerifiedTarget(_ pid: pid_t, right: Bool) -> [String: Any] {
+        guard keys.isEmpty, buttons.isEmpty, let expected = point,
+              let actual = simulate ? point : CGEvent(source: nil)?.location,
+              hypot(expected.x - actual.x, expected.y - actual.y) <= 4,
+              foreground == pid, gameContains(actual, pid: pid) else {
+            return error("点击前鼠标、前台或按键状态已变化，请重新核对目标")
+        }
+        let source = CGEventSource(stateID: .hidSystemState)
+        let button: CGMouseButton = right ? .right : .left
+        guard let down = CGEvent(mouseEventSource: source, mouseType: right ? .rightMouseDown : .leftMouseDown,
+                                 mouseCursorPosition: actual, mouseButton: button),
+              let up = CGEvent(mouseEventSource: source, mouseType: right ? .rightMouseUp : .leftMouseUp,
+                               mouseCursorPosition: actual, mouseButton: button) else {
+            return error("无法构造点击事件")
+        }
+        down.flags = []
+        up.flags = []
+        down.setIntegerValueField(.mouseEventClickState, value: 1)
+        up.setIntegerValueField(.mouseEventClickState, value: 1)
+        // Both world objects and native UI may poll system button state. Send a
+        // complete click through HID only after checking the verified position.
+        if !simulate { down.post(tap: .cghidEventTap) }
+        eventCount += 1
+        defer {
+            up.timestamp = DispatchTime.now().uptimeNanoseconds
+            if !simulate { up.post(tap: .cghidEventTap) }
+            eventCount += 1
+        }
+        if !simulate { usleep(80000) }
         return ["ok": true]
     }
 

@@ -51,6 +51,15 @@ def test_pumpkin_probes_include_screen_edges_and_exclude_hud():
         assert any(abs(u * 1280 - x) < 5 and abs(v * 720 - y) < 5 for u, v in probes)
 
 
+def test_red_pumpkin_is_separated_from_orange_soil():
+    frame = np.full((720, 1280, 3), (120, 80, 45), dtype=np.uint8)
+    cv2.ellipse(frame, (824, 258), (17, 13), 0, 0, 360, (140, 60, 54), -1)
+
+    probes = cvmod.pumpkin_probe_points(frame)
+
+    assert any(abs(u * 1280 - 824) < 5 and abs(v * 720 - 258) < 5 for u, v in probes[:6])
+
+
 def pytest_approx(v):
     import pytest
 

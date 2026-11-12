@@ -91,6 +91,9 @@ class ModuleContext:
     def heading(self):
         return self.channel.heading()
 
+    def heading_age(self):
+        return self.channel.heading_age()
+
     def status(self):
         return self.channel.status()
 

@@ -8,6 +8,13 @@ import yaml
 from bot import calibrate_cli, cli
 from bot.modules import quest
 from bot.perception import calibration, channel_spec as wire
+from bot.perception.capture import game_ui_bounds
+
+
+def test_stock_minimap_dimensions_exclude_the_window_title_bar():
+    minimap = SimpleNamespace(size=(120 / 1023, 213 / 1023))
+    assert game_ui_bounds((79, 65, 1688, 977), minimap) == (79, 91, 1688, 951)
+    assert game_ui_bounds((0, 0, 1688, 951), minimap) == (0, 0, 1688, 951)
 
 
 class Desktop:

@@ -16,14 +16,15 @@ from ..control.pathfinding import GridRouter
 from ..control.quest_travel import QuestTrip
 from ..core.statemachine import State
 from ..decision.startlux import DECISION_WAIT_S
-from ..perception.capture import CaptureError, frontmost_game_bounds
+from ..perception.capture import CaptureError, frontmost_game_bounds, game_ui_bounds
 from ..perception.channel_spec import REGION_H, REGION_W, StatusFlags
 from ..perception.combat_channel import combat_region, decode_combat
 from ..perception.cv import minimap_quest_dots, pumpkin_probe_points
 from ..perception.quest_channel import Dialogue, Objective, QuestKind, QuestState, decode_quest, quest_region
-from ..perception.travel_channel import ObjectiveAction, RoundStage, TaskFlags, TravelFlags, decode_travel, travel_region
+from ..perception.travel_channel import LifeState, ObjectiveAction, RoundStage, TaskFlags, TravelFlags, decode_travel, travel_region
 from .base import Module
-from .combat import QuestDefense, QuestHunt, tap_combat_key
+from .combat import Fight, QuestDefense, QuestHunt, SEARCH_ARC, TURN_INTERVAL, TURN_SETTLE, tap_combat_key
+from .recovery import QuestRecovery
 
 STORY_KINDS = frozenset({QuestKind.CAMPAIGN, QuestKind.MAINLINE, QuestKind.SIDE})
 UNSAFE_FLAGS = StatusFlags.DEAD | StatusFlags.GHOST | StatusFlags.FLYING
@@ -32,12 +33,10 @@ TURN_IN_DIALOGUE = {Dialogue.TURN_IN, Dialogue.PROGRESS, Dialogue.REWARD}
 QUEST_TARGETS = {90882: frozenset({244669, 244670, 244671, 244672})}
 ARRIVAL_QUESTS = frozenset({90883})
 PREPARED_FOCUS_WAIT_S = 45
-OBJECT_PROBES = tuple(sorted(
-    ((x / 100, y / 100) for y in range(36, 77, 8) for x in range(28, 73, 5)),
-    key=lambda point: math.dist(point, (.5, .60)),
-))
-NPC_SCAN_ANGLES = tuple(math.radians(degrees) for degrees in (0, 30, -30, 65, -65, 120, -120, 180))
+NPC_SCAN_ANGLES = SEARCH_ARC
 OBJECT_APPROACH_YARDS = 2.5
+OBJECT_CLOSE_RECHECK_YARDS = 16
+OBJECT_REFINE_YARDS = 1.25
 log = logging.getLogger(__name__)
 
 
@@ -148,6 +147,8 @@ class RunQuests(State):
         self.npc_scan_aligned_at: float | None = None
         self.npc_scan_direction = 0
         self.npc_scan_heading = 0.0
+        self.npc_turn_at = float("-inf")
+        self.mouse_turn_at = float("-inf")
         self.npc_select_attempted = False
         self.pickup_dialogue_retries = 0
         self.pickup_dialogue_recovery_at: float | None = None
@@ -167,19 +168,27 @@ class RunQuests(State):
         self.accepted_from_offer = False
         self.hunt: QuestHunt | None = None
         self.defense: QuestDefense | None = None
+        self.recovery: QuestRecovery | None = None
         self.loot_for_fight = None
         self.fetch_for_fight = None
-        self.fetch_attempt: tuple[float, int] | None = None
+        self.fetch_attempt: tuple[float, int, bool] | None = None
+        self.corpse_wait_at: float | None = None
+        self.corpse_approach: tuple[Fight, float, float] | None = None
+        self.corpse_restore: tuple[Fight, float] | None = None
         self.object_probe = 0
         self.object_probe_at = 0.0
         self.object_probe_sequence: int | None = None
         self.object_points: tuple[tuple[float, float], ...] | None = None
         self.object_target: tuple[float, float] | None = None
+        self.apr_waypoint: tuple[float, float] | None = None
+        self.object_check_origin: tuple[float, float] | None = None
+        self.object_check_pending: tuple[int, float] | None = None
         self.object_targets_tried: list[tuple[float, float]] = []
+        self.object_lost_revisited = False
         self.object_minimap_checked = False
         self.object_approach_yards = OBJECT_APPROACH_YARDS
         self.object_click_at: float | None = None
-        self.scanning_objects = False
+        self.object_click_attempts = 0
         self.quest_keys = {key for step in steps for key in (step.dialog_key, step.objective_key) if key}
         self.OUTCOME = None
 
@@ -206,6 +215,8 @@ class RunQuests(State):
         self.travel_keys = keys
 
     def travel(self, ctx, now, navigation, heading):
+        if self.object_target is not None and not self.recheck_object_target(ctx, now, navigation, heading):
+            return
         destination = self.object_target or self.search_waypoint or navigation.destination
         local_search = self.search_waypoint is not None
         live_object = bool(self.object_target or navigation.objective_pin and not local_search)
@@ -221,7 +232,8 @@ class RunQuests(State):
             self.trip = QuestTrip(navigation.world_size, destination, ctx.cfg.navigation.facing_convention,
                                   arrival_radius=radius, walk_only=live_object or local_search)
             source = ("object_minimap" if self.object_target else
-                      "object_pin" if live_object else "local_search" if local_search else "quest_waypoint")
+                      "object_pin" if live_object else "local_search" if local_search else
+                      "apr_objective" if navigation.apr_waypoint else "quest_waypoint")
             ctx.log_event("quest_route", {"id": navigation.quest_id, "map": navigation.map_id,
                                           "destination": destination, "arrival_radius": radius,
                                           "source": source})
@@ -238,6 +250,10 @@ class RunQuests(State):
                 self.finish_object_approach()
                 self.arrived = True
                 return
+            if command.outcome == "route_blocked" and local_search and navigation.apr_waypoint:
+                self.set_travel_keys(ctx, frozenset())
+                if self.search_quest_area(ctx, navigation):
+                    return
             if command.outcome != "arrived":
                 return self.stop(ctx, "quest_" + command.outcome)
             self.set_travel_keys(ctx, frozenset())
@@ -253,13 +269,18 @@ class RunQuests(State):
             return
         self.set_travel_keys(ctx, command.keys)
         if command.tap:
-            ctx.input.tap(command.tap)
+            if command.hold_s is None:
+                ctx.input.tap(command.tap)
+            else:
+                ctx.input.tap(command.tap, hold_s=command.hold_s)
 
-    def turn(self, ctx, error):
+    def turn(self, ctx, error, now):
         cfg = ctx.cfg.input
-        if abs(error) > math.radians(cfg.turn_deadband_deg):
-            pixels = int(max(-cfg.mouse_turn_max_px, min(error * cfg.mouse_turn_gain, cfg.mouse_turn_max_px)))
+        if abs(error) > math.radians(cfg.turn_deadband_deg) and now - self.mouse_turn_at >= TURN_INTERVAL:
+            limit = min(40, cfg.mouse_turn_max_px)
+            pixels = int(max(-limit, min(error * cfg.mouse_turn_gain, limit)))
             ctx.input.rmb_turn(-pixels if cfg.invert_turn else pixels)
+            self.mouse_turn_at = now
 
     def walk(self, ctx, now, pos, heading):
         decision = self.follower.update(now, pos, heading, self.forward)
@@ -272,8 +293,42 @@ class RunQuests(State):
                 self.stop(ctx, "quest_route_blocked")
             return
         if decision.turn_err is not None:
-            self.turn(ctx, decision.turn_err)
+            self.turn(ctx, decision.turn_err, now)
         self.set_forward(ctx, decision.move_forward)
+
+    def recover(self, ctx, now, navigation, status):
+        sample = navigation.recovery if navigation else None
+        life = sample.life if sample else LifeState.UNKNOWN
+        dead = life in {LifeState.DEAD, LifeState.GHOST}
+        if life == LifeState.UNKNOWN and status:
+            dead = bool(status[0] & (StatusFlags.DEAD | StatusFlags.GHOST))
+        if self.recovery is None:
+            if not dead:
+                return False
+            if navigation and sample is None:
+                self.stop(ctx, "quest_recovery_addon_required")
+                return True
+            self.set_forward(ctx, False)
+            self.execution_started = True
+            self.recovery = QuestRecovery(now)
+        result = self.recovery.tick(ctx, now, navigation, ctx.heading(),
+                                    lambda keys: self.set_travel_keys(ctx, keys), frontmost_game_bounds)
+        if result == "done":
+            self.recovery = None
+            self.phase = self.sample = self.defense = None
+            self.last_sequence = self.nav_sequence = None
+            self.last_frame = self.last_target = now
+            self.unusable_since = None
+            self.last_action = 0
+            if self.round_advance_at is not None:
+                self.round_advance_at = now
+            if self.followup_started is not None:
+                self.followup_started = now
+            ctx.stats["quest_recoveries"] = ctx.stats.get("quest_recoveries", 0) + 1
+            ctx.log_event("quest_recovery_complete", {"id": self.steps[self.index].quest_id})
+        elif result:
+            self.stop(ctx, "quest_recovery_" + result)
+        return True
 
     def tick(self, ctx):
         now = time.monotonic()
@@ -305,13 +360,16 @@ class RunQuests(State):
                 self.last_frame = self.last_target = now
         step = self.steps[self.index]
         channel = ctx.cfg.channel
+        status = ctx.channel.status(max_age_s=1.5)
+        navigation = decode_travel(ctx.capture.grab(*travel_region(channel.x, channel.y))) if self.auto_route else None
+        if self.auto_route and self.recover(ctx, now, navigation, status):
+            return
         frame = decode_quest(ctx.capture.grab(*quest_region(channel.x, channel.y)))
         if frame is None:
             self.set_forward(ctx, False)
             if now - self.last_frame > 3:
                 return self.stop(ctx, "quest_channel_lost")
             return
-        navigation = decode_travel(ctx.capture.grab(*travel_region(channel.x, channel.y))) if self.auto_route else None
         if self.require_prepared and not self.travel_only and navigation and navigation.round_stage != RoundStage.NONE:
             if frame.quest_id != navigation.quest_id or frame.state != navigation.phase:
                 return self.wait_for_data(ctx, now, "quest_navigation_channel_unavailable")
@@ -358,9 +416,12 @@ class RunQuests(State):
             return self.stop(ctx, "quest_plan_not_tracked")
         if frame.map_id != self.map_id:
             return self.stop(ctx, "quest_wrong_map")
-        status, pos, heading = ctx.channel.status(max_age_s=1.5), ctx.pos(), ctx.heading()
+        pos, heading = ctx.pos(), ctx.heading()
         unsafe = UNSAFE_FLAGS & ~StatusFlags.FLYING if self.auto_route else UNSAFE_FLAGS
         if status and status[0] & unsafe:
+            if navigation and navigation.recovery and navigation.recovery.life == LifeState.ALIVE:
+                self.set_forward(ctx, False)
+                return
             return self.stop(ctx, "quest_unsafe_character_state")
         if status is None or pos is None or heading is None or self.sample is None:
             self.set_forward(ctx, False)
@@ -379,6 +440,8 @@ class RunQuests(State):
             ctx.log_event("quest_accept_confirmed", {"id": step.quest_id, "state": sample.state.name})
         in_combat = bool(status[0] & StatusFlags.IN_COMBAT
                          or navigation and navigation.flags & TravelFlags.IN_COMBAT)
+        if not in_combat:
+            self.corpse_wait_at = None
         if (sample.state == QuestState.READY and self.hunt and navigation and not self.travel_only
                 and navigation.quest_id == step.quest_id and navigation.phase == sample.state
                 and frame.dialogue == Dialogue.CLOSED and not in_combat):
@@ -395,6 +458,17 @@ class RunQuests(State):
                 return self.stop(ctx, "quest_navigation_channel_stale")
             combat = decode_combat(ctx.capture.grab(*combat_region(channel.x, channel.y)))
             fight = self.hunt and self.hunt.fight
+            if (self.defense is None and self.arrived and fight and fight.presses
+                    and self.phase == QuestState.ACTIVE and frame.dialogue == Dialogue.CLOSED
+                    and (combat is None or not combat.target_id or combat.target_dead)):
+                if self.corpse_wait_at is None:
+                    self.corpse_wait_at = now
+                    ctx.log_event("quest_corpse_wait", {"id": step.quest_id, "target": fight.target_id})
+                if now - self.corpse_wait_at < 2.5:
+                    self.set_forward(ctx, False)
+                    return
+            else:
+                self.corpse_wait_at = None
             continuing_hunt = (self.defense is None and self.arrived and self.phase == sample.state == QuestState.ACTIVE
                                and frame.dialogue == Dialogue.CLOSED and combat and fight
                                and combat.target_id == fight.target_id
@@ -474,7 +548,7 @@ class RunQuests(State):
                     and objective_action == ObjectiveAction.NONE):
                 return self.wait_for_data(ctx, now, "quest_objective_profile_required")
         hunting = sample.state == QuestState.ACTIVE and not self.travel_only and (
-            bool(step.combat_targets) or (objective_action == ObjectiveAction.COMBAT and not self.scanning_objects)
+            bool(step.combat_targets) or objective_action == ObjectiveAction.COMBAT
             or (self.phase == QuestState.ACTIVE and self.hunt is not None and objective_action != ObjectiveAction.INTERACT)
         )
         if in_combat:
@@ -506,6 +580,8 @@ class RunQuests(State):
             self.trip, self.search_waypoint, self.searches = None, None, 0
             self.loot_for_fight = None
             self.fetch_for_fight, self.fetch_attempt = None, None
+            self.corpse_wait_at, self.corpse_approach = None, None
+            self.corpse_restore = None
             self.arrived, self.attempts, self.action_signature = False, 0, None
             self.npc_press_at, self.npc_step, self.npc_steps = None, None, 0
             self.npc_range_wait_since = None
@@ -522,10 +598,13 @@ class RunQuests(State):
             self.object_probe, self.object_probe_sequence = 0, None
             self.object_points = None
             self.object_target, self.object_targets_tried = None, []
+            self.object_lost_revisited = False
+            self.apr_waypoint = None
+            self.object_check_origin = self.object_check_pending = None
             self.object_minimap_checked = False
             self.object_approach_yards = OBJECT_APPROACH_YARDS
             self.object_click_at = None
-            self.scanning_objects = False
+            self.object_click_attempts = 0
             ctx.log_event("quest_phase", {"id": step.quest_id, "kind": sample.kind.name, "state": self.phase.name})
         if hunting and self.hunt is None:
             self.hunt = QuestHunt(step.combat_targets)
@@ -618,10 +697,16 @@ class RunQuests(State):
         if objective_action == ObjectiveAction.INTERACT and not self.travel_only:
             if self.object_click_at is not None and sample.progress[0] > self.progress[0]:
                 self.object_click_at = None
+                self.object_lost_revisited = False
                 self.search_waypoint, self.searches = None, 0
                 self.finish_object_approach()
                 self.progress, self.last_progress = sample.progress, now
                 ctx.log_event("quest_object_progress", {"id": step.quest_id, "progress": sample.progress})
+            if navigation.apr_waypoint and navigation.destination != self.apr_waypoint:
+                if self.apr_waypoint is not None and self.object_click_at is None:
+                    self.finish_object_approach()
+                    self.search_waypoint, self.trip, self.arrived, self.searches = None, None, False, 0
+                self.apr_waypoint = navigation.destination
             if (navigation.objective_pin and navigation.destination and self.arrived and self.trip
                     and self.object_click_at is None and self.object_target is None
                     and self.trip.router.distance(self.trip.destination, navigation.destination) > 1):
@@ -652,7 +737,7 @@ class RunQuests(State):
                 if navigation.flags & (TravelFlags.CASTING | TravelFlags.MOUNTED):
                     return
                 return self.act(ctx, "j", now)
-            if objective_action == ObjectiveAction.INTERACT or self.scanning_objects:
+            if objective_action == ObjectiveAction.INTERACT:
                 return self.search_object(ctx, now, navigation, heading)
             if step.objective_key is None:
                 if now - self.last_progress > 10:
@@ -700,7 +785,8 @@ class RunQuests(State):
         self.set_forward(ctx, False)
         if self.defense is None:
             self.defense = QuestDefense(now)
-            self.hunt = None
+            if not (self.hunt and self.hunt.fight and self.hunt.fight.presses):
+                self.hunt = None
             ctx.log_event("quest_defense_started", {"id": navigation.quest_id, "phase": navigation.phase.name})
         blocked = (TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING | TravelFlags.SWIMMING
                    | TravelFlags.CASTING)
@@ -710,8 +796,10 @@ class RunQuests(State):
             return self.stop(ctx, "quest_combat_action_key_conflicts")
         status, key = self.defense.step(now, combat)
         if key:
+            if status == "approach" and not navigation.flags & TravelFlags.KEYS_VERIFIED:
+                return self.stop(ctx, "quest_navigation_bindings_unverified")
             self.execution_started = True
-            event = "quest_defense_turn" if status == "turn" else "quest_defense_action"
+            event = "quest_defense_" + (status if status in {"turn", "approach"} else "action")
             ctx.log_event(event, {"id": navigation.quest_id, "key": key, "target": combat.target_id})
             tap_combat_key(ctx.input, status, key)
         elif status != "waiting":
@@ -874,9 +962,14 @@ class RunQuests(State):
             base = heading + self.trip.turn_error(navigation.position, navigation.destination, heading)
         target = base + NPC_SCAN_ANGLES[self.npc_scan_direction]
         turn = self.trip.turn_keys(heading_error(heading, target), math.radians(12))
-        self.set_travel_keys(ctx, turn)
+        self.set_travel_keys(ctx, frozenset())
         if turn:
             self.npc_scan_aligned_at = None
+            if now - self.npc_turn_at >= TURN_INTERVAL:
+                self.npc_turn_at = now
+                ctx.input.tap(next(iter(turn)), hold_s=.06)
+        elif now - self.npc_turn_at < TURN_SETTLE:
+            return
         elif self.npc_scan_aligned_at is None:
             self.npc_scan_aligned_at = now
         elif now - self.npc_scan_aligned_at >= .45:
@@ -889,8 +982,10 @@ class RunQuests(State):
             self.object_targets_tried.append(self.object_target)
             self.object_target = None
         self.object_probe, self.object_points, self.object_probe_sequence = 0, None, None
+        self.object_check_origin = self.object_check_pending = None
         self.object_minimap_checked = False
         self.object_approach_yards = OBJECT_APPROACH_YARDS
+        self.object_click_attempts = 0
 
     def object_minimap_target(self, ctx, navigation, bounds, heading, near=None):
         minimap = navigation.minimap
@@ -921,14 +1016,88 @@ class RunQuests(State):
             distance = math.hypot(east, south)
             point = (px + east / map_width, py + south / map_height)
             if (distance <= 85 and all(0 < v < 1 for v in point)
+                    and (navigation.destination is None or router.distance(point, navigation.destination) <= 110)
                     and (near is None or router.distance(point, near) <= 8)
                     and all(router.distance(point, tried) > 6 for tried in self.object_targets_tried)):
-                candidates.append((distance, point))
+                candidates.append((router.distance(point, near) if near is not None else distance, point, distance))
         if candidates:
-            distance, point = min(candidates)
-            ctx.log_event("quest_object_minimap_target", {"id": navigation.quest_id, "destination": point,
-                                                         "distance_yards": round(distance, 2)})
+            _, point, distance = min(candidates)
+            event = "quest_object_minimap_recheck" if near is not None else "quest_object_minimap_target"
+            ctx.log_event(event, {"id": navigation.quest_id, "destination": point,
+                                  "distance_yards": round(distance, 2)})
             return point
+
+    def recheck_object_target(self, ctx, now, navigation, heading):
+        if navigation.position is None or navigation.world_size is None:
+            self.set_forward(ctx, False)
+            return False
+        router = GridRouter(*navigation.world_size)
+        position = navigation.position
+        remaining = router.distance(position, self.object_target)
+        if self.object_check_origin is None:
+            self.object_check_origin = position
+        walked = router.distance(position, self.object_check_origin)
+        if self.object_check_pending is None:
+            if walked < 12 and (walked < 3 or remaining > 6):
+                return True
+            self.set_forward(ctx, False)
+            self.object_check_pending = navigation.sequence, now
+            return False
+        sequence, started = self.object_check_pending
+        if navigation.sequence == sequence and now - started < .75:
+            return False
+        updated = None
+        if navigation.sequence != sequence:
+            try:
+                bounds = game_ui_bounds(frontmost_game_bounds(), navigation.minimap)
+                updated = self.object_minimap_target(ctx, navigation, bounds, heading, near=self.object_target)
+            except ValueError:
+                pass
+        if updated is None and remaining > 6 and now - started < .75:
+            return False
+        self.object_check_pending = None
+        self.object_check_origin = position
+        if updated is None:
+            if remaining <= OBJECT_CLOSE_RECHECK_YARDS:
+                # Terrain or the player arrow can obscure the dot. Finish only
+                # this short approach and require a world tooltip before clicking.
+                ctx.log_event("quest_object_minimap_nearby", {"id": navigation.quest_id,
+                                                                "distance_yards": round(remaining, 2)})
+                return True
+            ctx.log_event("quest_object_minimap_lost", {"id": navigation.quest_id,
+                                                      "distance_yards": round(remaining, 2)})
+            last_seen = self.object_target
+            self.finish_object_approach()
+            if navigation.apr_waypoint and not self.object_lost_revisited:
+                self.object_lost_revisited = True
+                self.search_waypoint, self.trip, self.arrived = last_seen, None, False
+                ctx.log_event("quest_object_last_seen_search", {"id": navigation.quest_id,
+                                                               "destination": last_seen})
+                return False
+            self.arrived = True
+            return False
+        if router.distance(updated, self.object_target) > 1:
+            self.object_target, self.trip = updated, None
+        return True
+
+    def refine_object_approach(self, ctx, navigation, bounds, heading):
+        if self.object_approach_yards == OBJECT_REFINE_YARDS:
+            return False
+        if self.object_target is not None:
+            updated = self.object_minimap_target(ctx, navigation, bounds, heading, near=self.object_target)
+            self.object_target = updated or self.object_target
+        target = self.object_target or (navigation.destination if navigation.objective_pin else None)
+        if target is None or navigation.position is None or navigation.world_size is None:
+            return False
+        distance = GridRouter(*navigation.world_size).distance(navigation.position, target)
+        if not OBJECT_REFINE_YARDS < distance <= OBJECT_CLOSE_RECHECK_YARDS:
+            return False
+        self.object_approach_yards = OBJECT_REFINE_YARDS
+        self.search_waypoint, self.trip, self.arrived = None, None, False
+        self.object_probe, self.object_points, self.object_probe_sequence = 0, None, None
+        ctx.log_event("quest_object_approach_refine", {"id": navigation.quest_id,
+                                                       "distance_yards": round(distance, 2)})
+        return True
 
     def search_object(self, ctx, now, navigation, heading):
         self.set_forward(ctx, False)
@@ -939,37 +1108,31 @@ class RunQuests(State):
         if self.object_click_at is not None:
             if now - self.object_click_at < 5:
                 return
+        pumpkin = navigation.quest_id == 90885
+        hover_wait = .50
         if self.object_probe_sequence is not None and (
-            navigation.sequence == self.object_probe_sequence or now - self.object_probe_at < .25
+            navigation.sequence == self.object_probe_sequence or now - self.object_probe_at < hover_wait
         ):
             return
         try:
-            bounds = frontmost_game_bounds()
+            bounds = game_ui_bounds(frontmost_game_bounds(), navigation.minimap)
         except ValueError:
             return
         x, y, width, height = bounds
         channel = ctx.cfg.channel
         if not (x <= channel.x < x + width and y <= channel.y < y + height):
             return
-        pumpkin = navigation.quest_id == 90885
         precise = navigation.precise_object or navigation.objective_pin or pumpkin
         if self.object_click_at is not None:
             ctx.log_event("quest_object_progress_unconfirmed", {"id": navigation.quest_id})
             self.object_click_at = None
-            if precise and self.object_approach_yards == OBJECT_APPROACH_YARDS:
-                if self.object_target is not None:
-                    updated = self.object_minimap_target(ctx, navigation, bounds, heading, near=self.object_target)
-                    self.object_target = updated or self.object_target
-                target = self.object_target or (navigation.destination if navigation.objective_pin else None)
-                if target and navigation.position and navigation.world_size:
-                    distance = GridRouter(*navigation.world_size).distance(navigation.position, target)
-                    self.object_approach_yards = 1.25
-                    if distance > self.object_approach_yards:
-                        self.search_waypoint, self.trip, self.arrived = None, None, False
-                        self.object_probe, self.object_points, self.object_probe_sequence = 0, None, None
-                        ctx.log_event("quest_object_approach_refine", {"id": navigation.quest_id,
-                                                                       "distance_yards": round(distance, 2)})
-                        return
+            if self.object_click_attempts >= 2:
+                return self.stop(ctx, "quest_object_interaction_unconfirmed")
+            if precise and self.refine_object_approach(ctx, navigation, bounds, heading):
+                return
+            if (self.object_probe_sequence is None or navigation.objective_cursor is None
+                    or math.dist(navigation.objective_cursor, self.object_points[self.object_probe - 1]) > .012):
+                return self.stop(ctx, "quest_object_interaction_unconfirmed")
         if precise and not navigation.objective_pin and not self.object_minimap_checked:
             self.object_minimap_checked = True
             self.object_target = self.object_minimap_target(ctx, navigation, bounds, heading)
@@ -979,10 +1142,11 @@ class RunQuests(State):
                 return
             ctx.log_event("quest_object_minimap_no_target", {"id": navigation.quest_id,
                                                             "calibrated": navigation.minimap is not None})
-            if not self.search_quest_area(ctx, navigation):
-                return self.stop(ctx, "quest_object_not_found")
-            self.finish_object_approach()
-            return
+            if not navigation.apr_waypoint:
+                if not self.search_quest_area(ctx, navigation):
+                    return self.stop(ctx, "quest_object_not_found")
+                self.finish_object_approach()
+                return
         if self.object_points is None:
             hints = ()
             if pumpkin:
@@ -997,23 +1161,42 @@ class RunQuests(State):
                 try:
                     hints = pumpkin_probe_points(ctx.capture.grab(x, y, width, height), exclusions)
                 except CaptureError:
-                    log.warning("南瓜画面采样失败，继续使用鼠标网格。")
+                    log.warning("南瓜画面采样失败，取消鼠标探测。")
                 ctx.log_event("quest_object_visual_candidates", {"id": navigation.quest_id, "points": hints})
-            self.object_points = hints + OBJECT_PROBES
+            # Only observed candidates may be hovered. A map point alone does
+            # not identify a clickable screen location; never raster-scan it.
+            cursor = navigation.objective_cursor
+            self.object_points = tuple(dict.fromkeys(((cursor,) if cursor else ()) + tuple(hints)))[:6]
+            if not self.object_points:
+                ctx.log_event("quest_object_detection_missing", {"id": navigation.quest_id})
+                return self.stop(ctx, "quest_object_visual_target_required")
         cursor = navigation.objective_cursor
         if self.object_probe_sequence is not None and cursor:
             expected = self.object_points[self.object_probe - 1]
             # Require the game to report the object at the probe we just sent.
             target = self.object_target or (navigation.destination if navigation.objective_pin else None)
+            reach = self.object_approach_yards + .5
+            if target is None and navigation.apr_waypoint:
+                target = self.search_waypoint or navigation.destination
+                reach = 5  # APR waypoints mark a search area, not an exact object location.
             nearby = target and navigation.position and navigation.world_size and GridRouter(
-                *navigation.world_size).distance(navigation.position, target) <= self.object_approach_yards + .5
+                *navigation.world_size).distance(navigation.position, target) <= reach
             if math.dist(cursor, expected) <= .012 and (not precise or nearby):
-                ctx.input.click(button="right")
+                ctx.input.click_world_object()
                 self.object_click_at = self.last_action = now
-                self.object_probe_sequence = None
-                ctx.log_event("quest_object_interact", {"id": navigation.quest_id, "cursor": cursor})
+                self.object_click_attempts += 1
+                self.object_probe_sequence = navigation.sequence
+                ctx.log_event("quest_object_interact", {"id": navigation.quest_id, "cursor": cursor,
+                                                        "attempt": self.object_click_attempts,
+                                                        "input": ctx.input.name})
                 return
+            ctx.log_event("quest_object_hover_rejected", {"id": navigation.quest_id, "cursor": cursor,
+                                                          "probe": expected, "nearby": bool(nearby)})
         if self.object_probe >= len(self.object_points):
+            ctx.log_event("quest_object_hover_exhausted", {"id": navigation.quest_id,
+                                                           "probes": self.object_probe})
+            if precise and self.refine_object_approach(ctx, navigation, bounds, heading):
+                return
             if self.object_target is not None:
                 self.finish_object_approach()
                 return
@@ -1022,7 +1205,6 @@ class RunQuests(State):
             self.object_probe, self.object_probe_sequence = 0, None
             self.object_points = None
             self.object_minimap_checked = False
-            self.scanning_objects = False
             return
         u, v = self.object_points[self.object_probe]
         ctx.input.move_to(round(x + u * width), round(y + v * height), jitter_px=0)
@@ -1047,32 +1229,74 @@ class RunQuests(State):
         fight = self.hunt.fight
         if not (fight and fight.presses and navigation.task & TaskFlags.PREPARED):
             return False
+        restored = self.corpse_restore is not None and self.corpse_restore[0] is fight
         same_corpse = (sample and not sample.unsafe and sample.target_dead and sample.target_id == fight.target_id
-                       and sample.state_epoch == fight.state_epoch)
+                       and (sample.state_epoch == fight.state_epoch or restored
+                            and sample.previous_target_epoch == fight.state_epoch))
         if self.fetch_for_fight is fight and self.fetch_attempt is not None:
-            started, baseline = self.fetch_attempt
-            if progress > baseline or same_corpse and navigation.corpse_lootable is False:
+            started, baseline, observed_lootable = self.fetch_attempt
+            # A pre-existing false flag also occurs on corpses Fetch can loot.
+            # Only a positive-to-negative observation on this corpse is evidence
+            # of loot removal; an unchanged false must not confirm our keypress.
+            if progress > baseline or (same_corpse and observed_lootable
+                                        and navigation.corpse_lootable is False):
                 self.fetch_attempt, self.loot_for_fight = None, fight
                 ctx.log_event("quest_fetch_confirmed", {"target": fight.target_id, "progress": progress})
                 return False
             if now - started < 8:
+                if same_corpse and navigation.corpse_lootable is True:
+                    self.fetch_attempt = started, baseline, True
                 return True
             self.fetch_attempt = None
-            ctx.log_event("quest_fetch_unconfirmed", {"target": fight.target_id})
-        if not same_corpse or self.loot_for_fight is fight or navigation.corpse_lootable is False:
-            return False
-        if navigation.fetch_ready and self.fetch_for_fight is not fight:
+            ctx.log_event("quest_fetch_unconfirmed", {"target": fight.target_id, "progress": progress,
+                                                      "lootable": navigation.corpse_lootable})
+        blocked = (TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING | TravelFlags.SWIMMING
+                   | TravelFlags.CASTING | TravelFlags.IN_COMBAT)
+        if not same_corpse and progress <= self.hunt.baseline:
+            if restored and now - self.corpse_restore[1] < 1.5:
+                return True
+            if (not restored and navigation.last_target_verified and not navigation.flags & blocked
+                    and sample and not sample.unsafe and sample.key_verified and sample.target_id == 0):
+                self.set_forward(ctx, False)
+                self.corpse_restore = fight, now
+                self.hunt.credit_deadline = now + 7
+                ctx.log_event("quest_corpse_restore_target", {"target": fight.target_id})
+                ctx.input.tap("p")
+                return True
+        nearby_fetch = (restored and not same_corpse and sample and not sample.unsafe
+                        and not navigation.flags & blocked
+                        and (sample.target_id == 0 or sample.target_dead and sample.target_id == fight.target_id))
+        if (navigation.fetch_ready and not navigation.flags & blocked
+                and self.fetch_for_fight is not fight and progress <= self.hunt.baseline
+                and (same_corpse or nearby_fetch)):
             self.set_forward(ctx, False)
-            self.fetch_for_fight, self.fetch_attempt = fight, (now, progress)
+            self.fetch_for_fight = fight
+            self.fetch_attempt = now, progress, bool(same_corpse and navigation.corpse_lootable is True)
             self.hunt.credit_deadline = now + 11
-            ctx.log_event("quest_fetch", {"target": fight.target_id})
+            ctx.log_event("quest_fetch", {"target": fight.target_id, "corpse_verified": bool(same_corpse),
+                                         "lootable": navigation.corpse_lootable})
             ctx.input.tap("l")
             return True
+        if not same_corpse or self.loot_for_fight is fight or navigation.corpse_lootable is False:
+            return False
         if navigation.task & TaskFlags.LOOT_IN_RANGE:
             self.loot_for_fight = fight
             ctx.log_event("quest_loot", {"target": fight.target_id})
             ctx.input.tap("f")
             return True
+        if (navigation.corpse_lootable is True and navigation.flags & TravelFlags.KEYS_VERIFIED
+                and not navigation.flags & blocked):
+            if self.corpse_approach is None or self.corpse_approach[0] is not fight:
+                self.corpse_approach = fight, now, float("-inf")
+                self.hunt.credit_deadline = now + 8
+                ctx.log_event("quest_corpse_approach", {"target": fight.target_id})
+            _, started, last_step = self.corpse_approach
+            if now - started < 4:
+                if now - last_step >= .30:
+                    self.set_forward(ctx, False)
+                    ctx.input.tap("w", hold_s=.18)
+                    self.corpse_approach = fight, started, now
+                return True
         return False
 
     def hunt_tick(self, ctx, now, progress, in_combat, navigation=None):
@@ -1085,23 +1309,28 @@ class RunQuests(State):
         verified_target = navigation.objective_target if navigation else 0
         status, key = self.hunt.step(now, sample, progress, in_combat, verified_target)
         if key:
-            if status == "turn":
-                self.set_forward(ctx, False)
-            event = "quest_combat_turn" if status == "turn" else "quest_combat_action"
+            if status == "approach" and (not navigation or not navigation.flags & TravelFlags.KEYS_VERIFIED):
+                return self.stop(ctx, "quest_navigation_bindings_unverified")
+            if status == "approach" and navigation.flags & TravelFlags.CASTING:
+                return
+            self.set_forward(ctx, False)
+            event = "quest_combat_" + (status if status in {"turn", "search_turn", "approach"} else "action")
             ctx.log_event(event, {"id": self.steps[self.index].quest_id, "target": sample.target_id, "key": key})
             tap_combat_key(ctx.input, status, key)
         elif status == "credited":
             ctx.log_event("quest_combat_credit", {"id": self.steps[self.index].quest_id, "progress": progress})
         elif status == "target_not_found":
             targets = self.steps[self.index].combat_targets
-            if not targets and navigation:
-                self.hunt, self.scanning_objects = None, True
-                self.object_probe, self.object_probe_sequence = 0, None
-            elif self.search_quest_area(ctx, navigation):
+            if self.search_quest_area(ctx, navigation):
                 self.hunt = QuestHunt(targets)
             else:
                 self.stop(ctx, "quest_combat_target_not_found")
         elif status != "waiting":
+            if status == "no_quest_credit" and navigation and self.hunt.fight:
+                ctx.log_event("quest_corpse_unconfirmed", {"expected": self.hunt.fight.target_id,
+                              "target": sample.target_id if sample else None,
+                              "dead": sample.target_dead if sample else None,
+                              "lootable": navigation.corpse_lootable, "fetch_ready": navigation.fetch_ready})
             self.stop(ctx, f"quest_combat_{status}")
 
     def wait_for_data(self, ctx, now, reason):

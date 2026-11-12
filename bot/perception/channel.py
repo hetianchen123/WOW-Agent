@@ -93,6 +93,10 @@ class ChannelReader:
         v = self._value(spec.MSG_HDG)
         return spec.unpack_hdg(v) if v is not None else None
 
+    def heading_age(self) -> float:
+        got = self._latest.get(spec.MSG_HDG)
+        return max(0., time.time() - got[1]) if got else float("inf")
+
     def status(self, max_age_s: float = 4.0) -> Optional[Tuple[spec.StatusFlags, int]]:
         v = self._value(spec.MSG_STATUS, max_age_s)
         if v is None:

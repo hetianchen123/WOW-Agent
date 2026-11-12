@@ -219,6 +219,9 @@ end)
 screen:Hide()
 
 function WowAgent.QuestCommand(args)
+    if args:match("^recovery") and WowAgent.ConfigureRecovery then
+        return WowAgent.ConfigureRecovery(args)
+    end
     local ids, seen = {}, {}
     if args == "prepare" or args:match("^prepare %d+$") then
         local id = tonumber(args:match("^prepare (%d+)$"))
@@ -283,7 +286,7 @@ function WowAgent.QuestCommand(args)
 end
 
 -- Independent navigation strip. Main quest/combat message layouts stay compatible.
-local navFrame, writeSky, writeTask, writeClick, writeRound, writeMinimap
+local navFrame, writeSky, writeTask, writeClick, writeRound, writeMinimap, writeRecovery
 local navSequence, navElapsed = 0, 0
 local navRows = {}
 local navigation
@@ -394,6 +397,7 @@ local taskBindings = {
     {"1", "ACTIONBUTTON1", "一键输出"}, {"5", "ACTIONBUTTON5", "切换飞行风格"},
     {"6", "ACTIONBUTTON6", "飞行坐骑"}, {"7", "ACTIONBUTTON7", "地面坐骑"},
     {"8", "ACTIONBUTTON8", "下马"}, {"9", "ACTIONBUTTON9", "任务对话"},
+    {"Q", "STRAFELEFT", "左横移"}, {"E", "STRAFERIGHT", "右横移"},
 }
 for _, binding in ipairs(movementBindings) do taskBindings[#taskBindings + 1] = binding end
 local taskBindingOwner
@@ -729,6 +733,7 @@ local function GameTaskOptions(enable)
     if enable and C_CVar.SetCVar then
         pcall(C_CVar.SetCVar, "softTargetInteract", flags.Any)
         pcall(C_CVar.SetCVar, "autoLootDefault", 1)
+        pcall(C_CVar.SetCVar, "nameplateShowEnemies", 1)
     end
     return tonumber(C_CVar.GetCVar("softTargetInteract")) == flags.Any
         and C_CVar.GetCVar("autoLootDefault") == "1"
@@ -761,7 +766,7 @@ local function SetupTaskClicks(plan)
             taskFetchButton:RegisterForClicks("AnyDown", "AnyUp")
             taskFetchButton:SetAttribute("type", "macro")
         end
-        plan.fetchBody = "/cast [@target,exists,dead] " .. name
+        plan.fetchBody = "/cast " .. name
         taskFetchButton:SetAttribute("macrotext", plan.fetchBody)
         SetOverrideBindingClick(taskBindingOwner, false, "L", "WowAgentTaskFetch", "LeftButton")
     end
@@ -780,29 +785,25 @@ end
 local function CorpseLootFlags(plan, phase, task)
     if (phase ~= 2 and phase ~= 3) or task % 2 ~= 1 or InCombatLockdown() or IsMounted()
         or (IsFlying and IsFlying()) or (IsFalling and IsFalling()) or (IsSwimming and IsSwimming())
-        or (GetCursorInfo and GetCursorInfo()) or (SpellIsTargeting and SpellIsTargeting())
-        or not CanLootUnit then return 0 end
+        or (GetCursorInfo and GetCursorInfo()) or (SpellIsTargeting and SpellIsTargeting()) then return 0 end
+    local flags = 0
     local target = UnitGUID and Public(UnitGUID("target"))
-    if type(target) ~= "string" or not target:match("^Creature%-") or Public(UnitIsDead("target")) ~= true then
-        return 0
+    if CanLootUnit and type(target) == "string" and target:match("^Creature%-")
+        and Public(UnitIsDead("target")) == true then
+        local ok, hasLoot, canLoot = pcall(CanLootUnit, target)
+        if ok then
+            hasLoot, canLoot = Public(hasLoot), Public(canLoot)
+            if hasLoot == false or canLoot == false then flags = 8192 end
+            if hasLoot == true and canLoot == true then flags = 8192 + 16384 end
+        end
     end
-    local ok, hasLoot, canLoot = pcall(CanLootUnit, target)
-    hasLoot, canLoot = Public(hasLoot), Public(canLoot)
-    if not ok or type(hasLoot) ~= "boolean" then return 0 end
-    if not hasLoot then return 8192 end
-    if type(canLoot) ~= "boolean" then return 0 end
-    if not canLoot then return 8192 end
-    local flags = 8192 + 16384
     if not plan.fetchBody or not KnowsFetch() or not TaskClickMatches("L", "WowAgentTaskFetch")
         or Public(taskFetchButton:GetAttribute("macrotext")) ~= plan.fetchBody
         or not UnitExists or Public(UnitExists("pet")) ~= true or Public(UnitIsDead("pet")) ~= false then
         return flags
     end
     local usable = C_Spell and C_Spell.IsSpellUsable and Public(C_Spell.IsSpellUsable(fetchSpell))
-    local inRange = C_Spell and C_Spell.IsSpellInRange and Public(C_Spell.IsSpellInRange(fetchSpell, "target"))
-    -- Fetch can use a client-side corpse search, so the generic range check
-    -- may return nil. The client still enforces the spell's range on cast.
-    if usable ~= false and inRange ~= false then flags = flags + 32768 end
+    if usable ~= false then flags = flags + 32768 end
     return flags
 end
 
@@ -1401,6 +1402,20 @@ local function TooltipMatchesQuest(data, id, objectiveText)
     return false
 end
 
+local function DisplayedWorldObjectMatches(objectName)
+    local tooltip = GameTooltip
+    if not objectName or not tooltip or not tooltip:IsShown() or not tooltip.GetPrimaryTooltipInfo then
+        return false
+    end
+    local ok, info = pcall(tooltip.GetPrimaryTooltipInfo, tooltip)
+    info = ok and Public(info)
+    -- Blizzard clears the world cursor info when the mouse leaves the object,
+    -- even if its text is still visible while fading out.
+    if type(info) ~= "table" or Public(info.getterName) ~= "GetWorldCursor" then return false end
+    local text = GameTooltipTextLeft1 and Public(GameTooltipTextLeft1:GetText())
+    return ObjectiveLabel(text) == objectName
+end
+
 local function GenericObjective(id, objectName, knownObject)
     local objectives = Public(C_QuestLog.GetQuestObjectives(id))
     if not objectives then return 0, 0 end
@@ -1423,17 +1438,20 @@ local function GenericObjective(id, objectName, knownObject)
     if not precise and kind ~= "item" and kind ~= "monster" then return 0, 0 end
     local default = precise and 2 or 1
     local api = C_TooltipInfo and C_TooltipInfo.GetWorldCursor
-    if not api or not GetCursorPosition or (WorldMapFrame and WorldMapFrame:IsShown())
+    if not GetCursorPosition or (WorldMapFrame and WorldMapFrame:IsShown())
         or (WowAgentControlPanel and WowAgentControlPanel:IsShown()) then return default, 0, precise end
-    local ok, data = pcall(api)
-    data = ok and Public(data)
-    if not data or not Enum.TooltipDataType or Public(data.type) ~= Enum.TooltipDataType.Object then
-        return default, 0, precise
+    local matched = false
+    if api then
+        local ok, data = pcall(api)
+        data = ok and Public(data)
+        if data and Enum.TooltipDataType and Public(data.type) == Enum.TooltipDataType.Object then
+            local lines = Public(data.lines)
+            local first = lines and Public(lines[1])
+            matched = (objectName and first and objectName == ObjectiveLabel(Public(first.leftText)))
+                or TooltipMatchesQuest(data, id, objectiveText)
+        end
     end
-    local lines = Public(data.lines)
-    local first = lines and Public(lines[1])
-    local named = objectName and first and objectName == ObjectiveLabel(Public(first.leftText))
-    if not named and not TooltipMatchesQuest(data, id, objectiveText) then return default, 0, precise end
+    if not matched and not DisplayedWorldObjectMatches(objectName) then return default, 0, precise end
     local x, y = GetCursorPosition()
     x, y = Public(x), Public(y)
     if not x or not y then return 2, 0, true end
@@ -1469,6 +1487,29 @@ local function ObjectiveObjectPoint(name, player)
     if bestX then return player.map, bestX, bestY end
 end
 
+local function APRObjectivePoint(plan, map)
+    local route = WowAgent.APRQuestData and WowAgent.APRQuestData[plan.quest]
+    if not route or route.map ~= map or not C_Map.GetWorldPosFromMapPos or not CreateVector2D then return end
+    local kind, progress = Objective(plan.quest, true)
+    if kind ~= 2 or progress % 1024 ~= #route.points then return end
+    local point = route.points[math.floor(progress / 1024) + 1]
+    if not point then return end
+    if not plan.aprMapBounds then
+        local firstMap, first = C_Map.GetWorldPosFromMapPos(map, CreateVector2D(0, 0))
+        local lastMap, last = C_Map.GetWorldPosFromMapPos(map, CreateVector2D(1, 1))
+        firstMap, first, lastMap, last = Public(firstMap), Public(first), Public(lastMap), Public(last)
+        if not firstMap or firstMap ~= lastMap or not first or not last then return end
+        -- APR x is world Y, which increases along the map's horizontal axis.
+        local left, top = Public(first.y), Public(first.x)
+        local right, bottom = Public(last.y), Public(last.x)
+        if not left or not top or not right or not bottom or left == right or top == bottom then return end
+        plan.aprMapBounds = {left = left, top = top, width = right - left, height = bottom - top}
+    end
+    local bounds = plan.aprMapBounds
+    local x, y = (point[1] - bounds.left) / bounds.width, (point[2] - bounds.top) / bounds.height
+    if Coordinate(x) and Coordinate(y) then return map, x, y, true end
+end
+
 local function NavigationDestination(plan, phase, map)
     local id, round = plan.quest, plan.round
     if plan.automatic and phase == 1 then
@@ -1478,6 +1519,10 @@ local function NavigationDestination(plan, phase, map)
     if plan.automatic and phase == 3 and not plan.npcOverride then
         local point = RetailNPCPoint(id, "turnIn", map)
         if point then return point.map, point.x, point.y end
+    end
+    if plan.automatic and phase == 2 then
+        local routeMap, x, y, guided = APRObjectivePoint(plan, map)
+        if routeMap then return routeMap, x, y, guided end
     end
     local targetMap, x, y = QuestDestination(id, map)
     if not targetMap and round and round.immediate and phase == 3 then
@@ -1525,10 +1570,10 @@ local function UpdateNavigation()
     local objectNames = data and data.objectNames
     local locale = objectNames and GetLocale and GetLocale()
     local objectName = locale and objectNames[locale == "enGB" and "enUS" or locale]
-    local targetMap, gx, gy
+    local targetMap, gx, gy, aprWaypoint
     if objectName then targetMap, gx, gy = ObjectiveObjectPoint(objectName, QuestArea()) end
     local objectPin = targetMap ~= nil
-    if not targetMap then targetMap, gx, gy = NavigationDestination(navigation, phase, mapID) end
+    if not targetMap then targetMap, gx, gy, aprWaypoint = NavigationDestination(navigation, phase, mapID) end
     local position = C_Map.GetPlayerMapPosition and C_Map.GetPlayerMapPosition(mapID, "player")
     local px, py
     if position then px, py = position:GetXY() end
@@ -1545,7 +1590,7 @@ local function UpdateNavigation()
         navigation.skyPitch, navigation.skyDismount, navigation.skyMacro = nil, nil, nil
         print("WowAgent：驭空术键位已撤销。" .. skyError)
     end
-    local flags, meta = 0, 9 + phase * 16 + (descentCode or 0) * 8192
+    local flags, meta = 0, (WowAgent.RecoveryState and 10 or 9) + phase * 16 + (descentCode or 0) * 8192
     local outdoors = IsOutdoors and IsOutdoors()
     local flyable = IsFlyableArea and IsFlyableArea()
     local fly, ground = Mount(navigation.fly), Mount(navigation.ground)
@@ -1583,6 +1628,13 @@ local function UpdateNavigation()
     if fly and fly.active then meta = meta + 2048 end
     if GetBindingAction("F", true) == "INTERACTTARGET" then meta = meta + 4096 end
     navSequence = (navSequence + 1) % 128
+    if WowAgent.RecoveryState then
+        local state, corpse, button, aspect = WowAgent.RecoveryState(navigation.recovery, mapID)
+        writeRecovery[1](12, state + navSequence * 8192)
+        writeRecovery[2](13, corpse)
+        writeRecovery[3](14, button)
+        writeRecovery[4](15, aspect)
+    end
     local nearMarker = (phase == 1 or phase == 3) and targetMap == mapID and width > 0 and depth > 0
         and Coordinate(px) and Coordinate(py) and meta % 256 >= 128
         and ((gx - px) * width)^2 + ((gy - py) * depth)^2 <= 8^2
@@ -1613,8 +1665,12 @@ local function UpdateNavigation()
         roundStatus = round.stage + (round.next and (round.next.blocked and 16 or 8) or 0)
         if round.immediate then roundStatus = roundStatus + 32 end
     end
+    local strafeVerified = GetBindingAction("Q", true) == "STRAFELEFT"
+        and GetBindingAction("E", true) == "STRAFERIGHT"
+    local lastTargetVerified = Public(GetBindingAction("P", true)) == "TARGETLASTTARGET"
     writeRound(3, roundStatus + navSequence * 64 + CorpseLootFlags(navigation, phase, task)
-        + (preciseObject and 65536 or 0))
+        + (preciseObject and 65536 or 0) + (aprWaypoint and 131072 or 0) + (strafeVerified and 262144 or 0)
+        + (lastTargetVerified and 524288 or 0))
     local values = {id, targetMap or 0, math.floor(gx * 1048575 + .5), math.floor(gy * 1048575 + .5),
                     flags + navSequence * 8192, math.floor(height * 10 + 524288 + .5),
                     math.floor(width * 10 + .5), math.floor(depth * 10 + .5), meta,
@@ -1710,7 +1766,7 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
         UpdateNavigation()
         navFrame:Show()
         local mapID = C_Map.GetBestMapForUnit("player")
-        local targetMap, x, y = NavigationDestination(plan, QuestPhase(id), mapID)
+        local targetMap, x, y, aprWaypoint = NavigationDestination(plan, QuestPhase(id), mapID)
         local descent = DescentBinding()
         if pitch then
             print("WowAgent：寻路已准备，驭空术俯冲 " .. skyKeys[pitch] .. "，下马 " .. skyKeys[dismount] .. "。")
@@ -1721,6 +1777,7 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
         end
         if targetMap and x and y then
             print(string.format("WowAgent：任务目标地图 %d，坐标 %.2f, %.2f。", targetMap, x * 100, y * 100))
+            if aprWaypoint then print("WowAgent：已加载 APR 目标搜索点。") end
         else print("WowAgent：任务目标坐标尚未返回，脚本会等待坐标。") end
         if automatic then
             if plan.fetchBody and TaskClickMatches("L", "WowAgentTaskFetch") then
@@ -1777,9 +1834,17 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
         return print("WowAgent：无法启用临时任务键位。")
     end
     plan.taskBindings = true
+    if automatic then pcall(SetOverrideBinding, taskBindingOwner, false, "P", "TARGETLASTTARGET") end
     if automatic and (not GameTaskOptions(true) or not SetupTaskClicks(plan)) then
         WowAgent.StopQuestNavigation()
         return print("WowAgent：无法启用游戏互动、自动拾取或任务辅助键位。")
+    end
+    if automatic and WowAgent.PrepareRecovery then
+        plan.recovery = WowAgent.PrepareRecovery(taskBindingOwner)
+    end
+    if automatic and GetCameraZoom and CameraZoomOut then
+        local zoom = Public(GetCameraZoom())
+        if type(zoom) == "number" and zoom < 12 then pcall(CameraZoomOut, 3) end
     end
     C_Timer.After(.25, function()
         if navigation ~= plan then return end
@@ -1809,6 +1874,10 @@ navFrame:SetSize(142, 304)
 navFrame:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 144, 0)
 navFrame:SetFrameStrata("TOOLTIP")
 writeMinimap = {}
+writeRecovery = {}
+if WowAgent.RecoveryState then
+    for row = 1, 4 do writeRecovery[row] = WowAgent.NewPixelRow(navFrame, (row - 5) * 16) end
+end
 for row = 1, 3 do writeMinimap[row] = WowAgent.NewPixelRow(navFrame, (row - 1) * 16) end
 writeRound = WowAgent.NewPixelRow(navFrame, 48)
 writeClick = WowAgent.NewPixelRow(navFrame, 64)

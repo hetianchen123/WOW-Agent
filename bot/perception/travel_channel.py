@@ -60,6 +60,37 @@ class RoundStage(IntEnum):
     DONE = 4
 
 
+class LifeState(IntEnum):
+    UNKNOWN = 0
+    ALIVE = 1
+    DEAD = 2
+    GHOST = 3
+
+
+class PetState(IntEnum):
+    UNKNOWN = 0
+    ABSENT = 1
+    ALIVE = 2
+    DEAD = 3
+
+
+@dataclass(frozen=True)
+class RecoverySample:
+    life: LifeState
+    corpse: tuple[float, float] | None = None
+    button: tuple[float, float] | None = None
+    ui_aspect: float = 0.0  # UI height / width
+    dialog: bool = False
+    hovered: bool = False
+    pet: PetState = PetState.UNKNOWN
+    pet_expected: bool = False
+    follow: bool = False
+    summon: bool = False
+    revive: bool = False
+    buff_missing: bool = False
+    buff_unverified: bool = False
+
+
 @dataclass(frozen=True)
 class MinimapGeometry:
     center: tuple[float, float]
@@ -103,17 +134,21 @@ class TravelSample:
     corpse_lootable: bool | None = None
     fetch_ready: bool = False
     precise_object: bool = False
+    apr_waypoint: bool = False
+    strafe_verified: bool = False
+    last_target_verified: bool = False
+    recovery: RecoverySample | None = None
 
 
 def travel_region(x: int, y: int) -> tuple[int, int, int, int]:
-    height = (TRAVEL_ROWS + 7) * spec.REGION_H
+    height = (TRAVEL_ROWS + 11) * spec.REGION_H
     return x + TRAVEL_OFFSET_X, y - height, spec.REGION_W, height
 
 
 def decode_travel(image: np.ndarray) -> TravelSample | None:
     row_height = spec.REGION_H
     if image.shape[1:] != (spec.REGION_W, 3) or image.shape[0] not in {
-        (TRAVEL_ROWS + extra) * row_height for extra in range(8)
+        (TRAVEL_ROWS + extra) * row_height for extra in range(12)
     }:
         return None
     offset = image.shape[0] - TRAVEL_ROWS * row_height
@@ -125,7 +160,7 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         values.append(frame[1])
     quest, goal_map, gx, gy, status, height, width, depth, meta, px, py, map_id = values
     version = meta & 15
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+    if not 1 <= version <= 10:
         return None
     flags = TravelFlags(status & 8191)
     if version == 1:
@@ -186,8 +221,9 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
                 target = value if action == ObjectiveAction.COMBAT else 0
                 cursor = point if action == ObjectiveAction.INTERACT else None
     round_stage, round_advance, round_blocked, round_immediate = RoundStage.NONE, False, False, False
-    corpse_lootable, fetch_ready, precise_object = None, False, False
-    if version == 9:
+    corpse_lootable, fetch_ready, precise_object, apr_waypoint, strafe_verified = None, False, False, False, False
+    last_target_verified = False
+    if version >= 9:
         if offset < 4 * row_height:
             return None
         row = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 4 * row_height))
@@ -198,10 +234,13 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         round_immediate = bool(row[1] & 32)
         if row[1] & 8192:
             corpse_lootable = bool(row[1] & 16384)
-            fetch_ready = corpse_lootable and bool(row[1] & 32768)
+        fetch_ready = bool(row[1] & 32768)
         precise_object = bool(row[1] & 65536) and action == ObjectiveAction.INTERACT
+        apr_waypoint = precise_object and not objective_pin and bool(row[1] & 131072)
+        strafe_verified = bool(row[1] & 262144)
+        last_target_verified = bool(row[1] & 524288)
     minimap = None
-    if version == 9 and offset >= 7 * row_height:
+    if version >= 9 and offset >= 7 * row_height:
         minimap_rows = [spec.decode_frame(spec.sample_nibbles(image, 0, offset - i * row_height))
                         for i in (7, 6, 5)]
         if all(frame and frame[0] == index for index, frame in enumerate(minimap_rows)):
@@ -211,6 +250,33 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
                 minimap = MinimapGeometry(((center >> 10) / 1023, (center & 1023) / 1023),
                                           ((size >> 10) / 1023, (size & 1023) / 1023),
                                           radius, bool(info & 1024))
+    recovery = None
+    if version == 10:
+        if offset < 11 * row_height:
+            return None
+        rows = [spec.decode_frame(spec.sample_nibbles(image, 0, offset - i * row_height))
+                for i in (11, 10, 9, 8)]
+        if any(row is None or row[0] != kind for kind, row in enumerate(rows, 12)):
+            return None
+        state, corpse, button, aspect = (row[1] for row in rows)
+        if state >> 13 != sequence:
+            return None
+        life = LifeState(state & 3)
+        if life in {LifeState.DEAD, LifeState.GHOST}:
+            def point(value):
+                return (value >> 10) / 1023, (value & 1023) / 1023
+
+            recovery = RecoverySample(
+                life, point(corpse) if state & 512 else None,
+                point(button) if state & 4096 else None, aspect / 100000,
+                dialog=bool(state & 1024), hovered=bool(state & 2048),
+            )
+        else:
+            recovery = RecoverySample(
+                life, pet=PetState((state >> 2) & 3), pet_expected=bool(state & 512),
+                follow=bool(state & 16), summon=bool(state & 32), revive=bool(state & 64),
+                buff_missing=bool(state & 128), buff_unverified=bool(state & 256),
+            )
     return TravelSample(
         quest, map_id, goal_map,
         (gx / 1048575, gy / 1048575) if meta & 128 and goal_map else None,
@@ -220,5 +286,5 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         phase, flags, sequence, bool(meta & 2048), bool(meta & 4096), descent_key,
         pitch, dismount, ascent, halt, task, range_supported, mount_button, mount_button_key,
         action, target, cursor, round_stage, round_advance, round_blocked, round_immediate, objective_pin, minimap,
-        corpse_lootable, fetch_ready, precise_object,
+        corpse_lootable, fetch_ready, precise_object, apr_waypoint, strafe_verified, last_target_verified, recovery,
     )

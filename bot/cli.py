@@ -511,6 +511,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "stopped:quest_automatic_not_prepared": "请在插件里点「一键准备自动任务」，等核对成功后再启动。",
                 "stopped:quest_mount_button_unavailable": "未核对到原生驭空坐骑图标。请关闭插件面板和地图，并确认动作栏上有原生驭空坐骑图标。",
                 "stopped:quest_mount_not_confirmed": "已尝试使用原生驭空坐骑，游戏尚未确认骑乘任务进度。请查看游戏内提示及任务运行日志。",
+                "stopped:quest_object_interaction_unconfirmed": "已点击确认的任务物品，但任务进度尚未增加。角色已停在当前物品附近，请查看游戏内距离或互动提示。",
                 "stopped:game_not_frontmost": "魔兽未保持前台，脚本已停止。点击游戏窗口后让游戏保持在前台。",
                 "stopped:quest_navigation_not_prepared": "已找到主色条，但未读取到寻路色条。请在插件里点「一键准备自动任务」，等准备完成后再启动。",
                 "stopped:quest_navigation_channel_stale": "寻路色条停止更新。请保持游戏和色条可见，再准备并启动任务。",

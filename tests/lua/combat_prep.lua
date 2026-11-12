@@ -103,7 +103,7 @@ assert(macro("WASAssist") == "#showtooltip 一键辅助\n/cast [harm,nodead,noch
 command("macro assist")
 assert(#macros == 1)
 command("arm 4 assist")
-assert(math.floor(rows[96] / 2) % 2 == 1)
+assert(math.floor(rows[112] / 2) % 2 == 1)
 local oldCanAttack, oldGUID = UnitCanAttack, UnitGUID
 UnitCanAttack = function() return true end
 UnitGUID = function() return "Creature-0-0-0-0-244669-01" end
@@ -116,33 +116,61 @@ function GetBindingAction(key)
 end
 SPELL_FAILED_UNIT_NOT_INFRONT = "目标需要在你面前"
 frames[1].scripts.OnUpdate(nil, .2)
-assert(rows[80] == 244669 and math.floor(rows[48] / 524288) == 0)
-assert(rows[0] % 512 == 129 and math.floor(rows[0] / 524288) == 1)
+assert(rows[96] == 244669 and math.floor(rows[64] / 524288) == 0)
+assert(rows[16] % 512 == 129 and math.floor(rows[16] / 524288) == 1)
+local inRange = false
+C_AssistedCombat.GetNextCastSpell = function() return 257284 end
+C_Spell.IsSpellInRange = function(id, unit)
+    assert(id == 257284 and unit == "target")
+    return inRange
+end
+frames[1].scripts.OnUpdate(nil, .2)
+assert(rows[0] % 4 == 2)
+inRange = true
+frames[1].scripts.OnUpdate(nil, .2)
+assert(rows[0] % 4 == 1)
+local beforeRangeError = rows[112]
+C_Spell.IsSpellInRange = function() error("range unavailable") end
+C_NamePlate = {GetNamePlateForUnit = function() error("restricted nameplate must not be measured") end}
+frames[1].scripts.OnUpdate(nil, .2)
+assert(rows[96] == 244669 and rows[112] ~= beforeRangeError)
+C_NamePlate = nil
+C_AssistedCombat.GetNextCastSpell, C_Spell.IsSpellInRange = nil, nil
 frames[2].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, "距离太远")
 frames[1].scripts.OnUpdate(nil, .2)
-assert(math.floor(rows[0] / 65536) % 8 == 0)
+assert(math.floor(rows[16] / 65536) % 8 == 0)
 frames[2].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, SPELL_FAILED_UNIT_NOT_INFRONT)
 frames[1].scripts.OnUpdate(nil, .2)
-assert(math.floor(rows[0] / 65536) % 8 == 1)
+assert(math.floor(rows[16] / 65536) % 8 == 1)
+local foughtEpoch = math.floor(rows[112] / 128) % 64
 frames[2].scripts.OnEvent(nil, "PLAYER_TARGET_CHANGED")
+local originalDead, originalTarget = UnitIsDead, UnitGUID
+UnitIsDead = function(unit) return unit == "target" end
+UnitGUID = function() return "Creature-0-0-0-0-244669-02" end
 frames[1].scripts.OnUpdate(nil, .2)
-assert(math.floor(rows[0] / 65536) % 8 == 0)
+assert(math.floor(rows[0] / 4) % 128 == 0)
+UnitGUID = originalTarget
+frames[1].scripts.OnUpdate(nil, .2)
+assert(math.floor(rows[0] / 4) % 128 == foughtEpoch + 1)
+UnitIsDead = originalDead
+frames[1].scripts.OnUpdate(nil, .2)
+assert(math.floor(rows[16] / 65536) % 8 == 0)
 GetBindingAction = previousBinding
 UnitThreatSituation = function(unit, target)
     assert(target == "target")
     if unit == "pet" then return 0 end
 end
 frames[1].scripts.OnUpdate(nil, .2)
-assert(rows[80] == 244669 and math.floor(rows[48] / 524288) == 1)
+assert(rows[96] == 244669 and math.floor(rows[64] / 524288) == 1)
 UnitCanAttack, UnitGUID, UnitThreatSituation = oldCanAttack, oldGUID, nil
 assist = false
 frames[2].scripts.OnEvent(nil, "SPELLS_CHANGED")
 frames[1].scripts.OnUpdate(nil, .2)
-assert(math.floor(rows[96] / 2) % 2 == 0)
+assert(math.floor(rows[112] / 2) % 2 == 0)
 assist = true
 frames[2].scripts.OnEvent(nil, "SPELLS_CHANGED")
 frames[1].scripts.OnUpdate(nil, .2)
-assert(math.floor(rows[96] / 2) % 2 == 1)
+assert(math.floor(rows[112] / 2) % 2 == 1)
 macros[1] = "/say original"
 command("macro assist")
 command("arm 4 assist")
@@ -152,7 +180,7 @@ command("macro assist")
 assert(#macros == 2)
 actionKind, actionID = "spell", 121183
 command("arm 4 assist")
-assert(math.floor(rows[96] / 2) % 2 == 1)
+assert(math.floor(rows[112] / 2) % 2 == 1)
 assist = false
 command("macro assist")
 assert(#macros == 2)
@@ -260,7 +288,7 @@ assert(placements == 0 and cursorKind == nil)
 rejected = false
 command("setup assist")
 assert(placements == 1 and bar[6][1] == "macro" and bar[6][2] == 1)
-assert(math.floor(rows[96] / 2) % 2 == 1)
+assert(math.floor(rows[112] / 2) % 2 == 1)
 command("setup assist")
 assert(placements == 1)
 -- A conflicting legacy macro must not block automatic setup on an empty slot.
@@ -268,7 +296,7 @@ macros[1] = "/say original"
 bar[6] = nil
 command("setup assist 6")
 assert(placements == 2 and bar[6][2] == macroIDs.WASAssist1)
-assert(macros[1] == "/say original" and math.floor(rows[96] / 2) % 2 == 1)
+assert(macros[1] == "/say original" and math.floor(rows[112] / 2) % 2 == 1)
 command("setup assist 6")
 assert(placements == 2)
 macros[1] = "#showtooltip 一键辅助\n/cast [harm,nodead,nochanneling] 一键辅助"
@@ -316,7 +344,7 @@ assert(WowAgent.LayoutSupport.SetupAction("quest", 90883, 6))
 assert(#macros == count and bar[6][2] == macroIDs.WAQ90883)
 bar[6] = nil
 assert(WowAgent.LayoutSupport.SetupAction("assist", nil, 6))
-assert(#macros == count and math.floor(rows[96] / 2) % 2 == 1)
+assert(#macros == count and math.floor(rows[112] / 2) % 2 == 1)
 readbackSuffix = ""
 
 -- Use the client's capacity constants, and fall back to an available account slot.
@@ -371,7 +399,7 @@ assert(WowAgent.LayoutSupport.SetupAction("assist", nil, 6))
 local kind, index = WowAgent.LayoutSupport.ReadAction(6)
 assert(kind == "macro" and index == macroIDs.WASAssist)
 assert(calls[#calls][1]:find("战斗绑定已核对", 1, true))
-assert(math.floor(rows[96] / 2) % 2 == 1)
+assert(math.floor(rows[112] / 2) % 2 == 1)
 count = #macros
 local placed = placements
 assert(WowAgent.LayoutSupport.SetupAction("assist", nil, 6))

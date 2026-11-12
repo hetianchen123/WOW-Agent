@@ -9,10 +9,13 @@ from ..data.combat import client_edition
 from ..perception.combat_channel import CombatSample
 
 TURN_OFFSETS = (math.pi, math.pi / 2, -math.pi / 2)
+SEARCH_ARC = tuple(map(math.radians, (0, 20, 40, 60, 80, 60, 40, 20, 0, -20, -40, -60, -80)))
+TURN_INTERVAL = .45
+TURN_SETTLE = .50
 
 
 class Fight:
-    def __init__(self, target_id: int):
+    def __init__(self, target_id: int, *, approach=False):
         self.target_id = target_id
         self.identity = None
         self.state_epoch = None
@@ -26,6 +29,11 @@ class Fight:
         self.turn_goal: float | None = None
         self.turn_deadline = 0.0
         self.turn_attempts = 0
+        self.turn_at = float("-inf")
+        self.approach = approach
+        self.approach_at = float("-inf")
+        self.approach_deadline: float | None = None
+        self.out_of_range_at = float("-inf")
 
     def step(self, now: float, sample: CombatSample | None) -> tuple[str, str | None]:
         if sample is None:
@@ -61,6 +69,22 @@ class Fight:
             turn = self.correct_facing(now, sample)
             if turn is not None:
                 return turn
+        if sample.in_range is False:
+            self.out_of_range_at = now
+            if not self.approach:
+                return "attack_out_of_range", None
+            if self.approach_deadline is None:
+                self.approach_deadline = now + 10
+            if now >= self.approach_deadline:
+                return "approach_timeout", None
+            if now - self.approach_at < .26:
+                return "waiting", None
+            self.approach_at = now
+            return "approach", "w"
+        if sample.in_range is True:
+            self.approach_deadline = None
+        elif now - self.out_of_range_at < .6:
+            return "waiting", None
         if now - self.last_action < .8:
             return "waiting", None
         self.last_action = now
@@ -83,19 +107,28 @@ class Fight:
                 self.turn_origin = sample.facing
             self.turn_goal = (self.turn_origin + TURN_OFFSETS[self.turn_attempts]) % math.tau
             self.turn_attempts += 1
-            self.turn_deadline = now + 5
+            self.turn_deadline = now + 12
         error = heading_error(sample.facing, self.turn_goal)
         if abs(error) <= math.radians(15):
+            if now - self.turn_at < TURN_SETTLE:
+                return "waiting", None
             self.turn_goal = None
             return None
         if now >= self.turn_deadline:
             return "facing_turn_timeout", None
+        if now - self.turn_at < TURN_INTERVAL:
+            return "waiting", None
+        self.turn_at = now
         return "turn", "left" if error > 0 else "right"
 
 
 def tap_combat_key(backend, status, key):
     if status == "turn":
-        backend.tap(key, hold_s=.10)
+        backend.tap(key, hold_s=.06)
+    elif status == "search_turn":
+        backend.tap(key, hold_s=.06)
+    elif status == "approach":
+        backend.tap(key, hold_s=.18)
     else:
         backend.tap(key)
 
@@ -114,6 +147,37 @@ class QuestHunt:
         self.sequence = None
         self.frame_at = 0.0
         self.binding = None
+        self.search_heading: float | None = None
+        self.search_turn_at = float("-inf")
+        self.search_sector_at: float | None = None
+
+    def search_target(self, now, sample):
+        if now - self.search_at < 1:
+            return "waiting", None
+        if sample.facing is None or not sample.turn_verified:
+            if self.searches >= 5:
+                return "target_not_found", None
+        else:
+            if self.search_heading is None:
+                self.search_heading = sample.facing
+            if self.searches >= len(SEARCH_ARC):
+                return "target_not_found", None
+            if self.search_sector_at is None:
+                self.search_sector_at = now
+            goal = self.search_heading + SEARCH_ARC[self.searches]
+            error = heading_error(sample.facing, goal)
+            if abs(error) > math.radians(7):
+                if now - self.search_sector_at > 4:
+                    return "target_not_found", None
+                if now - self.search_turn_at >= TURN_INTERVAL:
+                    self.search_turn_at = now
+                    return "search_turn", "left" if error > 0 else "right"
+                return "waiting", None
+            if now - self.search_turn_at < TURN_SETTLE:
+                return "waiting", None
+        self.searches += 1
+        self.search_at, self.search_sector_at = now, None
+        return "select_target", "tab"
 
     def step(
         self, now: float, sample: CombatSample | None, progress: int, in_combat: bool, verified_target: int = 0,
@@ -138,6 +202,7 @@ class QuestHunt:
             if progress > self.baseline:
                 self.credit_deadline, self.fight, self.searches = None, None, 0
                 self.search_at = now
+                self.search_heading = self.search_sector_at = None
                 return "credited", None
             return ("no_quest_credit" if now >= self.credit_deadline else "waiting"), None
 
@@ -145,20 +210,14 @@ class QuestHunt:
                                                         and sample.target_id == verified_target)
         if self.fight is None:
             if matches and not sample.target_dead:
-                self.fight = Fight(sample.target_id)
+                self.fight = Fight(sample.target_id, approach=True)
                 self.started_at, self.baseline = now, progress
             elif in_combat:
                 if (sample.target_dead or sample.target_id == 0) and now - self.search_at <= 5:
                     return "waiting", None
                 return "unexpected_combat_target", None
-            elif now - self.search_at < 1:
-                return "waiting", None
-            elif self.searches >= 5:
-                return "target_not_found", None
             else:
-                self.searches += 1
-                self.search_at = now
-                return "select_target", "tab"
+                return self.search_target(now, sample)
 
         if now - self.started_at >= 20:
             return "fight_timeout", None
@@ -209,7 +268,7 @@ class QuestDefense:
             return "waiting", None
         if (self.fight is None or self.fight.target_id != sample.target_id
                 or self.fight.state_epoch != sample.state_epoch):
-            self.fight = Fight(sample.target_id)
+            self.fight = Fight(sample.target_id, approach=True)
         return self.fight.step(now, sample)
 
 

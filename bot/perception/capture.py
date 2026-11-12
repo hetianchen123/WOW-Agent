@@ -37,6 +37,21 @@ def frontmost_game_bounds() -> tuple[float, float, float, float]:
     raise ValueError("未找到可用的魔兽窗口")
 
 
+def game_ui_bounds(bounds, minimap):
+    """Remove a top title bar using the stock square minimap as a scale reference."""
+    if minimap is None:
+        return bounds
+    x, y, width, height = bounds
+    map_width, map_height = minimap.size
+    if min(map_width, map_height) <= 0:
+        return bounds
+    content_height = round(width * map_width / map_height)
+    top_inset = height - content_height
+    if 4 <= top_inset <= 64:
+        return x, y + top_inset, width, content_height
+    return bounds
+
+
 class ScreenCapture:
     """Grabs screen regions as RGB numpy arrays via mss.
 

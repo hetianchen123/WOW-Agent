@@ -85,28 +85,37 @@ def pumpkin_probe_points(
     height = 720
     frame = cv2.resize(frame_rgb, (width, height), interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
-    mask = cv2.inRange(hsv, (0, 65, 48), (19, 235, 240))
-    mask |= cv2.inRange(hsv, (165, 65, 48), (179, 235, 240))
+    red = cv2.inRange(hsv, (0, 95, 56), (9, 255, 240))
+    red |= cv2.inRange(hsv, (172, 95, 56), (179, 255, 240))
+    orange = cv2.inRange(hsv, (0, 65, 48), (19, 235, 240))
+    orange |= cv2.inRange(hsv, (165, 65, 48), (179, 235, 240))
     for left, top, right, bottom in excluded:
         x0, x1 = max(0, round(left * width)), min(width, round(right * width))
         y0, y1 = max(0, round(top * height)), min(height, round(bottom * height))
         if x0 < x1 and y0 < y1:
-            mask[y0:y1, x0:x1] = 0
+            red[y0:y1, x0:x1] = orange[y0:y1, x0:x1] = 0
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 5))
-    components = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    _, labels, stats, _ = cv2.connectedComponentsWithStats(components)
-    distances = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
-    candidates = []
-    for index, (x, y, w, h, area) in enumerate(stats[1:], 1):
-        if not (9 <= w <= 90 and 7 <= h <= 75 and .55 <= w / h <= 2.8
-                and area >= max(70, .33 * w * h)):
-            continue
-        region = np.s_[y:y + h, x:x + w]
-        core = np.where(labels[region] == index, distances[region], 0)
-        py, px = np.unravel_index(np.argmax(core), core.shape)
-        candidates.append((int(area), (float(x + px) / width, float(y + py) / height)))
-    return tuple(point for _, point in sorted(candidates, reverse=True)[:10])
+    points = []
+    # Separate red objects from warm soil before trying the broader orange mask.
+    for mask in (red, orange):
+        components = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(components)
+        distances = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+        candidates = []
+        for index, (x, y, w, h, area) in enumerate(stats[1:], 1):
+            if not (9 <= w <= 90 and 7 <= h <= 75 and .55 <= w / h <= 2.8
+                    and area >= max(70, .33 * w * h)):
+                continue
+            region = np.s_[y:y + h, x:x + w]
+            core = np.where(labels[region] == index, distances[region], 0)
+            py, px = np.unravel_index(np.argmax(core), core.shape)
+            compactness = area / max(w, h) ** 2
+            candidates.append((area * compactness, (int(x + px), int(y + py))))
+        for _, point in sorted(candidates, reverse=True)[:6]:
+            if all(abs(point[0] - px) > 6 or abs(point[1] - py) > 6 for px, py in points):
+                points.append(point)
+    return tuple((x / width, y / height) for x, y in points)
 
 
 def minimap_quest_dots(frame_rgb: np.ndarray) -> tuple[tuple[float, float], ...]:
