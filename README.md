@@ -1,5 +1,6 @@
 # wow-agnet — 魔兽世界正式服自动化系统
 
+新增 [三维地面导航 v1](docs/3d-navigation.md)：基于 Recast/Detour 的碰撞模型导入、分层寻路、路径预览与反馈跟随接口。已通过离线几何测试，正式服资源自动提取、坐标遥测接入及实走仍待完成；独立入口为 `.venv/bin/python -m bot.nav3d_cli`。
 
 单账号「采集 / 钓鱼 / 拍卖行售卖」自动化。架构：**游戏内插件像素状态通道 + Python 截图识别 + 键鼠模拟**，不读内存、不注入。详细设计见 [PLAN.md](PLAN.md)，上线步骤见 [docs/SETUP.md](docs/SETUP.md)。
 

@@ -35,6 +35,7 @@ packages = [
     "bot.data",
     "bot.decision",
     "bot.ops",
+    "bot.nav3d",
 ]
 
 [tool.setuptools.package-data]

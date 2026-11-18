@@ -1,0 +1,2 @@
+# Preserve pinned upstream source byte-for-byte, including its original spacing.
+native/nav3d/vendor/** -whitespace
