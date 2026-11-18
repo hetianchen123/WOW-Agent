@@ -84,6 +84,9 @@ class Nav3DConfig:
     mode: str = "visual"  # visual | nav3d-shadow | nav3d
     mesh: str = "data/nav3d/current/mesh"
     alignment_file: str = ""
+    # Explicit opt-in for user-supervised testing of this exact mesh only.
+    # This does not certify world alignment or scene phase.
+    supervised_trial_mesh_id: str = ""
     budget_s: float = 120.0
     max_replans: int = 3
 

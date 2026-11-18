@@ -107,7 +107,7 @@ class SceneBuilder:
         if self.roi.shape!=(2,2) or not np.isfinite(self.roi).all() or (self.roi[1]<=self.roi[0]).any() or (self.roi[1]-self.roi[0]>320).any():
             raise NavigationError('invalid_local_roi')
         self.names=names or {};self.vertices=[];self.triangles=[];self.instances=[];self.seen=set()
-        self.excluded_liquid_chunks=[]
+        self.excluded_liquid_chunks=[];self.excluded_wmo_groups=[]
 
     def read(self,kind,fdid):return self.decoder.decode(kind,self.casc.read(fdid))
 
@@ -151,6 +151,12 @@ class SceneBuilder:
             raise NavigationError('wmo_group_file_ids_missing')
         for gid in root['groupIDs'][:root['groupCount']]:
             group=self.read('wmo',gid)
+            # MOGP antiportals are visibility occluders, not physical walls.
+            name=root.get('groupNames',{}).get(str(group.get('nameOfs')),'')
+            if group.get('flags',0)&0x4000080 or name.lower()=='antiportal':
+                self.excluded_wmo_groups.append(dict(parent=fdid,file_id=gid,
+                    flags=group.get('flags',0),name=name,reason='non_physical_group'))
+                continue
             if group.get('liquid'):
                 liquid=group['liquid'];corner=np.array(liquid['corner'])
                 corners=np.array([corner+[x*TILE/128,y*TILE/128,0] for x in (0,liquid['tileX']) for y in (0,liquid['tileY'])])
@@ -226,6 +232,7 @@ class SceneBuilder:
         evidence=dict(schema=1,map_record=maprow,build=self.casc.build,roi=self.roi.tolist(),tiles=tiles,
             dependencies=dict(casclib=CASC_COMMIT,wow_export=EXPORT_COMMIT,casclib_patch_sha256=hashlib.sha256((ROOT/'native/nav3d/casc/readonly.patch').read_bytes()).hexdigest(),map_dbd_sha256=hashlib.sha256(Path(dbd).read_bytes()).hexdigest()),
             resources=list(self.casc.records.values()),instances=self.instances,excluded_liquid_chunks=self.excluded_liquid_chunks,
+            excluded_wmo_groups=self.excluded_wmo_groups,
             alignment_verified=False,phase_verified=False,dynamic_objects_included=False,reached_in_game=False)
         (output/'extraction.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2))
         return output/'scene.json'

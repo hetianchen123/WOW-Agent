@@ -656,9 +656,13 @@ class RunQuests(State):
             if not hasattr(self, "nav3d_coordinator"):
                 self.nav3d_coordinator = Nav3DCoordinator(ctx.cfg.nav3d, now=now, log_event=ctx.log_event)
             command = self.nav3d_coordinator.step(now, getattr(self, "nav3d_sample", None), navigation,
-                goal_override=self.object_target or self.search_waypoint)
+                goal_override=self.object_target or self.search_waypoint,
+                target_receipt=building_target_receipt(navigation,self.observation,now) if navigation else None,
+                travel_only=self.travel_only)
         except (NavigationError, OSError, ValueError) as exc:
             return self.stop(ctx, "nav3d_initialization_failed:" + str(exc))
+        if command.tap or command.keys:
+            self.execution_started = True
         self.apply_travel_command(ctx, command)
         if command.outcome == "nav3d_route_arrived":
             self.arrived, self.last_progress = True, now
@@ -667,6 +671,9 @@ class RunQuests(State):
                 self.OUTCOME = "completed"
             else:
                 self.stop(ctx, "nav3d_route_arrived_waiting_task_receipt")
+        elif command.outcome == "nav3d_target_confirmed":
+            self.arrived,self.last_progress=True,now
+            self.stop(ctx,"nav3d_target_reached_waiting_task_execution")
         elif command.outcome:
             self.stop(ctx, command.outcome)
 

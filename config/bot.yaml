@@ -79,10 +79,11 @@ notify:
   provider: none      # none | bark | serverchan
   key: ""
 
-# 当前分支先做真实地图影子验证；不会向旧视觉规划自动降级。
+# 用户手动启动的门口实走测试；仅授权此摘要的网格试跑，不表示已标定/已进门。
 nav3d:
-  mode: nav3d-shadow
-  mesh: data/nav3d/live-2927-roi-v3/mesh
+  mode: nav3d
+  mesh: data/nav3d/live-2927-door-v5/mesh
   alignment_file: ""
+  supervised_trial_mesh_id: "2141aec34ec36431d1b35d6400609b2d13ecd976063d77fe4f4ded5ed9d27436"
   budget_s: 120
   max_replans: 3

@@ -508,6 +508,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         ctx.db.end_session(session_id, outcome.status, outcome.stats)
         if getattr(args, "require_prepared", False):
             explanations = {
+                "stopped:nav3d_candidates_exhausted": "三维楼层候选已从低到高尝试完，未取得目标范围回执；角色已停止。请保留本轮日志。",
+                "stopped:nav3d_budget_exhausted": "三维导航已达到 120 秒总预算，角色已停止。",
+                "stopped:nav3d_world_alignment_unverified": "当前网格缺少对齐证据，且未配置该网格的人工监督试跑。",
+                "stopped:nav3d_target_reached_waiting_task_execution": "已取得目标原生范围回执，三维导航测试停止；尚未自动执行战斗或交互。",
+                "stopped:nav3d_state_unsafe": "三维地面导航状态改变（战斗、飞行、骑乘或键位未核验），已松键停止。",
+                "stopped:nav3d_support_ambiguous": "当前角色脚下支撑面不唯一，无法确认所在楼层，已停止；目标多层候选仍按从低到高尝试。",
                 "stopped:quest_automatic_not_prepared": "请在插件里点「一键准备自动任务」，等核对成功后再启动。",
                 "stopped:quest_mount_button_unavailable": "未核对到原生驭空坐骑图标。请关闭插件面板和地图，并确认动作栏上有原生驭空坐骑图标。",
                 "stopped:quest_mount_not_confirmed": "已尝试使用原生驭空坐骑，游戏尚未确认骑乘任务进度。请查看游戏内提示及任务运行日志。",

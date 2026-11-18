@@ -172,3 +172,102 @@ def test_alignment_booleans_without_verified_receipts_cannot_enable_input(live_m
     path=tmp_path/'alignment.json';path.write_text(json.dumps(evidence))
     rt=Nav3DCoordinator(Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),alignment_file=str(path)),now=0)
     assert rt.step(0,s,n).outcome=='nav3d_world_alignment_unverified'
+
+
+def candidate_runtime(live_mesh,tmp_path,monkeypatch,mode='nav3d-shadow'):
+    m,start,goal=live_mesh;s,n=samples(start,goal);events=[]
+    rt=Nav3DCoordinator(Nav3DConfig(mode=mode,mesh=str(tmp_path/'mesh')),now=0,
+        log_event=lambda *e:events.append(e))
+    actual=rt.tracker.candidates(goal[:2])[0]
+    low=(*actual[:2],actual[2]-5);high=(*actual[:2],actual[2]+5)
+    candidates=rt.tracker.candidates
+    monkeypatch.setattr(rt.tracker,'candidates',lambda xy:[high,actual,low] if tuple(xy)==tuple(goal[:2]) else candidates(xy))
+    return rt,s,n,events,low,actual,high
+
+
+def test_target_floors_tried_bottom_up_skipping_disconnected(live_mesh,tmp_path,monkeypatch):
+    rt,s,n,events,low,actual,high=candidate_runtime(live_mesh,tmp_path,monkeypatch)
+    cmd=rt.step(0,s,n)
+    assert cmd.outcome=='nav3d_shadow_complete' and not cmd.tap
+    assert rt.goals==[low,actual,high] and rt.goal_index==1
+    assert rt.route.requested_goal==actual
+    failures=[data for event,data in events if event=='nav3d_candidate_finished']
+    assert len(failures)==1 and failures[0]['goal']==low and not failures[0]['reached_in_game']
+
+
+def test_floor_arrival_without_target_receipt_advances_without_resetting_budget(live_mesh,tmp_path,monkeypatch):
+    from bot.control.quest_travel import TravelCommand
+    rt,s,n,events,low,actual,high=candidate_runtime(live_mesh,tmp_path,monkeypatch)
+    rt.step(0,s,n);rt.config.mode='nav3d';deadline=rt.deadline
+    rt.follower=SimpleNamespace(index=0,step=lambda *a,**kw:TravelCommand(outcome='nav3d_route_arrived'))
+    def step(now,seq):return rt.step(now,replace(s,sequence=seq),SimpleNamespace(**{**vars(n),'sequence':seq}))
+    assert step(.1,2).outcome is None and rt.arrived_at==.1
+    assert step(1,3).outcome is None and rt.goal_index==1
+    assert step(2.2,4).outcome=='nav3d_candidates_exhausted'
+    assert rt.deadline==deadline and rt.goal_index==3
+    assert any(d['reason']=='target_receipt_missing' for e,d in events if e=='nav3d_candidate_finished')
+
+
+def test_stuck_candidate_moves_up_and_preserves_retry_budget(live_mesh,tmp_path,monkeypatch):
+    from bot.control.quest_travel import TravelCommand
+    rt,s,n,events,*_=candidate_runtime(live_mesh,tmp_path,monkeypatch)
+    rt.step(0,s,n);rt.config.mode='nav3d'
+    rt.follower=SimpleNamespace(index=0,step=lambda *a,**kw:TravelCommand(outcome='nav3d_stuck_replan_required'))
+    cmd=rt.step(.1,replace(s,sequence=2),SimpleNamespace(**{**vars(n),'sequence':2}))
+    assert cmd.outcome is None and not cmd.tap and rt.goal_index==2 and rt.replans==1
+
+
+@pytest.mark.parametrize('flags,name',[(0x4000000,'anything'),(0x80,'anything'),(0,'antiportal')])
+def test_visibility_groups_are_excluded_but_physical_wall_remains(flags,name):
+    from bot.nav3d.extract import SceneBuilder
+    builder=SceneBuilder(None,None,[[0,0],[10,10]])
+    root=dict(groupIDs=[2,3],groupCount=2,groupNames={'0':name})
+    wall=dict(flags=0,nameOfs=10,indices=[0,1,2],materialInfo=[{'flags':8}],vertices=[1,0,-1,2,0,-1,1,2,-1])
+    groups={1:root,2:dict(wall,flags=flags,nameOfs=0),3:wall}
+    builder.read=lambda kind,fid:groups[fid]
+    builder.wmo(1,np.eye(4),dict(uniqueId=4,doodadSet=0))
+    assert len(builder.triangles)==1 and builder.instances[0]['file_id']==3
+    assert builder.excluded_wmo_groups[0]['file_id']==2
+
+
+def test_float32_shared_surface_boundary_is_not_missing():
+    tracker=object.__new__(SurfaceTracker)
+    tracker.triangles=np.array([[[2097.2000007629395,-879.7999992370605,61.646751403808594],
+        [2098.0000019073486,-879.2000007629395,62.54675102233887],
+        [2097.6159992218018,-878.6000022888184,62.54675102233887]]])
+    assert len(tracker.candidates((2097.377779006958,-879.6666679382324)))==1
+    assert tracker.candidates((2097.2,-879.9))==[]
+
+
+def test_explicit_mesh_bound_trial_produces_intent_without_claiming_alignment(live_mesh,tmp_path):
+    m,start,goal=live_mesh;s,n=samples(start,goal);events=[]
+    cfg=Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),supervised_trial_mesh_id=m.mesh_id)
+    rt=Nav3DCoordinator(cfg,now=0,log_event=lambda *e:events.append(e))
+    command=rt.step(0,s,n)
+    assert command.outcome is None and command.tap
+    assert not rt.alignment and not rt.follower.alignment_verified and rt.follower.supervised_trial
+    assert events[0][0]=='nav3d_supervised_trial' and events[0][1]['phase_verified'] is False
+    # World/build/phase checks remain mandatory even during a supervised trial.
+    rt=Nav3DCoordinator(cfg,now=0)
+    assert rt.step(0,replace(s,world_id=0),n).outcome=='nav3d_world_frame_changed'
+
+
+def test_supervised_trial_cannot_transfer_to_another_mesh(live_mesh,tmp_path):
+    cfg=Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),supervised_trial_mesh_id='0'*64)
+    with pytest.raises(NavigationError,match='nav3d_trial_mesh_mismatch'):
+        Nav3DCoordinator(cfg,now=0)
+
+
+def test_manual_entry_executes_nav3d_intent_through_existing_executor(tmp_path,monkeypatch):
+    from test_npc_obstacle import npc
+    from bot.modules import quest
+    from bot.control.quest_travel import TravelCommand
+    from bot.perception.quest_channel import QuestState
+    run,ctx,tick,nav,events=npc(tmp_path,monkeypatch)
+    ctx.cfg.nav3d.mode='nav3d'
+    run.nav3d_coordinator=SimpleNamespace(step=lambda *a,**kw:TravelCommand(tap='left',hold_s=.03,precise=True))
+    monkeypatch.setattr(quest,'decode_travel',lambda _:nav)
+    monkeypatch.setattr(run,'recover',lambda *_:pytest.fail('legacy recovery must not run'))
+    tick(QuestState.READY)
+    assert run.execution_started and ctx.input.count('key_down')==1
+    assert not ctx.input._held_keys and run.OUTCOME is None

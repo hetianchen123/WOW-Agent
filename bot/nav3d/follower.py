@@ -28,7 +28,7 @@ class WorldPose:
 
 class WorldRouteFollower:
     def __init__(self, route: Path3D, *, now: float, mesh_id: str, obstacle_revision: str,
-                 alignment_verified: bool = False, budget: float = 90):
+                 alignment_verified: bool = False, supervised_trial: bool = False, budget: float = 90):
         if route.frame.coordinate_system != "east_north_up":
             raise NavigationError("follower_requires_east_north_up")
         if not math.isfinite(now) or not 0 < budget <= 300 or not math.isfinite(budget):
@@ -39,6 +39,7 @@ class WorldRouteFollower:
             raise NavigationError("follower_requires_dense_surface_path")
         self.route, self.mesh_id, self.revision = route, mesh_id, obstacle_revision
         self.alignment_verified = alignment_verified
+        self.supervised_trial = supervised_trial
         self.deadline = now+budget
         self.index, self.sequence, self.last_pose = 0, None, None
         self.progress_at, self.last_turn, self.last_direction = now, float("-inf"), None
@@ -58,7 +59,7 @@ class WorldRouteFollower:
             return self.stop("nav3d_cancelled")
         if not math.isfinite(now) or now > self.deadline:
             return self.stop("nav3d_budget_exhausted")
-        if not self.alignment_verified:
+        if not (self.alignment_verified or self.supervised_trial):
             return self.stop("nav3d_world_alignment_unverified")
         if mesh_id != self.mesh_id or self.mesh_id != self.route.mesh_id or obstacle_revision != self.revision or self.revision != self.route.obstacle_revision:
             return self.stop("nav3d_replan_required")

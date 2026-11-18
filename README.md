@@ -1,6 +1,6 @@
 # wow-agnet — 魔兽世界正式服自动化系统
 
-新增 [三维地面导航 v1](docs/3d-navigation.md)：基于 Recast/Detour 的碰撞模型导入、分层寻路、路径预览与反馈跟随接口。已通过离线几何测试，正式服资源自动提取、坐标遥测接入及实走仍待完成；独立入口为 `.venv/bin/python -m bot.nav3d_cli`。
+新增 [三维地面导航 v1](docs/3d-navigation.md)：基于 Recast/Detour 的碰撞模型导入、分层寻路、路径预览与反馈跟随接口。已通过离线几何测试，已接入正式服本机资源提取与坐标遥测，实走待验证；独立入口为 `.venv/bin/python -m bot.nav3d_cli`。
 
 单账号「采集 / 钓鱼 / 拍卖行售卖」自动化。架构：**游戏内插件像素状态通道 + Python 截图识别 + 键鼠模拟**，不读内存、不注入。详细设计见 [PLAN.md](PLAN.md)，上线步骤见 [docs/SETUP.md](docs/SETUP.md)。
 
@@ -83,4 +83,4 @@ uv run python -m bot.cli report --hours 24               # 收益/会话报告
 
 ### 三维导航接入进度
 
-视觉基线已保存至 `codex/vision-baseline-20261118`；当前三维分支加入本机 CASC 局部碰撞提取、独立三维遥测和 `nav3d-shadow`。三轮真实遥测已对齐，当前任务因楼层歧义与建筑连接断路停止，尚未实走。复现命令、证据与剩余验收见 [三维接入推进](docs/nav3d-live-plan.md)。
+视觉基线已保存至 `codex/vision-baseline-20261118`；当前三维分支加入本机 CASC 局部碰撞提取、独立三维遥测和 `nav3d-shadow`。已修复门口网格的遮挡面问题并计算出 55.50 码门厅路线，目标层从低到高尝试。当前配置为用户手动启动的 `nav3d` 监督试跑；真实遥测影子通过，尚未实走。复现命令、证据与剩余验收见 [三维接入推进](docs/nav3d-live-plan.md)。

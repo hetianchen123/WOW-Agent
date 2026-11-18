@@ -51,6 +51,8 @@ def main(argv=None):
     extract.add_argument("--phase", required=True)
     extract.add_argument("--roi", nargs=4, type=float, required=True, metavar=("E_MIN", "N_MIN", "E_MAX", "N_MAX"))
     extract.add_argument("--output", type=Path, required=True)
+    extract.add_argument("--max-climb", type=float, default=.4,
+        help="explicit agent step height in yards; defaults to .4; live capability needs validation")
     probe = sub.add_parser("probe-live", help="record coherent Nav3D telemetry and optionally shadow-plan; never sends input")
     probe.add_argument("--seconds", type=float, default=5)
     probe.add_argument("--mesh", type=Path)
@@ -60,6 +62,7 @@ def main(argv=None):
     try:
         if args.command == "extract-client":
             from .nav3d.extract import LocalCASC, ClientDecoder, SceneBuilder
+            agent=Agent(max_climb=args.max_climb)
             names = {}
             if args.listfile:
                 for line in args.listfile.read_text().splitlines():
@@ -69,6 +72,8 @@ def main(argv=None):
                 try:
                     builder = SceneBuilder(casc, decoder, [args.roi[:2], args.roi[2:]], names)
                     scene_path = builder.extract(args.world_id, args.map_dbd, args.output, args.phase)
+                    manifest=json.loads(scene_path.read_text());manifest['agent']=asdict(agent)
+                    scene_path.write_text(json.dumps(manifest,indent=2))
                     mesh, v, t = build_scene(scene_path, args.output/"mesh")
                     print(json.dumps(dict(scene=str(scene_path), mesh_id=mesh.mesh_id, vertices=len(v), triangles=len(t), reached_in_game=False)))
                 finally:
