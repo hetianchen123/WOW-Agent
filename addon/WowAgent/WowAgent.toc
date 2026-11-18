@@ -2,7 +2,7 @@
 ## Title: WowAgent
 ## Notes: WowAgent 游戏内任务、战斗准备、动作栏和地面主路地图
 ## Author: wowagnet
-## Version: 0.2.74
+## Version: 0.2.75
 ## SavedVariables: WowAgentDB
 ## IconTexture: Interface\Icons\Inv_Misc_Note_01
 ## AddonCompartmentFunc: WowAgent_TogglePanel
@@ -19,6 +19,7 @@ APRQuestData.lua
 Recovery.lua
 QuestArea.lua
 QuestCamera.lua
+Nav3D.lua
 Quest.lua
 Combat.lua
 ActionLayout.lua

@@ -80,3 +80,7 @@ uv run python -m bot.cli report --hours 24               # 收益/会话报告
 - **定位闭环导航**：waypoint + 朝向反馈转向（比例控制），不依赖 navmesh；卡死检测→后退/跳跃恢复→炉石兜底。
 - **售卖由插件主导**：定价全部交给 Auctionator 规则，外部只点按钮；上架确认走插件的 `C_AuctionHouse.PostItem` 观察 hook（FASTEV 事件），不 OCR 价格。
 - **合成环境自测**：`selftest.py` 用 Python 参考编码器模拟插件渲染、模拟世界响应输入，跑通完整钓鱼状态机——不进游戏也能回归验证整条链路。
+
+### 三维导航接入进度
+
+视觉基线已保存至 `codex/vision-baseline-20261118`；当前三维分支加入本机 CASC 局部碰撞提取、独立三维遥测和 `nav3d-shadow`。三轮真实遥测已对齐，当前任务因楼层歧义与建筑连接断路停止，尚未实走。复现命令、证据与剩余验收见 [三维接入推进](docs/nav3d-live-plan.md)。

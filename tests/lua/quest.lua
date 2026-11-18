@@ -1252,7 +1252,7 @@ assert(status == 3 + 20 + 256 + 512 and corpse == 460 * 1024 + 512)
 
 -- Runtime build extension is separate from the v15 core and follows nav sequence.
 assert(math.floor((rowValues[-288] % 524288) / 512) == math.floor(357888 / 512))
-assert(rowValues[-272] % 4096 == 274)
+assert(rowValues[-272] % 4096 == 275)
 assert(math.floor(rowValues[-272] / 4096) % 128 == math.floor(rowValues[-256] / 8192))
 -- Independently versioned visibility row; old v15/schema 6 remain unchanged.
 assert(math.floor(rowValues[-304] / 16384) == 45)

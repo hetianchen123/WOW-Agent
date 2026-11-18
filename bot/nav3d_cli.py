@@ -41,9 +41,42 @@ def main(argv=None):
     view.add_argument("--path", type=Path); view.add_argument("--output", type=Path, required=True)
     demo = sub.add_parser("demo", help="build/query synthetic wall, doorway and stacked-floor fixtures")
     demo.add_argument("--output", type=Path, default=Path("data/nav3d/demo-v1"))
+    extract = sub.add_parser("extract-client", help="extract local CASC collision ROI; no game input")
+    extract.add_argument("--client", type=Path, required=True)
+    extract.add_argument("--library", type=Path, required=True)
+    extract.add_argument("--readers", type=Path, default=Path("data/nav3d/deps/wow.export"))
+    extract.add_argument("--map-dbd", type=Path, default=Path("data/nav3d/deps/Map.dbd"))
+    extract.add_argument("--listfile", type=Path)
+    extract.add_argument("--world-id", type=int, required=True)
+    extract.add_argument("--phase", required=True)
+    extract.add_argument("--roi", nargs=4, type=float, required=True, metavar=("E_MIN", "N_MIN", "E_MAX", "N_MAX"))
+    extract.add_argument("--output", type=Path, required=True)
+    probe = sub.add_parser("probe-live", help="record coherent Nav3D telemetry and optionally shadow-plan; never sends input")
+    probe.add_argument("--seconds", type=float, default=5)
+    probe.add_argument("--mesh", type=Path)
+    probe.add_argument("--background-read-only", action="store_true", help="read visible telemetry without foreground requirement; no input executor exists in this probe")
+    probe.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if args.command == "backend":
+        if args.command == "extract-client":
+            from .nav3d.extract import LocalCASC, ClientDecoder, SceneBuilder
+            names = {}
+            if args.listfile:
+                for line in args.listfile.read_text().splitlines():
+                    key, name = line.split(";", 1); names[name.lower()] = int(key)
+            with LocalCASC(args.client, args.library, cache="data/nav3d/casc-cache") as casc:
+                decoder = ClientDecoder(args.readers, "data/nav3d/decoded-input")
+                try:
+                    builder = SceneBuilder(casc, decoder, [args.roi[:2], args.roi[2:]], names)
+                    scene_path = builder.extract(args.world_id, args.map_dbd, args.output, args.phase)
+                    mesh, v, t = build_scene(scene_path, args.output/"mesh")
+                    print(json.dumps(dict(scene=str(scene_path), mesh_id=mesh.mesh_id, vertices=len(v), triangles=len(t), reached_in_game=False)))
+                finally:
+                    decoder.close()
+        elif args.command == "probe-live":
+            from .nav3d.live_probe import probe_live
+            print(json.dumps(probe_live(args.output, seconds=args.seconds, mesh=args.mesh, require_focus=not args.background_read_only), ensure_ascii=False))
+        elif args.command == "backend":
             print(json.dumps({"backend": str(build_backend())}))
         elif args.command == "build":
             mesh, v, t = build_scene(args.scene, args.output)

@@ -646,7 +646,33 @@ class RunQuests(State):
         except (CaptureError, ValueError, OSError) as exc:
             ctx.log_event("quest_camera_evidence_unavailable", {"reason": str(exc)})
 
+    def nav3d_enabled(self, ctx):
+        return getattr(getattr(ctx.cfg, "nav3d", None), "mode", "visual") != "visual"
+
+    def travel_nav3d(self, ctx, now, navigation):
+        from ..nav3d.runtime import Nav3DCoordinator
+        from ..nav3d import NavigationError
+        try:
+            if not hasattr(self, "nav3d_coordinator"):
+                self.nav3d_coordinator = Nav3DCoordinator(ctx.cfg.nav3d, now=now, log_event=ctx.log_event)
+            command = self.nav3d_coordinator.step(now, getattr(self, "nav3d_sample", None), navigation,
+                goal_override=self.object_target or self.search_waypoint)
+        except (NavigationError, OSError, ValueError) as exc:
+            return self.stop(ctx, "nav3d_initialization_failed:" + str(exc))
+        self.apply_travel_command(ctx, command)
+        if command.outcome == "nav3d_route_arrived":
+            self.arrived, self.last_progress = True, now
+            ctx.log_event("nav3d_route_arrived", {"task_receipt_confirmed": False})
+            if self.travel_only:
+                self.OUTCOME = "completed"
+            else:
+                self.stop(ctx, "nav3d_route_arrived_waiting_task_receipt")
+        elif command.outcome:
+            self.stop(ctx, command.outcome)
+
     def travel(self, ctx, now, navigation, heading):
+        if self.nav3d_enabled(ctx):
+            return self.travel_nav3d(ctx, now, navigation)
         if self.terrain:
             command = self.terrain.step(ctx, now, navigation, heading)
             self.apply_travel_command(ctx, command)
@@ -790,6 +816,8 @@ class RunQuests(State):
                     and self.building_access.state != 'inside')
 
     def process_building_access(self, ctx, now, nav, heading):
+        if self.nav3d_enabled(ctx):
+            return False
         config=getattr(ctx.cfg,'segmented_navigation',None)
         if not (self.auto_route and self.require_prepared and not self.travel_only
                 and config and config.enabled and config.building_access):
@@ -1154,6 +1182,10 @@ class RunQuests(State):
             nav_rect = travel_region(channel.x, channel.y)
             left, top = channel.x, min(nav_rect[1], combat_rect[1]) if self.auto_route else combat_rect[1]
             right = nav_rect[0] + nav_rect[2] if self.auto_route else left + REGION_W
+            if self.auto_route and self.nav3d_enabled(ctx):
+                from ..perception.nav3d_channel import nav3d_region
+                xyz_rect = nav3d_region(channel.x, channel.y)
+                top, right = min(top, xyz_rect[1]), max(right, xyz_rect[0] + xyz_rect[2])
             snapshot = ctx.capture.grab(left, top, right - left, channel.y - top)
 
             def strip(rect):
@@ -1163,6 +1195,9 @@ class RunQuests(State):
             self.combat_frame, frame_image = strip(combat_rect), strip(quest_rect)
             if self.auto_route:
                 nav_image = strip(nav_rect)
+                if self.nav3d_enabled(ctx):
+                    from ..perception.nav3d_channel import decode_nav3d
+                    self.nav3d_sample = decode_nav3d(strip(xyz_rect))
         status = ctx.channel.status(max_age_s=1.5)
         navigation = None
         if self.auto_route:
@@ -1196,6 +1231,13 @@ class RunQuests(State):
                             "npc_step": self.npc_step is not None,
                             "travel": getattr(self.trip, "mode", None)},
             })
+        if self.auto_route and self.nav3d_enabled(ctx):
+            # One owner for all ground movement, including building/approach.
+            # Shadow is intercepted before recovery, camera, combat or NPC taps.
+            if (frame is None or navigation is None or frame.quest_id != navigation.quest_id
+                    or frame.state != navigation.phase or frame.map_id != navigation.map_id):
+                return self.stop(ctx, "nav3d_incoherent_quest")
+            return self.travel_nav3d(ctx, now, navigation)
         self.ground_trace.observe(navigation, now, self.travel_keys)
         if status and status[0] & (StatusFlags.IN_COMBAT | StatusFlags.DEAD | StatusFlags.GHOST):
             self.ground_trace.clear()

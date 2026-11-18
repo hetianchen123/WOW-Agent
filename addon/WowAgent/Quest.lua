@@ -1989,6 +1989,7 @@ local function UpdateNavigation()
     if fly and fly.active then meta = meta + 2048 end
     if GetBindingAction("F", true) == "INTERACTTARGET" then meta = meta + 4096 end
     navSequence = (navSequence + 1) % 128
+    if WowAgent.WriteNav3D then WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap, meta % 256 >= 128 and gx or nil, meta % 256 >= 128 and gy or nil, flags) end
     writeObjectiveProgress(navSequence % 16, objectiveProgress)
     local recoveryGhost
     if WowAgent.RecoveryState then
@@ -2071,7 +2072,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 274 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 275 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4
@@ -2291,6 +2292,7 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
 end
 
 function WowAgent.StopQuestNavigation()
+    if WowAgent.HideNav3D then WowAgent.HideNav3D() end
     if WowAgent.VisualUI then WowAgent.VisualUI.Restore(true) end
     navigation = nil
     ConfigureTaskTarget(nil)

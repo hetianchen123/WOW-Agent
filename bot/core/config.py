@@ -80,6 +80,15 @@ class NavigationConfig:
 
 
 @dataclass
+class Nav3DConfig:
+    mode: str = "visual"  # visual | nav3d-shadow | nav3d
+    mesh: str = "data/nav3d/current/mesh"
+    alignment_file: str = ""
+    budget_s: float = 120.0
+    max_replans: int = 3
+
+
+@dataclass
 class RoutePlannerConfig:
     enabled: bool = False
     base_url: str = "https://api.deepseek.com"
@@ -196,6 +205,7 @@ class BotConfig:
     input: InputConfig = field(default_factory=InputConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
     route_planner: RoutePlannerConfig = field(default_factory=RoutePlannerConfig)
+    nav3d: Nav3DConfig = field(default_factory=Nav3DConfig)
     segmented_navigation: SegmentedNavigationConfig = field(default_factory=SegmentedNavigationConfig)
     fishing: FishingConfig = field(default_factory=FishingConfig)
     gathering: GatheringConfig = field(default_factory=GatheringConfig)
