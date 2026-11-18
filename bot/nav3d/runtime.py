@@ -4,6 +4,7 @@ from dataclasses import asdict
 import hashlib
 import json
 import math
+import time
 from pathlib import Path
 import numpy as np
 from .planner import NavigationError, NavMesh, Query
@@ -19,8 +20,9 @@ class SurfaceTracker:
     """
     def __init__(self, mesh):
         self.mesh=mesh;self.triangles=mesh.debug_triangles();self.last=None
+        self.support_basis='mesh_triangle'
 
-    def candidates(self, xy):
+    def candidates(self, xy, *, edge_tolerance=0):
         p=np.asarray(xy,float);t=self.triangles
         a=t[:,0,:2];u=t[:,1,:2]-a;v=t[:,2,:2]-a;w=p-a
         den=u[:,0]*v[:,1]-u[:,1]*v[:,0]
@@ -31,36 +33,63 @@ class SurfaceTracker:
         # few ulps. A tiny barycentric tolerance preserves shared boundaries.
         valid &= (b>=-1e-5)&(c>=-1e-5)&(b+c<=1+1e-5)
         z=t[:,0,2]+b*(t[:,1,2]-t[:,0,2])+c*(t[:,2,2]-t[:,0,2])
+        heights=list(z[valid])
+        if edge_tolerance:
+            # Project only within a small XY measurement/control tolerance;
+            # callers still require a short connected route from last support.
+            a=t[:,:,:2];edges=np.roll(t,-1,axis=1)-t
+            den=np.sum(edges[:,:,:2]**2,axis=2)
+            f=np.divide(np.sum((p-a)*edges[:,:,:2],axis=2),den,
+                out=np.zeros_like(den),where=den>1e-12).clip(0,1)
+            near=t+f[:,:,None]*edges
+            distances=np.linalg.norm(near[:,:,:2]-p,axis=2)
+            choice=distances.argmin(axis=1);rows=np.arange(len(t))
+            projected=(~valid)&(distances[rows,choice]<=edge_tolerance)
+            heights.extend(near[rows,choice,2][projected])
+        values=sorted(heights)
         heights=[]
-        for h in sorted(z[valid]):
+        for h in values:
             if not heights or abs(h-heights[-1])>.15:heights.append(float(h))
         return [(*map(float,xy),h) for h in heights]
 
     def update(self, xy):
+        self.support_basis='mesh_triangle'
         candidates=self.candidates(xy)
         if self.last is not None:
             distance=math.dist(xy,self.last[:2])
             if distance>2:raise NavigationError('nav3d_displacement_discontinuity')
-            connected=[]
-            for p in candidates:
-                if abs(p[2]-self.last[2])>max(.45,distance*1.1):continue
-                try:route=self.mesh.plan(Query(self.mesh.frame,self.last,p))
-                except NavigationError:continue
-                if route.length<=distance*1.5+.3:connected.append(p)
-            candidates=connected
+            def connected(points):
+                result=[]
+                for p in points:
+                    if abs(p[2]-self.last[2])>max(.45,distance*1.1):continue
+                    try:route=self.mesh.plan(Query(self.mesh.frame,self.last,p,horizontal_snap=.08))
+                    except NavigationError:continue
+                    if route.length<=distance*1.5+.3:result.append(p)
+                return result
+            candidates=connected(candidates)
+            # Exact support has priority. Projection must not introduce adjacent
+            # slope heights as extra floors when the pose is already inside.
+            if not candidates:
+                candidates=connected(self.candidates(xy,edge_tolerance=.08))
+                self.support_basis='bounded_edge_projection'
+        else:
+            # Include nearby support at startup so a tiny edge miss cannot
+            # silently initialize to the roof above an unobserved ground floor.
+            candidates=self.candidates(xy,edge_tolerance=.08)
         if len(candidates)!=1:
             raise NavigationError('nav3d_support_ambiguous' if candidates else 'nav3d_support_missing')
         self.last=candidates[0];return self.last
 
 
 class Nav3DCoordinator:
-    def __init__(self, config, *, now, log_event=lambda *_:None):
+    def __init__(self, config, *, now, log_event=lambda *_:None, resume_runs=None):
         if config.mode not in {'nav3d','nav3d-shadow'}:raise NavigationError('invalid_nav3d_mode')
         if not 0<config.budget_s<=120 or not 0<=config.max_replans<=3:raise NavigationError('invalid_nav3d_budget')
         self.config=config;self.mesh=NavMesh.load(config.mesh);self.tracker=SurfaceTracker(self.mesh)
         self.log=log_event;self.deadline=now+config.budget_s;self.follower=None;self.replans=0
         self.sequence=None;self.changed_at=now;self.identity=None;self.terminal=None;self.route=None
         self.goals=None;self.goal_index=0;self.arrived_at=None
+        self.resume_runs=resume_runs
         trial_id=config.supervised_trial_mesh_id
         if trial_id and trial_id!=self.mesh.mesh_id:raise NavigationError('nav3d_trial_mesh_mismatch')
         self.supervised_trial=bool(trial_id) and config.mode=='nav3d'
@@ -102,6 +131,39 @@ class Nav3DCoordinator:
             reason=reason,reached_in_game=self.arrived_at is not None))
         self.goal_index+=1;self.follower=None;self.route=None;self.arrived_at=None
 
+    def resume_support(self,sample):
+        """Reuse the last continuous support only after a recent edge stop.
+
+        Require the same mesh/frame/goal and unchanged stopped XY. This is
+        inferred support continuity, not a new native altitude measurement.
+        Other stop reasons, stale runs or movement since stopping cannot seed Z.
+        """
+        directory=self.resume_runs;self.resume_runs=None
+        if not directory:return
+        completed=sorted((p for p in Path(directory).glob('*/events.jsonl')
+            if (p.parent/'summary.json').is_file()),reverse=True)
+        if not completed:return
+        path=completed[0]
+        if path.stat().st_size>8_000_000:return
+        try:
+            rows=[json.loads(line) for line in path.read_text().splitlines()]
+            last={r['kind']:r for r in rows}
+            end=last['module_end'];stop=last['nav3d_stop']
+            if end['data']['status']!='stopped:nav3d_support_missing' or stop['data']['reason']!='nav3d_support_missing':return
+            if not 0<=time.time()-end['ts']<=900:return
+            route=last['nav3d_plan']['data']['route']
+            if route['mesh_id']!=self.mesh.mesh_id or route['frame']!=asdict(self.mesh.frame):return
+            if tuple(route['requested_goal'][:2])!=tuple(sample.goal_xy):return
+            previous=last['nav3d_control']['data']['position']
+            stopped=last['nav3d_pose']['data']['position_xy']
+            if math.dist(stopped,sample.position_xy)>.1 or math.dist(previous[:2],stopped)>.5:return
+            # Validate the recorded support itself before seeding continuity.
+            if not any(abs(p[2]-previous[2])<=.15 for p in self.tracker.candidates(previous[:2],edge_tolerance=.08)):return
+            self.tracker.last=tuple(previous)
+            self.log('nav3d_resume_support',dict(source_run=path.parent.name,position=previous,
+                stopped_xy=stopped,z_source='previous_inferred_support',native_altitude_verified=False))
+        except (ValueError,KeyError,TypeError,OSError):return
+
     def _step(self,now,sample,nav,goal_override,blocked_boxes,target_receipt,travel_only):
         if now>self.deadline:return self.stop('nav3d_budget_exhausted')
         if sample is None or nav is None:return self.stop('nav3d_channel_unavailable')
@@ -126,7 +188,13 @@ class Nav3DCoordinator:
         self.identity=identity
         self.log('nav3d_pose',dict(sequence=sample.sequence,position_xy=sample.position_xy,
             heading=sample.heading,public_z=sample.public_z,elapsed=self.config.budget_s-(self.deadline-now)))
-        position=self.tracker.update(sample.position_xy)
+        if self.tracker.last is None:self.resume_support(sample)
+        try:position=self.tracker.update(sample.position_xy)
+        except NavigationError as exc:
+            self.log('nav3d_support_failure',dict(reason=str(exc),previous=self.tracker.last,
+                position_xy=sample.position_xy,exact=self.tracker.candidates(sample.position_xy),
+                nearby=self.tracker.candidates(sample.position_xy,edge_tolerance=.08)))
+            raise
         if target_receipt and self.config.mode=='nav3d':
             self.log('nav3d_target_receipt',target_receipt)
             return self.stop('nav3d_target_confirmed')
@@ -160,7 +228,8 @@ class Nav3DCoordinator:
             return TravelCommand(outcome='nav3d_shadow_complete')
         command=self.follower.step(now,pose,mesh_id=self.mesh.mesh_id,obstacle_revision=revision)
         self.log('nav3d_control',dict(sequence=sample.sequence,position=position,candidate=self.goal_index,
-            waypoint=self.follower.index,tap=command.tap,hold_s=command.hold_s,outcome=command.outcome))
+            support_basis=self.tracker.support_basis,waypoint=self.follower.index,
+            tap=command.tap,hold_s=command.hold_s,outcome=command.outcome))
         if command.outcome in {'nav3d_stuck_replan_required','nav3d_replan_required'}:
             self.replans+=1
             self.next_candidate(command.outcome)

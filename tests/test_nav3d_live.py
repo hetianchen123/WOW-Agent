@@ -181,7 +181,7 @@ def candidate_runtime(live_mesh,tmp_path,monkeypatch,mode='nav3d-shadow'):
     actual=rt.tracker.candidates(goal[:2])[0]
     low=(*actual[:2],actual[2]-5);high=(*actual[:2],actual[2]+5)
     candidates=rt.tracker.candidates
-    monkeypatch.setattr(rt.tracker,'candidates',lambda xy:[high,actual,low] if tuple(xy)==tuple(goal[:2]) else candidates(xy))
+    monkeypatch.setattr(rt.tracker,'candidates',lambda xy,**kw:[high,actual,low] if tuple(xy)==tuple(goal[:2]) else candidates(xy,**kw))
     return rt,s,n,events,low,actual,high
 
 
@@ -291,3 +291,53 @@ def test_actual_coordinator_commands_obey_precise_executor_contract(live_mesh,tm
     assert sleeps==[command.hold_s]
     assert executor.count('key_down',command.tap)==executor.count('key_up',command.tap)==1
     assert not executor._held_keys
+
+
+def edge_tracker():
+    # A sloped doorway boundary and an overlapping roof; translated geometry
+    # reproduces the 0.02-yard miss in run 20261118T082051-339c21e3.
+    triangles=np.array([[[0,0,0],[.8,.6,.9],[.416,1.2,.9]],
+        [[-2,-2,17],[3,-2,17],[-2,3,17]],[[3,-2,17],[3,3,17],[-2,3,17]]])
+    mesh=SimpleNamespace(debug_triangles=lambda:triangles,frame=Frame('test',0,'test','east_north_up'),
+        plan=lambda q:SimpleNamespace(length=math.dist(q.start,q.goal)))
+    return SurfaceTracker(mesh)
+
+
+def test_doorway_edge_tolerance_retains_connected_floor_not_roof():
+    tracker=edge_tracker();tracker.last=(.5,.4,.575)
+    assert tracker.candidates((.7,.5))==[(.7,.5,17.)]
+    actual=tracker.update((.7,.5))
+    assert actual[:2]==(.7,.5) and actual[2]==pytest.approx(.774)
+    assert tracker.update((.7,.5))==actual  # held position remains stable
+
+
+def test_edge_tolerance_does_not_select_a_floor_without_continuity():
+    with pytest.raises(NavigationError,match='ambiguous'):edge_tracker().update((.7,.5))
+    tracker=edge_tracker();tracker.last=(.5,.4,.575)
+    with pytest.raises(NavigationError,match='missing'):tracker.update((.7,.3))
+    # A nearby point across a wall still needs a short complete connection.
+    tracker=edge_tracker();tracker.last=(.5,.4,.575)
+    tracker.mesh.plan=lambda q:SimpleNamespace(length=5)
+    with pytest.raises(NavigationError,match='missing'):tracker.update((.7,.5))
+
+
+@pytest.mark.parametrize('invalid',[None,'stale','moved','mesh','goal','stop'])
+def test_resume_edge_stop_requires_matching_recent_run(live_mesh,tmp_path,monkeypatch,invalid):
+    from bot.nav3d import runtime
+    m,start,goal=live_mesh;s,n=samples(start,goal)
+    rt=Nav3DCoordinator(Nav3DConfig(mode='nav3d-shadow',mesh=str(tmp_path/'mesh')),now=0,resume_runs=tmp_path/'runs')
+    position=rt.tracker.candidates(start[:2])[0]
+    mesh_id='bad' if invalid=='mesh' else m.mesh_id
+    prior_goal=[0,0,0] if invalid=='goal' else goal
+    stop='nav3d_state_unsafe' if invalid=='stop' else 'nav3d_support_missing'
+    rows=[dict(kind='nav3d_plan',data=dict(route=dict(mesh_id=mesh_id,frame=asdict(m.frame),requested_goal=prior_goal))),
+        dict(kind='nav3d_control',data=dict(position=position)),
+        dict(kind='nav3d_pose',data=dict(position_xy=start[:2])),
+        dict(kind='nav3d_stop',data=dict(reason=stop)),
+        dict(kind='module_end',ts=0 if invalid=='stale' else 999,data=dict(status='stopped:'+stop))]
+    folder=tmp_path/'runs'/'previous';folder.mkdir(parents=True)
+    (folder/'summary.json').write_text('{}');(folder/'events.jsonl').write_text('\n'.join(map(json.dumps,rows)))
+    monkeypatch.setattr(runtime.time,'time',lambda:1000)
+    if invalid=='moved':s=replace(s,position_xy=(start[0]+.2,start[1]))
+    rt.resume_support(s)
+    assert (rt.tracker.last is not None)==(invalid is None)

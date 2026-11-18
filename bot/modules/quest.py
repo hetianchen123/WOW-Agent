@@ -654,7 +654,8 @@ class RunQuests(State):
         from ..nav3d import NavigationError
         try:
             if not hasattr(self, "nav3d_coordinator"):
-                self.nav3d_coordinator = Nav3DCoordinator(ctx.cfg.nav3d, now=now, log_event=ctx.log_event)
+                self.nav3d_coordinator = Nav3DCoordinator(ctx.cfg.nav3d, now=now, log_event=ctx.log_event,
+                    resume_runs=DATA_DIR/'runs')
             command = self.nav3d_coordinator.step(now, getattr(self, "nav3d_sample", None), navigation,
                 goal_override=self.object_target or self.search_waypoint,
                 target_receipt=building_target_receipt(navigation,self.observation,now) if navigation else None,
