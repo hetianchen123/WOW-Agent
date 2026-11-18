@@ -2,8 +2,9 @@
 local print = WowAgent.Report or print
 local rows, armed, sequence, stateEpoch = {}, nil, 0, 0
 local facingError = 0
-local writeFacing, writeReach
-local rangeErrorUntil = 0
+local writeFacing, writeReach, writeFeedback, writeReceipt
+local castEpoch = 0
+local rangeErrorUntil, sightErrorUntil = 0, 0
 local liveTargetGUID, liveTargetEpoch, previousTargetGUID, previousTargetEpoch
 local pendingSetup
 local screen = CreateFrame("Frame", nil, UIParent)
@@ -319,18 +320,129 @@ local function HostileTarget()
     return tonumber(id), dead, guid
 end
 
-local function IsEngagedTarget()
-    if UnitIsUnit and (Public(UnitIsUnit("targettarget", "player")) == true
-        or Public(UnitIsUnit("targettarget", "pet")) == true) then return true end
+local function PublicCall(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, value = pcall(fn, ...)
+    if ok and not secret(value) then return value end
+    return nil
+end
+
+local function IsEngaged(unit)
+    local victim = unit .. "target"
+    if PublicCall(UnitIsUnit, victim, "player") == true or PublicCall(UnitIsUnit, victim, "pet") == true then
+        return true
+    end
+    -- A pet's own target also identifies an enemy it is already fighting.
+    if PublicCall(UnitAffectingCombat, "pet") == true and PublicCall(UnitIsUnit, unit, "pettarget") == true then
+        return true
+    end
     if not UnitThreatSituation then return false end
-    return type(Public(UnitThreatSituation("player", "target"))) == "number"
-        or type(Public(UnitThreatSituation("pet", "target"))) == "number"
+    return type(PublicCall(UnitThreatSituation, "player", unit)) == "number"
+        or type(PublicCall(UnitThreatSituation, "pet", unit)) == "number"
+end
+
+local function PlateUnit(plate)
+    if PublicCall(plate.IsForbidden, plate) then return end
+    local unit = PublicCall(plate.GetUnit, plate) or Public(plate.namePlateUnitToken)
+    if type(unit) == "string" and unit:match("^nameplate%d+$") then return unit end
+end
+
+local function AttackerGUID(unit)
+    if PublicCall(UnitCanAttack, "player", unit) ~= true or PublicCall(UnitIsDead, unit) ~= false then return end
+    local guid = PublicCall(UnitGUID, unit)
+    if type(guid) == "string" and guid:match("^Creature%-") and IsEngaged(unit) then return guid end
+end
+
+local function PlatePoint(plate)
+    if not plate.GetCenter or not PublicCall(plate.IsVisible, plate) then return end
+    local ok, x, y = pcall(plate.GetCenter, plate)
+    x, y = Public(x), Public(y)
+    local scale = PublicCall(plate.GetEffectiveScale, plate)
+    local rootScale = PublicCall(UIParent.GetEffectiveScale, UIParent)
+    local width, height = PublicCall(UIParent.GetWidth, UIParent), PublicCall(UIParent.GetHeight, UIParent)
+    local left, top = PublicCall(UIParent.GetLeft, UIParent), PublicCall(UIParent.GetTop, UIParent)
+    if not ok or type(x) ~= "number" or type(y) ~= "number" or not scale or not rootScale or rootScale <= 0
+        or not width or width <= 0 or not height or height <= 0 or not left or not top then return end
+    local u, v = (x * scale / rootScale - left) / width, (top - y * scale / rootScale) / height
+    if u < .08 or u > .92 or v < .08 or v > .77 then return end
+    return math.floor(u * 1023 + .5) * 1024 + math.floor(v * 1023 + .5),
+        (u - .5)^2 + (v - .42)^2
+end
+
+function WowAgent.CombatHandoff()
+    if (WorldMapFrame and WorldMapFrame:IsShown()) or (WowAgentControlPanel and WowAgentControlPanel:IsShown())
+        or (GetCursorInfo and GetCursorInfo()) or (SpellIsTargeting and SpellIsTargeting()) then return 0, 0 end
+    local selected = PublicCall(UnitGUID, "target")
+    local hover = AttackerGUID("mouseover")
+    local confirmed = hover and hover ~= selected
+    local point, score, count = 0, math.huge, 0
+    local plates = C_NamePlate and PublicCall(C_NamePlate.GetNamePlates, false)
+    local seen = {}
+    for _, entry in ipairs(plates or {}) do
+        local plate = Public(entry)
+        local unit = plate and PlateUnit(plate)
+        local guid = unit and AttackerGUID(unit)
+        if guid and guid ~= selected and not seen[guid] then
+            seen[guid] = true
+            count = count + 1
+            local packed, cost = PlatePoint(plate)
+            if packed and cost < score then point, score = packed, cost end
+        end
+    end
+    return point, math.min(15, count) + (confirmed and 16 or 0)
+end
+
+local eliteClass = {elite = true, rareelite = true, worldboss = true}
+local function UnitDanger(unit, playerLevel, playerMax, npcID)
+    local classification = UnitClassification and Public(UnitClassification(unit))
+    local level = Public(UnitLevel(unit))
+    local enemyMax = UnitHealthMax and Public(UnitHealthMax(unit))
+    local danger = 0
+    -- Ettin Crusher from the Arathi siege is a known elite even when
+    -- combat restrictions conceal the target's classification.
+    if eliteClass[classification] or npcID == 244695 then danger = danger + 1 end
+    if type(level) == "number" and (level == -1 or playerLevel > 0 and level >= playerLevel + 3) then
+        danger = danger + 2
+    end
+    if type(enemyMax) == "number" and type(playerMax) == "number" and playerMax > 0
+        and enemyMax >= playerMax * 2.5 then
+        danger = danger + 4
+    end
+    return danger
+end
+
+local nextPatrolScan, patrolID, patrolDanger = 0, 0, 0
+function WowAgent.NearbyPatrol()
+    if not C_NamePlate or not C_NamePlate.GetNamePlates or not CheckInteractDistance then return 0, 0 end
+    local now = GetTime()
+    if now < nextPatrolScan then return patrolID, patrolDanger end
+    nextPatrolScan, patrolID, patrolDanger = now + .4, 0, 0
+    local playerLevel = Public(UnitLevel("player"))
+    if type(playerLevel) ~= "number" then playerLevel = 0 end
+    local playerMax = UnitHealthMax and Public(UnitHealthMax("player"))
+    local plates = Public(C_NamePlate.GetNamePlates())
+    for _, plate in ipairs(plates or {}) do
+        plate = Public(plate)
+        local unit = plate and PlateUnit(plate)
+        if type(unit) == "string" and Public(UnitCanAttack("player", unit)) == true
+            and Public(UnitIsDead(unit)) == false then
+            local ok, near = pcall(CheckInteractDistance, unit, 4)
+            local guid = ok and Public(near) == true and Public(UnitGUID(unit))
+            local id = type(guid) == "string" and tonumber(guid:match("^Creature%-%d+%-%d+%-%d+%-%d+%-(%d+)%-"))
+            local danger = id and UnitDanger(unit, playerLevel, playerMax, id) or 0
+            if danger > 0 then
+                patrolID, patrolDanger = id, danger
+                break
+            end
+        end
+    end
+    return patrolID, patrolDanger
 end
 
 local function Disarm()
     armed = nil
     facingError = 0
-    rangeErrorUntil = 0
+    rangeErrorUntil, sightErrorUntil = 0, 0
     liveTargetGUID, liveTargetEpoch, previousTargetGUID, previousTargetEpoch = nil, nil, nil, nil
     stateEpoch = (stateEpoch + 1) % 64
 end
@@ -451,6 +563,7 @@ local function ReadRangeValue(api, ...)
 end
 
 local function AttackRange()
+    if GetTime and GetTime() < rangeErrorUntil then return 2 end
     local spell = armed.spell
     if spell == "assist" then
         local nextSpell = C_AssistedCombat and C_AssistedCombat.GetNextCastSpell
@@ -466,7 +579,7 @@ local function AttackRange()
     end
     if inRange == false or inRange == 0 then return 2 end
     if inRange == true or inRange == 1 then return 1 end
-    return GetTime and GetTime() < rangeErrorUntil and 2 or 0
+    return 0
 end
 
 local function Update()
@@ -475,7 +588,7 @@ local function Update()
     if target > 0 and not dead then liveTargetGUID, liveTargetEpoch = guid, stateEpoch end
     -- The supported clients use seven bits for the character level.
     local specLevel = p.spec + p.level * 4096
-    if p.level < 128 and target > 0 and not dead and IsEngagedTarget() then
+    if p.level < 128 and target > 0 and not dead and IsEngaged("target") then
         specLevel = specLevel + 524288
     end
     local flags = dead and 1 or 0
@@ -495,6 +608,18 @@ local function Update()
     local range = flags % 4 == 2 and target > 0 and not dead and AttackRange() or 0
     local restoredEpoch = dead and guid and guid == previousTargetGUID and previousTargetEpoch + 1 or 0
     writeReach(8, range + restoredEpoch * 4 + sequence * 1024)
+    local health, obstructed, danger = 0, 0, 0
+    if target > 0 and not dead then
+        local current = UnitHealth and Public(UnitHealth("target"))
+        local maximum = UnitHealthMax and Public(UnitHealthMax("target"))
+        if type(current) == "number" and type(maximum) == "number" and maximum > 0 then
+            health = 1 + math.min(100, math.max(0, math.floor(100 * current / maximum)))
+        end
+        if GetTime and GetTime() < sightErrorUntil then obstructed = 128 end
+        danger = UnitDanger("target", p.level, UnitHealthMax and Public(UnitHealthMax("player")), target)
+    end
+    writeFeedback(7, health + obstructed + sequence * 256 + danger * 32768)
+    writeReceipt(6, castEpoch + stateEpoch * 128 + sequence * 8192)
     local key = armed and armed.key or 0
     local info = flags + key * 8 + stateEpoch * 128 + sequence * 8192
     local values = {p.class + p.race * 32 + p.project * 8192, p.build,
@@ -608,6 +733,8 @@ end
 screen:SetSize(142, 128)
 screen:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 0, 80)
 screen:SetFrameStrata("TOOLTIP")
+writeFeedback = WowAgent.NewPixelRow(screen, -16)
+writeReceipt = WowAgent.NewPixelRow(screen, -32)
 writeReach = WowAgent.NewPixelRow(screen, 0)
 writeFacing = WowAgent.NewPixelRow(screen, 16)
 for i = 1, 6 do rows[i] = WowAgent.NewPixelRow(screen, (i + 1) * 16) end
@@ -623,11 +750,32 @@ screen:Hide()
 local events = CreateFrame("Frame")
 for _, name in ipairs({"PLAYER_TARGET_CHANGED", "PLAYER_ENTERING_WORLD", "PLAYER_SPECIALIZATION_CHANGED",
                        "TRAIT_CONFIG_UPDATED", "ACTIVE_TALENT_GROUP_CHANGED", "CHARACTER_POINTS_CHANGED",
-                       "SPELLS_CHANGED", "PLAYER_EQUIPMENT_CHANGED", "UI_ERROR_MESSAGE"}) do
+                       "SPELLS_CHANGED", "PLAYER_EQUIPMENT_CHANGED", "UI_ERROR_MESSAGE",
+                       "UNIT_SPELLCAST_SUCCEEDED"}) do
     pcall(events.RegisterEvent, events, name)
 end
-events:SetScript("OnEvent", function(_, event, unit, message)
-    if event == "UI_ERROR_MESSAGE" then
+events:SetScript("OnEvent", function(_, event, unit, message, spellID)
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        if not armed or Public(unit) ~= "player" then return end
+        local spell = Public(spellID)
+        if type(spell) ~= "number" then return end
+        local matches = spell == armed.spell
+        local assist = C_AssistedCombat
+        if armed.spell == "assist" and assist and assist.GetRotationSpells then
+            local ok, spells = pcall(assist.GetRotationSpells)
+            spells = ok and Public(spells)
+            if type(spells) == "table" and (not canaccesstable or canaccesstable(spells)) then
+                for _, candidate in ipairs(spells) do
+                    if Public(candidate) == spell then matches = true; break end
+                end
+            end
+        end
+        local target, dead = HostileTarget()
+        if matches and target > 0 and not dead then
+            castEpoch = (castEpoch + 1) % 128
+            rangeErrorUntil, sightErrorUntil = 0, 0
+        end
+    elseif event == "UI_ERROR_MESSAGE" then
         if not armed then return end
         local code = Public(unit)
         message = Public(message)
@@ -644,6 +792,10 @@ events:SetScript("OnEvent", function(_, event, unit, message)
             or code ~= nil and (code == LE_GAME_ERR_OUT_OF_RANGE or code == LE_GAME_ERR_SPELL_FAILED_OUT_OF_RANGE)) then
             rangeErrorUntil = GetTime() + 1.2
         end
+        if GetTime and (message ~= nil and (message == SPELL_FAILED_LINE_OF_SIGHT or message == ERR_LINE_OF_SIGHT)
+            or code ~= nil and (code == LE_GAME_ERR_LINE_OF_SIGHT or code == LE_GAME_ERR_SPELL_FAILED_LINE_OF_SIGHT)) then
+            sightErrorUntil = GetTime() + 1.2
+        end
     elseif event == "PLAYER_TARGET_CHANGED" then
         if liveTargetGUID then
             previousTargetGUID, previousTargetEpoch = liveTargetGUID, liveTargetEpoch
@@ -651,7 +803,7 @@ events:SetScript("OnEvent", function(_, event, unit, message)
         end
         stateEpoch = (stateEpoch + 1) % 64
         facingError = 0
-        rangeErrorUntil = 0
+        rangeErrorUntil, sightErrorUntil = 0, 0
     elseif event == "SPELLS_CHANGED" and armed and armed.spell == "assist" then
         -- Mount and action-bar transitions can temporarily hide Assisted Combat.
         -- Update verifies the current spell and action before publishing the key.

@@ -79,7 +79,34 @@ class NavigationConfig:
     stuck_max_events: int = 5
 
 
+@dataclass
+class RoutePlannerConfig:
+    enabled: bool = False
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-flash"
+    api_key_env: str = "DEEPSEEK_API_KEY"
+    # A local key file (plain text or JSON api_key); never included in manifests.
+    credentials_file: str = "deepseek/apikey.txt"
+    request_timeout_s: float = 12.0
+    max_requests: int = 3
+    max_tokens: int = 1600
+    thinking: bool = False
+    staged_grounding: bool = False
+    ground_pitch_deg: float = 20.0
+    overhead_observation: bool = False
+
+
 # ---------------------------------------------------------------- fishing ----
+@dataclass
+class SegmentedNavigationConfig:
+    enabled: bool = False
+    building_access: bool = False
+    models: str = 'data/segmentation/models.json'
+    checkpoint: str = 'data/segmentation/sam2.1_hiera_large.pt'
+    device: str = 'cpu'
+    calibration_cache: str = 'data/calibration/automatic-local.npz'
+
+
 @dataclass
 class FishingConfig:
     key_cast: str = "1"
@@ -168,6 +195,8 @@ class BotConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     input: InputConfig = field(default_factory=InputConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
+    route_planner: RoutePlannerConfig = field(default_factory=RoutePlannerConfig)
+    segmented_navigation: SegmentedNavigationConfig = field(default_factory=SegmentedNavigationConfig)
     fishing: FishingConfig = field(default_factory=FishingConfig)
     gathering: GatheringConfig = field(default_factory=GatheringConfig)
     selling: SellingConfig = field(default_factory=SellingConfig)

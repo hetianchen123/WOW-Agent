@@ -1,0 +1,32 @@
+[
+  {
+    "source": "20261116_181433_f387655d",
+    "image": "retreat.png",
+    "elapsed_s": 9.55,
+    "raw_output": "```json\n{\n  \"schema\": 3,\n  \"player_box\": [420, 700, 550, 950],\n  \"feet\": null,\n  \"ground_origin\": [450, 850],\n  \"origin_basis\": \"visible_ground_at_player\",\n  \"front\": \"open\",\n  \"left\": \"open\",\n  \"right\": \"open\",\n  \"next_view\": \"front\",\n  \"feature\": \"open_ground\",\n  \"landmark\": null,\n  \"evidence\": \"Player in heavy armor, standing on grassy terrain; immediate front, left, and right ground are clear and unobstructed.\"\n}\n```"
+  },
+  {
+    "source": "clutter-live-replay-1814",
+    "image": "left.png",
+    "elapsed_s": 7.94,
+    "raw_output": "{\n  \"schema\": 3,\n  \"player_box\": [475, 630, 535, 730],\n  \"feet\": [490, 700],\n  \"ground_origin\": [490, 700],\n  \"origin_basis\": \"visible_ground_at_player\",\n  \"front\": \"blocked\",\n  \"left\": \"blocked\",\n  \"right\": \"blocked\",\n  \"next_view\": \"scan\",\n  \"feature\": \"rock_or_wall\",\n  \"landmark\": null,\n  \"evidence\": \"Player is standing near a campfire and wooden barricade; immediate front, left, and right are blocked by rocks, logs, or the barricade.\"\n}"
+  },
+  {
+    "source": "clutter-live-replay-1814",
+    "image": "right.png",
+    "elapsed_s": 6.77,
+    "raw_output": "{\n  \"schema\": 3,\n  \"player_box\": [320, 600, 380, 800],\n  \"feet\": null,\n  \"ground_origin\": [350, 750],\n  \"origin_basis\": \"visible_ground_at_player\",\n  \"front\": \"open\",\n  \"left\": \"open\",\n  \"right\": \"blocked\",\n  \"next_view\": \"front\",\n  \"feature\": \"open_ground\",\n  \"landmark\": null,\n  \"evidence\": \"Player character standing on grass; front path clear to grassy slope, left side open, right side blocked by wooden barricade\"\n}"
+  },
+  {
+    "source": "identity-regression-1814",
+    "image": "left.png",
+    "elapsed_s": 19.98,
+    "raw_output": "{\n  \"schema\": 4,\n  \"player_box\": [475, 630, 535, 730],\n  \"feet\": [490, 700],\n  \"ground_origin\": [490, 700],\n  \"origin_basis\": \"visible_ground_at_player\",\n  \"observed_race\": \"troll\",\n  \"identity_evidence\": \"Visible long tusks and pointed ears confirm troll identity. Player is standing on visible ground.\",\n  \"front\": \"blocked\",\n  \"left\": \"open\",\n  \"right\": \"blocked\",\n  \"next_view\": \"left\",\n  \"feature\": \"open_ground\",\n  \"landmark\": null,\n  \"evidence\": \"Player is a troll with visible tusks and ears. Front step is blocked by a low wooden barricade. Left step is open ground. Right step is blocked by a wooden barricade.\"\n}"
+  },
+  {
+    "source": "identity-regression-1814",
+    "image": "right.png",
+    "elapsed_s": 9.36,
+    "raw_output": "{\n  \"player_box\": [320, 600, 380, 800],\n  \"feet\": null,\n  \"ground_origin\": [350, 750],\n  \"origin_basis\": \"visible_ground_at_player\",\n  \"observed_race\": \"troll\",\n  \"identity_evidence\": \"Visible long, pointed ears and prominent tusks, consistent with troll race. Humanoid form, not four-legged.\",\n  \"front\": \"blocked\",\n  \"left\": \"open\",\n  \"right\": \"blocked\",\n  \"next_view\": \"left\",\n  \"feature\": \"open_ground\",\n  \"landmark\": null,\n  \"evidence\": \"Player is a troll with visible ears and tusks. Front step blocked by a wooden barricade. Left step is open ground. Right step blocked by a log and fire pit.\"\n}"
+  }
+]

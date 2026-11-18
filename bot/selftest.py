@@ -177,6 +177,10 @@ def run_fisher_session(max_duration_s: float = 9.0) -> dict:
     ctx, inp, game, db = build_selftest_context()
     module = FisherModule(ctx)
     outcome = module.run(max_duration_s)
+    # Input can be issued on the final control tick, with no subsequent capture
+    # to drain it. Count delivery to the synthetic world before reporting; do
+    # not advance scheduled casts/loot or fabricate a post-timeout game receipt.
+    game._consume_input(inp, time.time())
     stats = dict(outcome.stats)
     stats["outcome"] = outcome.status
     stats["world_casts"] = game._cast_count

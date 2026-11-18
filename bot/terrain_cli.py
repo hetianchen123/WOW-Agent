@@ -34,36 +34,17 @@ class TerrainCombat(ValueError):
 
 
 def inspect_images(images: list[Path], *, cropped: bool = False,
-                   guard: Callable[[], None] | None = None) -> list[dict]:
-    command = [str(DATA_DIR / "startlux/.venv/bin/python"),
-               str(ROOT / "experiments/qwen3_vl/run.py")]
-    if not cropped:
-        command.extend(("--crop", *map(str, CROP)))
-    timeout = 20 + 8 * (len(images) - 1)
-    with subprocess.Popen([*command, *map(str, images)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True) as process:
-        deadline = time.monotonic() + timeout
-        try:
-            while True:
-                if guard:
-                    guard()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ValueError(f"Qwen 视觉推理超过 {timeout} 秒")
-                try:
-                    stdout, stderr = process.communicate(timeout=min(.25, remaining))
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.communicate()
-    if process.returncode:
-        raise ValueError("Qwen 视觉推理失败：" + (stderr.strip() or stdout.strip())[-500:])
-    cases = json.loads(stdout)["cases"]
+                   guard: Callable[[], None] | None = None, target: str | None = None,
+                   allow_unreadable: bool = False, nearfield: bool = False, composition: bool = False,
+                   player_identity=None, timeout=None) -> list[dict]:
+    from .perception.vision_worker import get_worker
+    cases = get_worker().inspect(images, crop=None if cropped else CROP, target=target,
+                                 nearfield=nearfield, composition=composition, guard=guard,
+                                 player_identity=player_identity, timeout=timeout or 20 + 8 * (len(images) - 1))
     if [case["image"] for case in cases] != [image.name for image in images]:
         raise ValueError("Qwen 返回的视角与输入不一致")
+    if not allow_unreadable and any("parse_error" in case for case in cases):
+        raise ValueError("Qwen 返回不可读的观察")
     return cases
 
 

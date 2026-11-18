@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from ..core.statemachine import Machine
+from ..control.input_helper import HelperSessionStopped
 from .context import ModuleContext
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ class Module:
 
         if "SafeStop" not in self.machine.states:
             self.machine.add(SafeStop())
+        if hasattr(self.ctx, "start_evidence"):
+            self.ctx.start_evidence(self.name)
         self.ctx.log_event("module_start", {"module": self.name})
         t0 = time.time()
         last = t0
@@ -47,6 +50,7 @@ class Module:
                 last = now
                 self.ctx.begin_tick()
                 self.ctx.pump_channel()
+                self.ctx.evidence_state = self.machine.state_name
                 self.machine.tick(dt)
                 self.ctx.sample_gold()
                 if now - t0 >= max_duration_s:
@@ -58,6 +62,9 @@ class Module:
                 time.sleep(max(0.001, 1.0 / fps - (time.time() - now)))
         except KeyboardInterrupt:
             return self._finish("stopped:interrupt", t0)
+        except HelperSessionStopped as exc:
+            self.ctx.log_event("input_session_stopped", {"module": self.name, "reason": str(exc)})
+            return self._finish("stopped:input_session_stopped", t0)
         except Exception as exc:  # noqa: BLE001
             log.exception("module crashed")
             self.ctx.log_event("module_crash", {"module": self.name, "error": repr(exc)})
@@ -66,12 +73,13 @@ class Module:
 
     def _finish(self, status: str, t0: float) -> ModuleOutcome:
         self.ctx.stats["duration_s"] = round(time.time() - t0, 1)
-        self.ctx.log_event("module_end", {"module": self.name, "status": status, "stats": self.ctx.stats})
         try:
             if self.ctx.input is not None:
                 self.ctx.input.release_all()
         except Exception:  # noqa: BLE001
             pass
+        # Diagnostics must never delay releasing input on exit.
+        self.ctx.log_event("module_end", {"module": self.name, "status": status, "stats": self.ctx.stats})
         return ModuleOutcome(status=status, stats=dict(self.ctx.stats))
 
     initial_state = ""

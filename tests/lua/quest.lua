@@ -2,12 +2,14 @@
 local frames, values, calls, messages = {}, {}, {}, {}
 local namedFrames, rowValues = {}, {}
 local active, combat, prepared, currentID = false, false, false, 0
+function GetTime() return 0 end
 local available = {{questID = 90882, title = "若是那豺狼来了"}}
 Enum = {QuestClassification = {Normal = 0}}
 UIParent, WowAgentChannelFrame = {}, {}
 function CreateFrame(_, name)
     local frame = {shown = false, scripts = {}, attributes = {}}
     function frame:SetScript(event, handler) self.scripts[event] = handler end
+    function frame:SetSize(width, height) self.width, self.height = width, height end
     function frame:SetAttribute(key, value) self.attributes[key] = value end
     function frame:GetAttribute(key) return self.attributes[key] end
     function frame:Show() self.shown = true end
@@ -44,7 +46,9 @@ C_QuestLog = {
     GetQuestObjectives = function() return {{numFulfilled = 0, numRequired = 6}} end,
 }
 WowAgent = {
-    NewPixelRow = function(_, offset)
+    NewPixelRow = function(parent, offset)
+        parent.pixelOffsets = rawget(parent, "pixelOffsets") or {}
+        parent.pixelOffsets[#parent.pixelOffsets + 1] = offset
         return function(kind, value) values[kind], rowValues[offset] = value, value end
     end,
     LayoutSupport = {SetupAction = function(kind, id, key)
@@ -56,6 +60,7 @@ WowAgent = {
 dofile("addon/WowAgent/RetailQuestData.lua")
 dofile("addon/WowAgent/APRQuestData.lua")
 dofile("addon/WowAgent/Recovery.lua")
+dofile("addon/WowAgent/QuestCamera.lua")
 dofile("addon/WowAgent/Quest.lua")
 local function event(name) frames[1].scripts.OnEvent(nil, name) end
 event("GOSSIP_SHOW")
@@ -178,17 +183,23 @@ function GetMacroBody(id) return select(3, GetMacroInfo(id)) end
 WowAgent.LayoutSupport.ReadMacroBody = GetMacroBody
 WowAgent.LayoutSupport.BoundSlot = function(key) return key end
 WowAgent.LayoutSupport.ReadAction = function(slot)
-    if mounted and slot == 2 then return "spell", 372610 end
+    if mounted and slot == 1 then return "spell", 1227914 end
+    if mounted and slot == 2 then return "spell", 1227916 end
+    if mounted and slot == 3 then return "spell", 1227921 end
     if mounted and slot == 4 then return "spell", 403092 end
+    if mounted and slot == 5 then return "spell", 1227950 end
     if not mounted and slot == 8 then return "macro", 50 end
 end
 WowAgent.LayoutSupport.ActionMatches = function(key, _, body)
     return not mounted and preparedKeys[key] == body
 end
-C_PlayerInfo = {GetGlidingInfo = function() return gliding, mounted end}
+C_PlayerInfo = {GetGlidingInfo = function() return gliding, mounted, gliding and 36 or 0 end}
 C_ActionBar = {
     IsUsableAction = function() return true end,
-    GetActionCharges = function(slot) return slot == 2 and {currentCharges = ascentCharges} or nil end,
+    GetActionCharges = function(slot)
+        if slot == 1 or slot == 2 then return {currentCharges = ascentCharges} end
+        if slot == 5 then return {currentCharges = 2} end
+    end,
     GetActionCooldown = function() return {duration = 0} end,
 }
 WowAgent.PrepareQuestNavigation(90882, 0, 0)
@@ -196,20 +207,29 @@ while #timers > 0 do table.remove(timers, 1)() end
 assert(frames[3]:IsShown() and math.floor(values[8] / 256) % 2 == 1)
 assert(not overrides.F12 and overrides.F11 == "PITCHDOWN")
 assert(overrides.F10 == "CLICK WowAgentSkyDismount:LeftButton")
+assert(overrides.F9 == "SITORSTAND" and math.floor(values[12] / 8192) == 11)
 mounted, gliding = true, true
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[8] / 4096) % 2 == 1 and math.floor(values[8] / 8) % 2 == 1)
 assert(values[0] == 2 + 4 * 16 + 11 * 256 + 10 * 16384)
+assert(rowValues[-192] % 8192 == 1 + 5 * 16 + 3 * 256)
+assert(rowValues[-176] % 256 == 10 + (ascentCharges + 1) * 32)
+frames[3].scripts.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "cast", 1227950)
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(rowValues[-176] / 256) % 32 == 2 + 8)
+frames[3].scripts.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "cast", 1227916)
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(rowValues[-176] / 256) % 32 == 4 + 16)
 ascentCharges = 0
 frames[3].scripts.OnUpdate(nil, .2)
 assert(values[0] % 16 == 0)
 WowAgent.StopQuestNavigation()
 assert(not next(overrides) and GetBindingAction("F12") == "USER_BINDING")
 
--- A full key layout can borrow 0 and Z only while both action slots are empty.
+-- A full key layout can borrow empty action slots 0, Z and X.
 mounted, gliding, ascentCharges = false, false, 1
 local slotOccupied
-ActionButton10, ActionButton11 = {action = 10}, {action = 11}
+ActionButton10, ActionButton11, ActionButton12 = {action = 10}, {action = 11}, {action = 12}
 C_ActionBar.HasAction = function(slot) return slot == slotOccupied end
 function GetBindingAction(key)
     return overrides[key] or (key == "0" and "ACTIONBUTTON10")
@@ -218,9 +238,13 @@ end
 WowAgent.PrepareQuestNavigation(90882, 0, 0)
 while #timers > 0 do table.remove(timers, 1)() end
 assert(overrides["0"] == "PITCHDOWN" and overrides.Z == "CLICK WowAgentSkyDismount:LeftButton")
+assert(overrides.X == "SITORSTAND" and math.floor(values[12] / 8192) == string.byte("X"))
 mounted, gliding = true, true
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[8] / 4096) % 2 == 1)
+slotOccupied = 12
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[12] / 8192) == 0 and math.floor(values[8] / 4096) % 2 == 1)
 slotOccupied = 11
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[8] / 4096) % 2 == 0 and values[0] == 0)
@@ -303,12 +327,47 @@ assert(frames[3]:IsShown())
 assert(GetBindingAction("F") == "INTERACTTARGET" and GetBindingAction("TAB") == "TARGETNEARESTENEMY")
 assert(GetBindingAction("9") == "ACTIONBUTTON9")
 assert(math.floor(values[12] / 4096) % 2 == 1)
+WowAgent.StopQuestNavigation()
+
+-- Use the temporary task layout for the camera and restore the prior binding
+-- when the task layout is cleared.
+local zoom, savedSlot, f8Conflict = 1, nil, true
+function GetCameraZoom() return zoom end
+function SaveView(slot) savedSlot = slot end
+function SetView() end
+local cameraBinding = GetBindingAction
+function GetBindingAction(key)
+    if key == "F8" then return overrides.F8 or (f8Conflict and "USER_BINDING" or "") end
+    return cameraBinding(key)
+end
+WowAgent.SaveQuestCamera()
+assert(not savedSlot)
+zoom = 25
+WowAgent.SaveQuestCamera()
+assert(savedSlot == 5)
+assert(WowAgent.QuestCamera.target(1) == 39) -- Old saved distance does not cap the outdoor target.
+zoom = 39
+WowAgent.PrepareQuestNavigation(90882, 0, 0, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(overrides.F8 == "CLICK WowAgentTaskCamera:LeftButton" and math.floor(rowValues[-80] / 131072) == 1)
+WowAgent.StopQuestNavigation()
+assert(GetBindingAction("F8") == "USER_BINDING" and not overrides.F8)
+f8Conflict = false
+WowAgent.PrepareQuestNavigation(90882, 0, 0, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(overrides.F8 == "CLICK WowAgentTaskCamera:LeftButton" and math.floor(rowValues[-80] / 131072) == 1)
+zoom = 10
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(rowValues[-80] / 131072) == 3)
 active = false
 C_QuestLog.IsQuestFlaggedCompleted = function() return true end
 frames[3].scripts.OnUpdate(nil, .2)
 assert(GetBindingAction("F") == "ACTIONBUTTON3" and GetBindingAction("TAB") == "TARGETNEARESTFRIEND")
+assert(not overrides.F8)
 WowAgent.StopQuestNavigation()
 assert(not next(overrides))
+GetCameraZoom, SaveView, SetView, GetBindingAction = nil, nil, nil, cameraBinding
+WowAgentDB.questCamera = nil
 
 -- After the reward, hand off only the expected quest and leave acceptance to
 -- the next verified dialogue action.
@@ -465,9 +524,40 @@ assert(math.floor(values[1] / 131072) == 1 and values[2] == 654321)
 tooltipQuest = 11111
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[1] / 131072) == 1 and values[2] == 0)
+-- A generic progress bar may have other objective records. The visible
+-- percentage and the current quest's tooltip, not the 0/1 counter, drive it.
+local resourcePercent = 68.5
+function GetQuestProgressBarPercent(id) assert(id == activeQuest or id == 90893); return resourcePercent end
+C_QuestLog.GetQuestObjectives = function()
+    return {{type = "progressbar", numFulfilled = 0, numRequired = 1}, {type = "monster"}}
+end
+frames[2].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[11] / 1024) % 4 == 3 and values[12] == 685 * 1024 + 1000)
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 131072) == 1 and values[2] == 0)
+tooltipQuest = activeQuest
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 131072) == 1 and values[2] == 654321)
+resourcePercent = nil
+frames[2].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[11] / 1024) % 4 == 0 and values[12] == 0)
+C_QuestLog.GetQuestObjectives = function()
+    return {{type = objectiveKind, text = "Objective: 0/4", numFulfilled = 0, numRequired = 4}}
+end
 tooltipQuest, objectiveKind = activeQuest, "object"
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[1] / 131072) == 2 and values[2] == 307 * 1024 + 962)
+local finished = false
+C_QuestLog.GetQuestObjectives = function()
+    return {{type = "monster", text = "Objective: 0/4", numFulfilled = finished and 4 or 0,
+             numRequired = 4, finished = finished},
+            {type = "object", text = "Objective: 1/3", numFulfilled = 1, numRequired = 3, finished = false}}
+end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-208] % 64 == 1 and rowValues[-224] == 4 and math.floor(values[1] / 131072) == 1)
+finished = true
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-208] % 64 == 2 and rowValues[-224] == 1027 and math.floor(values[1] / 131072) == 2)
 WowAgent.StopQuestNavigation()
 
 -- Batch pickup remembers every quest in the same NPC's offer list.
@@ -541,13 +631,106 @@ currentID = 70003
 event("QUEST_COMPLETE")
 WowAgent.RunPreparedQuestAction()
 assert(questState[70003] == 4 and questState[70002] == 3)
+C_GossipInfo.GetActiveQuests = function() return {{questID = 70002, isComplete = true}} end
+C_GossipInfo.SelectActiveQuest = function(id)
+    assert(id == 70002)
+    currentID = id
+    event("QUEST_COMPLETE")
+end
+event("GOSSIP_SHOW")
 AdvanceRound(3, 70002)
 assert(questState[70004] == nil)
-currentID = 70002
-event("QUEST_COMPLETE")
+WowAgent.RunPreparedQuestAction() -- Keeps the list open and selects the exact remaining hand-in.
+assert(currentID == 70002 and questState[70002] == 3)
 WowAgent.RunPreparedQuestAction()
+C_GossipInfo.GetActiveQuests = function() return {} end
+available = {{questID = 70004}}
+event("GOSSIP_SHOW")
 AdvanceRound(1, 70004)
 WowAgent.StopQuestNavigation()
+
+-- A suspended pickup stays out of all selectors across preparation and
+-- a saved-variable reload. Its game status and the other pickup are independent.
+WowAgentDB.questRounds = {}
+questState[70004], questState[70002], questState[70003] = nil, nil, nil
+available = {{questID = 70004}, {questID = 70002}}
+event("GOSSIP_SHOW")
+WowAgent.PrepareQuestNavigation(70004, 0, 0, true, true, nil, nil, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(overrides.F5 == "CLICK WowAgentTaskSuspend:LeftButton")
+namedFrames.WowAgentTaskSuspend.scripts.OnClick()
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(rowValues[-208] / 64) % 2 == 1 and math.floor(rowValues[-208] / 1024) % 8 == 1)
+AdvanceRound(1, 70002)
+WowAgent.StopQuestNavigation()
+WowAgent.PrepareQuestNavigation(70002, 0, 0, true, true, nil, nil, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(values[4] == 70002 and WowAgent.GetQuestRoundResumeID() == 70002)
+assert(WowAgentDB.questRounds["Player-1-01"].suspended[70004] == 1)
+assert(math.floor(rowValues[-288] / 4) % 128 == 1) -- Includes a different, previously suspended quest.
+questState[70004] = 4
+WowAgent.GetQuestRoundResumeID()
+assert(not WowAgentDB.questRounds["Player-1-01"].suspended[70004])
+WowAgent.StopQuestNavigation()
+
+-- Regression for 20261117T072826: the saved DONE round had BOTH hand-ins
+-- suspended. Explicit preparation must retry both, then unlock the follow-up.
+do
+    local map, position, size = C_Map.GetBestMapForUnit, C_Map.GetPlayerMapPosition, C_Map.GetMapWorldSize
+    local saved, active = WowAgentDB.questRounds, C_GossipInfo.GetActiveQuests
+    local old93, old95, old96 = questState[90893], questState[90895], questState[90896]
+    C_Map.GetBestMapForUnit = function() return 2451 end
+    C_Map.GetPlayerMapPosition = function() return {GetXY = function() return .2461, .3685 end} end
+    C_Map.GetMapWorldSize = function() return 3477.1, 2318.8 end
+    local function PrepareSaved(firstCompleted)
+        questState[90893], questState[90895], questState[90896] = firstCompleted and 4 or 3, 3, nil
+        WowAgentDB.questRounds = {[UnitGUID("player")] = {
+            stage = 4, current = 90893, jobs = {90895, 90893}, offers = {}, options = {},
+            anchor = {map = 2451, x = .1954, y = .5753, width = 3477.1, height = 2318.8},
+            suspended = {[90895] = 3, [90893] = 3}, suspendEpoch = 3,
+        }}
+        available = {}
+        C_GossipInfo.GetActiveQuests = function()
+            return firstCompleted and {} or {{questID = 90893, isComplete = true}}
+        end
+        event("GOSSIP_SHOW")
+        WowAgent.PrepareQuestNavigation(firstCompleted and 90895 or 90893, 0, 0, true, true, nil, nil, true)
+        while #timers > 0 do table.remove(timers, 1)() end
+        local round = WowAgentDB.questRounds[UnitGUID("player")]
+        assert(not next(round.suspended) and math.floor(rowValues[-288] / 4) % 128 == 0)
+        return round
+    end
+    PrepareSaved(false)
+    AdvanceRound(3, 90893)
+    currentID = 90893
+    event("QUEST_COMPLETE")
+    WowAgent.RunPreparedQuestAction()
+    assert(questState[90893] == 4)
+    C_GossipInfo.GetActiveQuests = function() return {} end
+    AdvanceRound(3, 90895) -- Previously DONE after six seconds, silently skipping this quest.
+    currentID = 90895
+    event("QUEST_COMPLETE")
+    WowAgent.RunPreparedQuestAction()
+    assert(questState[90895] == 4)
+    AdvanceRound(1, 90896)
+    WowAgent.StopQuestNavigation()
+
+    local restarted = PrepareSaved(true)
+    assert(#restarted.jobs == 1 and restarted.jobs[1] == 90895) -- Never repeat the delivered quest.
+    AdvanceRound(3, 90895)
+    WowAgent.SuspendPreparedQuest()
+    frames[3].scripts.OnUpdate(nil, .2)
+    now = now + 6.1
+    frames[3].scripts.OnUpdate(nil, .2)
+    WowAgent.RunPreparedQuestAction()
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[3] % 8 == 4 and math.floor(rowValues[-288] / 4) % 128 == 1)
+    assert(restarted.suspended[90895] == 3) -- No automatic infinite retry within this run.
+    WowAgent.StopQuestNavigation()
+    WowAgentDB.questRounds, C_GossipInfo.GetActiveQuests = saved, active
+    C_Map.GetBestMapForUnit, C_Map.GetPlayerMapPosition, C_Map.GetMapWorldSize = map, position, size
+    questState[90893], questState[90895], questState[90896] = old93, old95, old96
+end
 
 -- The next farm quest uses its own Grail NPC even when the previous NPC
 -- is still selected and the live map pins are clustered together.
@@ -572,7 +755,7 @@ while #timers > 0 do table.remove(timers, 1)() end
 assert(values[4] == 90886 and values[5] == 2451)
 assert(values[6] == math.floor(.5633 * 1048575 + .5))
 assert(values[7] == math.floor(.5957 * 1048575 + .5))
-assert(math.floor(values[1] / 2) % 4 == 0)
+assert(math.floor(values[1] / 2) % 4 == 1) -- Can locate Thrall, but Jaina is not the selected receiver.
 
 C_GossipInfo.CloseGossip = function() event("GOSSIP_CLOSED") end
 event("GOSSIP_SHOW")
@@ -598,6 +781,156 @@ event("QUEST_DETAIL")
 WowAgent.RunPreparedQuestAction()
 assert(questState[90886] == 2)
 WowAgent.StopQuestNavigation()
+
+-- At the next hand-in marker, an unrelated soft target must not prevent
+-- selecting the known receiver. F still requires the expected creature ID.
+questState[90887] = 3
+available = {}
+soft, selected = "Creature-0-0-0-0-244656-01", "Creature-0-0-0-0-244656-01"
+WowAgent.PrepareQuestNavigation(90887, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(selector.attributes.macrotext == "/targetexact 吉安娜·普罗德摩尔")
+assert(math.floor(values[1] / 2) % 4 == 1)
+selected = "Creature-0-0-0-0-244655-01"
+function UnitDistanceSquared() return 16, true end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 2) % 4 == 3)
+assert(math.floor(values[1] / 128) % 4 == 3)
+currentID = 90887
+event("QUEST_COMPLETE")
+WowAgent.RunPreparedQuestAction()
+assert(questState[90887] == 4)
+UnitDistanceSquared = nil
+WowAgent.StopQuestNavigation()
+questState[90887] = 2
+
+-- Replay the farm hand-off with an empty map offer list and closed gossip.
+-- The last reward is at Thrall, but the next offer must be checked at Jaina.
+do
+    local questLines, saved = C_QuestLine.GetAvailableQuestLines, WowAgentDB.questRounds
+    local old87, old86, old88 = questState[90887], questState[90886], questState[90888]
+    WowAgentDB.questRounds = {[UnitGUID("player")] = {
+        stage = 3, current = 90886, jobs = {90887, 90886}, offers = {}, options = {},
+        anchor = {map = 2451, x = .5642, y = .5973, width = 1000, height = 500},
+    }}
+    questState[90887], questState[90886], questState[90888] = 4, 3, nil
+    soft, selected, npc = "Creature-0-0-0-0-244656-01", "Creature-0-0-0-0-244656-01", "萨尔"
+    C_QuestLine.GetAvailableQuestLines = function() return {} end
+    available = {}
+    event("QUEST_FINISHED")
+    assert(WowAgent.GetNearbyQuestID() ~= 90888)
+    WowAgent.PrepareQuestNavigation(90886, 0, 0, true, true, nil, nil, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    currentID = 90886
+    event("QUEST_COMPLETE")
+    WowAgent.RunPreparedQuestAction()
+    assert(questState[90886] == 4)
+    assert(WowAgent.GetNearbyQuestID() == 90888)
+    AdvanceRound(1, 90888)
+    assert(selector.attributes.macrotext == "/targetexact 吉安娜·普罗德摩尔")
+    WowAgent.RunPreparedQuestAction()
+    assert(questState[90888] == nil)
+    currentID = 90888
+    event("QUEST_DETAIL")
+    WowAgent.RunPreparedQuestAction()
+    assert(questState[90888] == 2)
+    WowAgent.StopQuestNavigation()
+    C_QuestLine.GetAvailableQuestLines, WowAgentDB.questRounds = questLines, saved
+    questState[90887], questState[90886], questState[90888] = old87, old86, old88
+end
+
+-- On a map with no known chain data, an empty first response should allow
+-- the refresh to publish a late offer before the round ends.
+do
+    local map, lines, request, saved = C_Map.GetBestMapForUnit, C_QuestLine.GetAvailableQuestLines,
+        C_QuestLine.RequestQuestLinesForMap, WowAgentDB.questRounds
+    local requests, late = 0, false
+    C_Map.GetBestMapForUnit = function() return 2248 end
+    C_QuestLine.RequestQuestLinesForMap = function() requests = requests + 1 end
+    C_QuestLine.GetAvailableQuestLines = function()
+        if not late then return {} end
+        return {{questID = 70009, x = .5642, y = .5973, startMapID = 2248, floorLocation = 2,
+            isQuestStart = true, isHidden = false, isCampaign = true}}
+    end
+    WowAgentDB.questRounds = {[UnitGUID("player")] = {
+        stage = 3, current = 70008, jobs = {70008}, offers = {}, options = {},
+        anchor = {map = 2248, x = .5642, y = .5973, width = 1000, height = 500},
+    }}
+    questState[70008] = 3
+    event("QUEST_FINISHED")
+    WowAgent.PrepareQuestNavigation(70008, 0, 0, true, true, nil, nil, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    currentID = 70008
+    event("QUEST_COMPLETE")
+    WowAgent.RunPreparedQuestAction()
+    frames[3].scripts.OnUpdate(nil, .2)
+    now = now + 2.1
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(requests == 2 and values[3] % 32 == 3)
+    late, now = true, now + 2
+    frames[3].scripts.OnUpdate(nil, .2)
+    WowAgent.RunPreparedQuestAction()
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[3] % 8 == 1 and values[4] == 70009)
+    WowAgent.StopQuestNavigation()
+    questState[70008] = nil
+    C_Map.GetBestMapForUnit, C_QuestLine.GetAvailableQuestLines = map, lines
+    C_QuestLine.RequestQuestLinesForMap, WowAgentDB.questRounds = request, saved
+end
+
+-- A literal talk objective can use the same verified NPC interaction while
+-- still active. A hostile unit with the same name is not a valid target.
+local questObjectives = C_QuestLog.GetQuestObjectives
+C_QuestLog.GetQuestObjectives = function(id)
+    if id == 90886 then return {{text = "与农夫布鲁沃克交谈。", finished = false, numFulfilled = 0, numRequired = 1}} end
+    return questObjectives(id)
+end
+local canAttack = UnitCanAttack
+function UnitCanAttack() return false end
+local questMarkers = C_QuestLog.GetQuestsOnMap
+C_QuestLog.GetQuestsOnMap = function() return {{questID = 90886, x = .5642, y = .5973}} end
+WowAgent.PrepareQuestNavigation(90886, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(math.floor(values[1] / 131072) == 5)
+assert(selector.attributes.macrotext == "/targetexact 农夫布鲁沃克")
+selected, npc = "Creature-0-0-0-0-244729-01", "农夫布鲁沃克"
+function UnitCanAttack() return true end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 4) % 2 == 0)
+function UnitCanAttack() return false end
+function UnitDistanceSquared() return 16, true end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 4) % 2 == 1 and math.floor(values[1] / 128) % 4 == 3)
+WowAgent.StopQuestNavigation()
+UnitCanAttack, UnitDistanceSquared = canAttack, nil
+C_QuestLog.GetQuestObjectives, C_QuestLog.GetQuestsOnMap = questObjectives, questMarkers
+
+-- An unknown hand-in can inspect an in-range NPC's list. Reject that NPC
+-- for this quest if the list contains no matching task.
+questState[70005] = 3
+C_QuestLog.GetQuestsOnMap = function() return {{questID = 70005, x = .5642, y = .5973}} end
+function UnitCanAttack() return false end
+local previousGUID = UnitGUID
+function UnitGUID(unit)
+    if unit == "questnpc" or unit == "npc" then return selected end
+    return previousGUID(unit)
+end
+soft, selected = "Creature-0-0-0-0-311111-01", "Creature-0-0-0-0-311111-01"
+WowAgent.PrepareQuestNavigation(70005, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(math.floor(values[1] / 2) % 4 == 3)
+C_GossipInfo.GetActiveQuests = function() return {{questID = 70002, isComplete = true}} end
+event("GOSSIP_SHOW")
+WowAgent.RunPreparedQuestAction()
+frames[3].scripts.OnUpdate(nil, .2)
+assert(questState[70005] == 3 and math.floor(values[1] / 2) % 4 == 0)
+soft = "Creature-0-0-0-0-311112-01"
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 2) % 4 == 1)
+WowAgent.StopQuestNavigation()
+C_GossipInfo.GetActiveQuests = function() return {} end
+UnitGUID, UnitCanAttack = previousGUID, canAttack
+C_QuestLog.GetQuestsOnMap = questMarkers
 
 -- The pumpkin quest is a world-object interaction even when the quest log
 -- classifies its count as an item. Unrelated yellow markers are ignored.
@@ -680,6 +1013,53 @@ assert(math.floor(rowValues[32] / 2048) == math.floor(values[8] / 8192))
 assert(math.floor(values[3] / 65536) % 2 == 1)
 WowAgent.StopQuestNavigation()
 
+-- The catapult is a counted interaction even when its objective type is monster.
+questState[90895] = 2
+C_QuestLog.GetQuestsOnMap = function() return {{questID = 90895, x = .2165, y = .4784}} end
+C_QuestLog.GetQuestObjectives = function()
+    return {{type = "monster", text = "摧毁投石车：0/4", numFulfilled = 0, numRequired = 4}}
+end
+local priorObjectGUID, catapultID = UnitGUID, 244682
+function UnitGUID(unit)
+    if unit == "mouseover" then return "Creature-0-0-0-0-" .. catapultID .. "-01" end
+    return priorObjectGUID(unit)
+end
+WowAgent.PrepareQuestNavigation(90895, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(math.floor(values[1] / 131072) == 2 and values[2] == 0)
+catapultID = 249269
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 131072) == 2 and values[2] == 307 * 1024 + 962)
+WowAgent.StopQuestNavigation()
+UnitGUID = priorObjectGUID
+
+-- The current siege quest can expose a generic 0/1 objective and no target
+-- tooltip. Match its observed local mob name only on the quest's map.
+questState[90893] = 2
+resourcePercent = 68
+C_QuestLog.GetQuestsOnMap = function() return {{questID = 90893, x = .195, y = .489}} end
+C_QuestLog.GetQuestObjectives = function() return {{numFulfilled = 0, numRequired = 1}} end
+local previousUnitName, previousGetLocale = UnitName, GetLocale
+local siegeName = "食人魔重击者"
+function GetLocale() return "zhCN" end
+function UnitName(unit)
+    if unit == "target" then return siegeName end
+    return previousUnitName(unit)
+end
+selected = "Creature-0-0-0-0-654321-01"
+WowAgent.PrepareQuestNavigation(90893, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+frames[2].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[11] / 1024) % 4 == 3 and values[12] == 680 * 1024 + 1000)
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 131072) == 1 and values[2] == 654321)
+siegeName = "无关目标"
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 131072) == 1 and values[2] == 0)
+WowAgent.StopQuestNavigation()
+UnitName, GetLocale = previousUnitName, previousGetLocale
+GetQuestProgressBarPercent = nil
+
 -- Fetch is armed only for a known skill and a lootable corpse with a live pet.
 C_SpellBook = {IsSpellKnown = function(id) return id == 125050 end}
 local spellName = C_Spell.GetSpellName
@@ -695,6 +1075,11 @@ WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
 while #timers > 0 do table.remove(timers, 1)() end
 assert(overrides.L == "CLICK WowAgentTaskFetch:LeftButton")
 assert(namedFrames.WowAgentTaskFetch.attributes.macrotext == "/cast 拾回")
+assert(overrides.O == "CLICK WowAgentTaskSweep:LeftButton")
+assert(namedFrames.WowAgentTaskSweep.attributes.macrotext == "/cleartarget\n/cast 拾回")
+frames[3].scripts.OnEvent(nil, "LOOT_SLOT_CLEARED")
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-80] % 256 == 1 and math.floor(rowValues[-80] / 256) % 2 == 1)
 assert(math.floor(values[3] / 8192) % 8 == 7)
 canLoot = false
 frames[3].scripts.OnUpdate(nil, .2)
@@ -711,35 +1096,62 @@ function UnitClass() return "Hunter", "HUNTER" end
 function UnitIsDead(unit) return unit == "pet" and petDead or unit == "player" and playerDead end
 function UnitIsGhost() return playerGhost end
 function GetCallPetSpellInfo(id) if id == 83242 then return 2, "Wolf" end end
-C_SpellBook.IsSpellInSpellBook = function(id) return id == 982 end
+C_SpellBook.IsSpellInSpellBook = function(id) return id == 982 or id == 136 end
 C_SpellBook.IsSpellKnown = function(id) return id == 125050 or id == 1459 end
 C_Spell.GetSpellName = function(id)
     return ({[982] = "Revive Pet", [83242] = "Call Pet 2", [1459] = "Arcane Intellect",
-        [125050] = "Fetch"})[id] or spellName(id)
+        [125050] = "Fetch", [136] = "Mend Pet"})[id] or spellName(id)
 end
 C_UnitAuras = {GetPlayerAuraBySpellID = function() return aura end}
+local recoveryBinding = GetBindingAction
+function GetBindingAction(key)
+    if key == "F6" then return overrides.F6 or "MULTIACTIONBAR2BUTTON11" end
+    return recoveryBinding(key)
+end
 WowAgent.QuestCommand("recovery buff 1459")
 WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
 while #timers > 0 do table.remove(timers, 1)() end
 assert(overrides.F9 == "CLICK WowAgentRecoveryFollow:LeftButton")
+-- Full quest preparation loads BOTH modules: recovery must not take the probe key.
+assert(overrides.F6 == "CLICK WowAgentTaskCamera:RightButton")
+assert(overrides.F8 == "CLICK WowAgentTaskCamera:LeftButton")
+assert(WowAgent.QuestCamera.probeReady())
+assert(math.floor(rowValues[-272] / 524288) == 1)
 assert(namedFrames.WowAgentRecoverySummon.attributes.macrotext == "/cast Call Pet 2")
 assert(namedFrames.WowAgentRecoveryRevive.attributes.macrotext == "/cast Revive Pet")
 assert(namedFrames.WowAgentRecoveryBuff.attributes.macrotext == "/cast [@player] Arcane Intellect")
-assert(values[12] % 16 == 10)
+assert(overrides.F7 == "CLICK WowAgentRecoveryMend:LeftButton")
+assert(namedFrames.WowAgentRecoveryMend.attributes.macrotext == "/cast [@pet,exists,nodead] Mend Pet")
+assert(values[12] % 16 == 15)
 local state = rowValues[-64] % 8192
 assert(state == 1 + 12 + 16 + 32 + 64 + 128 + 512)
 aura = {}
 frames[3].scripts.OnUpdate(nil, .2)
 assert(rowValues[-64] % 8192 == state - 128)
+petDead = false
+function UnitHealth() return 45 end
+function UnitHealthMax() return 100 end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-48] == 46 + 128)
+frames[3].scripts.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "cast", 136)
+frames[3].scripts.OnUpdate(nil, .2)
+assert(rowValues[-48] == 46 + 128 + 256 + 1024)
+petDead = true
 playerDead = true
 frames[3].scripts.OnUpdate(nil, .2)
 assert(rowValues[-64] % 8192 == 2)
 playerGhost = true
+function GetPlayerFacing() return 1.5 * math.pi end
 C_DeathInfo = {GetCorpseMapPosition = function()
     return {GetXY = function() return .43, .5 end}
 end}
+WowAgent.LayoutSupport.ActionMatches = function() return false end
 frames[3].scripts.OnUpdate(nil, .2)
-assert(rowValues[-64] % 8192 == 3 + 512 and rowValues[-48] > 0)
+assert(math.floor(values[8] / 4096) % 2 == 0) -- Travel macros may fail their separate check.
+assert(rowValues[-64] % 8192 == 3 + 4 + 256 + 512 and rowValues[-48] > 0)
+assert(rowValues[-32] == math.floor(.75 * 1048575) + 1)
+assert(math.floor(values[8] / 8192) == math.floor(rowValues[32] / 2048))
+assert(rowValues[32] % 1024 == 233) -- Ghost recovery publishes the calibrated minimap.
 local enabled = false
 local button = {
     IsVisible = function() return true end,
@@ -755,9 +1167,105 @@ function StaticPopup_FindVisible(which)
 end
 function GetMouseFoci() return {button} end
 frames[3].scripts.OnUpdate(nil, .2)
-assert(rowValues[-64] % 8192 == 3 + 512 + 1024 and rowValues[-32] == 0)
+assert(rowValues[-64] % 8192 == 3 + 4 + 256 + 512 + 1024 and rowValues[-32] == 0)
 enabled = true
 frames[3].scripts.OnUpdate(nil, .2)
-assert(rowValues[-64] % 8192 == 3 + 512 + 1024 + 2048 + 4096 and rowValues[-32] > 0)
+assert(rowValues[-64] % 8192 == 3 + 4 + 256 + 512 + 1024 + 2048 + 4096 and rowValues[-32] > 0)
+for hidden = 0, 15 do
+    WowAgent.VisualUI = {HiddenMask = function() return hidden end}
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(rowValues[-304] % 16 == hidden)
+    assert(math.floor(rowValues[-304] / 128) % 128 == math.floor(rowValues[-272] / 4096) % 128)
+end
+WowAgent.VisualUI = nil
+frames[3].scripts.OnUpdate(nil, .2)
 WowAgent.StopQuestNavigation()
 assert(not overrides.F9 and not overrides.F10 and not overrides.F11 and not overrides.F12)
+assert(not overrides.F6 and GetBindingAction("F6", true) == "MULTIACTIONBAR2BUTTON11")
+
+-- A valid parent-map pin can replace a missing local pin. Off-map projections cannot.
+StaticPopup_FindVisible = nil
+local localMap, parentMap = C_Map.GetBestMapForUnit("player"), 987
+Enum = Enum or {}
+Enum.UIMapType = {Zone = 3}
+C_Map.GetMapInfo = function(map)
+    if map == localMap then return {mapType = 3, parentMapID = parentMap} end
+end
+local vector = function(x, y) return {GetXY = function() return x, y end} end
+C_DeathInfo.GetCorpseMapPosition = function(map)
+    if map == parentMap then return vector(.25, .6) end
+end
+local world = {}
+C_Map.GetWorldPosFromMapPos = function(map, point)
+    assert(map == parentMap and point:GetXY() == .25)
+    return 1, world
+end
+local projectedX = .45
+C_Map.GetMapPosFromWorldPos = function(continent, point, map)
+    assert(continent == 1 and point == world and map == localMap)
+    return localMap, vector(projectedX, .5)
+end
+local function ReadCorpse(map)
+    return WowAgent.RecoveryState(nil, map, function() return true end)
+end
+local recovery, corpse = ReadCorpse(localMap)
+assert(recovery == 3 + 8 + 256 + 512 and corpse == 460 * 1024 + 512)
+projectedX = 1.1
+recovery, corpse = ReadCorpse(localMap)
+assert(recovery == 3 + 256 and corpse == 0)
+
+-- Cache only a position observed at death, and clear it after unghosting.
+playerGhost = false
+C_Map.GetPlayerMapPosition = function() return vector(.4, .5) end
+frames[3].scripts.OnEvent(nil, "PLAYER_DEAD")
+playerGhost = true
+C_Map.GetPlayerMapPosition = function() return vector(.9, .5) end
+recovery, corpse = ReadCorpse(localMap)
+assert(recovery == 3 + 12 + 256 + 512 and corpse == 409 * 1024 + 512)
+recovery, corpse = ReadCorpse(parentMap + 1)
+assert(recovery == 3 + 256 and corpse == 0)
+frames[3].scripts.OnEvent(nil, "PLAYER_UNGHOST")
+recovery, corpse = ReadCorpse(localMap)
+assert(recovery == 3 + 256 and corpse == 0)
+
+-- Only the highest-priority corpse track can provide a ghost waypoint or range.
+Enum.SuperTrackingType = {Corpse = 2, Quest = 0}
+local track = Enum.SuperTrackingType.Quest
+C_SuperTrack = {GetHighestPrioritySuperTrackingType = function() return track end}
+C_Navigation = {
+    GetNextWaypointForMap = function(map) assert(map == localMap); return .45, .5, "Corpse" end,
+    GetDistance = function() return 43.2 end,
+}
+local status, _, _, range = ReadCorpse(localMap)
+assert(status == 3 + 256 and range == 0)
+track = Enum.SuperTrackingType.Corpse
+status, corpse, _, range = ReadCorpse(localMap)
+assert(status == 3 + 16 + 256 + 512 and corpse == 460 * 1024 + 512 and range == 432)
+C_Navigation.GetNextWaypointForMap = function() end
+status, corpse, _, range = ReadCorpse(localMap)
+assert(status == 3 + 256 and corpse == 0 and range == 432)
+
+C_Minimap.GetUiMapID = function() return parentMap end
+projectedX = .45
+status, corpse = ReadCorpse(localMap)
+assert(status == 3 + 20 + 256 + 512 and corpse == 460 * 1024 + 512)
+
+-- Runtime build extension is separate from the v15 core and follows nav sequence.
+assert(math.floor((rowValues[-288] % 524288) / 512) == math.floor(357888 / 512))
+assert(rowValues[-272] % 4096 == 274)
+assert(math.floor(rowValues[-272] / 4096) % 128 == math.floor(rowValues[-256] / 8192))
+-- Independently versioned visibility row; old v15/schema 6 remain unchanged.
+assert(math.floor(rowValues[-304] / 16384) == 45)
+assert(math.floor(rowValues[-304] / 16) % 8 == 1 and rowValues[-304] % 16 == 0)
+assert(math.floor(rowValues[-304] / 128) % 128 == math.floor(rowValues[-272] / 4096) % 128)
+local top, bottom = math.huge, -math.huge
+for _, offset in ipairs(frames[3].pixelOffsets) do
+    top, bottom = math.min(top, offset), math.max(bottom, offset + 16)
+end
+assert(bottom == frames[3].height) -- The core ends exactly at the main strip.
+assert(bottom - top == 38 * 16) -- Python's 12 core + 26 extension capture rows.
+
+local visualRestores = 0
+WowAgent.VisualUI = {Restore = function(quiet) assert(quiet); visualRestores = visualRestores + 1 end}
+WowAgent.StopQuestNavigation()
+assert(visualRestores == 1)

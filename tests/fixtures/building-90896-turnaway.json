@@ -1,0 +1,166 @@
+{
+  "run": "20261118T055810-7e46744d",
+  "captured_at": 1794981493.2533948,
+  "latency_s": 16.06121325492859,
+  "native": {
+    "quest_id": 90896,
+    "map_id": 2451,
+    "destination_map": 2451,
+    "destination": [
+      0.28929928712776865,
+      0.3072054931693012
+    ],
+    "position": [
+      0.28029563932002954,
+      0.3212083065112176
+    ],
+    "world_size": [
+      3477.1,
+      2318.8
+    ],
+    "height": 0.0,
+    "phase": 2,
+    "flags": 6915,
+    "sequence": 86,
+    "flight_mount_active": false,
+    "interact_verified": true,
+    "descent_key": "x",
+    "sky_pitch_key": "0",
+    "sky_dismount_key": "z",
+    "sky_ascent_key": null,
+    "sky_halt_key": null,
+    "task": 33,
+    "npc_range_supported": true,
+    "mount_button": null,
+    "mount_button_key": null,
+    "objective_action": 1,
+    "objective_target": 0,
+    "objective_cursor": null,
+    "round_stage": 2,
+    "round_advance": false,
+    "round_blocked": false,
+    "round_immediate": false,
+    "objective_pin": false,
+    "minimap": null,
+    "corpse_lootable": null,
+    "fetch_ready": true,
+    "precise_object": false,
+    "apr_waypoint": false,
+    "strafe_verified": true,
+    "last_target_verified": true,
+    "recovery": {
+      "life": 1,
+      "corpse": null,
+      "button": null,
+      "ui_aspect": 0.0,
+      "dialog": false,
+      "hovered": false,
+      "pet": 2,
+      "pet_expected": true,
+      "follow": true,
+      "summon": true,
+      "revive": true,
+      "buff_missing": false,
+      "buff_unverified": false,
+      "walk_verified": null,
+      "facing": null,
+      "corpse_source": 0,
+      "corpse_distance": null,
+      "pet_health": null,
+      "mend_verified": true,
+      "mend_active": false,
+      "mend_unusable": false,
+      "mend_epoch": 0,
+      "patrol_id": 0,
+      "patrol_danger": 0,
+      "attacker_count": 0,
+      "attacker_cursor": null,
+      "attacker_hovered": false,
+      "attacker_scan_supported": false
+    },
+    "loot_epoch": 0,
+    "sweep_ready": true,
+    "search_area": null,
+    "sky_flight": null,
+    "camera_restore_available": true,
+    "camera_zoom_close": false,
+    "camera_epoch": 0,
+    "objective_index": 1,
+    "objectives_finished": false,
+    "objective_progress": [
+      0,
+      1
+    ],
+    "objective_resource": false,
+    "suspend_ready": true,
+    "suspend_epoch": 6,
+    "current_suspended": false,
+    "protocol_version": 15,
+    "camera": {
+      "zoom": 38.5,
+      "view": 2,
+      "scene": 1,
+      "applied": 1,
+      "request": 2,
+      "result": 2,
+      "paused": false,
+      "calibrated": false
+    },
+    "addon_build": 274,
+    "probe_camera_available": true,
+    "overhead_camera_available": true,
+    "calibration_orbit_available": true,
+    "calibration_orbit_active": false,
+    "round_pending_count": 0,
+    "extension_schema": 6,
+    "visual_ui_hidden": 1
+  },
+  "heading": 5.447066714443359,
+  "frame_size": [
+    1012,
+    586
+  ],
+  "scene": {
+    "schema": 1,
+    "executable": false,
+    "surface": "unknown",
+    "doorways": [
+      {
+        "box": [
+          153.655029296875,
+          208.1399688720703,
+          398.5008544921875,
+          443.3050231933594
+        ],
+        "threshold_box": [
+          154,
+          437,
+          399,
+          486
+        ],
+        "score": 0.38803884387016296,
+        "connected_ground_fraction": 0.11986672219908372,
+        "threshold_observed": false,
+        "passage_verified": false,
+        "surround_structure": [
+          0.8151603498542274,
+          0.17933130699088146,
+          0.444811115935736
+        ],
+        "opening_fraction": 0.22577507598784194
+      }
+    ],
+    "frame_id": "3a6b76bbfe6749dda507f633495e43e4",
+    "image_sha256": "6d5816f422b4450d0e01c53c8b252b3d4d6ea158c7bd9079148efb2d4b7ff8c8",
+    "ground_measurement": {
+      "ground_pixels": 29455,
+      "feature_threshold": 12,
+      "high_contrast_features": 106,
+      "texture_features": 106,
+      "minimum_features": 40,
+      "look_hint": "left",
+      "look_basis": "near_ground_patch",
+      "translation_authorized": false
+    }
+  }
+}

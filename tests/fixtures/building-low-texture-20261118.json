@@ -1,0 +1,246 @@
+{
+  "source": "/Volumes/Mac SSD1/projects/wow-agnet/data/terrain/segmented-63362cb015dd449fbd88878b8cb8627b/image.png",
+  "source_sha256": "9d588faff5006105cd9cc756b8e92b7d16294e3b0cfd9622e99f75d1ebdc2d8b",
+  "scene": {
+    "schema": 1,
+    "surface": "unknown",
+    "support": {
+      "exterior": 0.20664327534822768,
+      "floor": 0.0,
+      "structure": 0.10509183910718438,
+      "water": 0.00849696687873856
+    },
+    "surface_evidence": {
+      "schema": 1,
+      "camera_view": 4,
+      "visible_surface_fraction": 0.3202320813341506,
+      "exterior_share_of_visible_surface": 0.6452922345797169,
+      "connected_patch_fraction": 0.16818498869184756,
+      "nearby_patch_fraction": 0.03925857702049275,
+      "nearby_structure_fraction": 0.0,
+      "nearby_water_fraction": 0.0074833064701819016,
+      "basis": "unconfirmed",
+      "occlusion_requirements": {
+        "overhead": true,
+        "visible_ground": true,
+        "surface_agreement": false,
+        "connected_patch": true,
+        "nearby_patch": false,
+        "no_surface_conflict": true
+      }
+    },
+    "doorways": [
+      {
+        "box": [
+          90.3181381225586,
+          317.9713134765625,
+          293.5653381347656,
+          529.9198608398438
+        ],
+        "threshold_box": [
+          90,
+          524,
+          294,
+          568
+        ],
+        "score": 0.5073974132537842,
+        "connected_ground_fraction": 0.0,
+        "threshold_observed": false,
+        "passage_verified": false,
+        "surround_structure": [
+          0.9865603146853147,
+          0.22054763000460192,
+          0.320524620340543
+        ],
+        "opening_fraction": 0.2445662227155013
+      }
+    ],
+    "layout": {
+      "schema": 1,
+      "coordinate_space": "current_image",
+      "size": [
+        1012,
+        586
+      ],
+      "hints": [
+        "opening",
+        "stairs",
+        "enclosed_outdoor_candidate"
+      ],
+      "floor_regions": [],
+      "exterior_regions": [
+        {
+          "box": [
+            538,
+            308,
+            961,
+            527
+          ],
+          "pixels": 47532
+        },
+        {
+          "box": [
+            784,
+            174,
+            1012,
+            302
+          ],
+          "pixels": 13260
+        },
+        {
+          "box": [
+            688,
+            347,
+            774,
+            414
+          ],
+          "pixels": 4067
+        },
+        {
+          "box": [
+            889,
+            450,
+            961,
+            527
+          ],
+          "pixels": 3239
+        },
+        {
+          "box": [
+            959,
+            127,
+            1012,
+            166
+          ],
+          "pixels": 1265
+        },
+        {
+          "box": [
+            561,
+            301,
+            614,
+            333
+          ],
+          "pixels": 1172
+        },
+        {
+          "box": [
+            481,
+            405,
+            489,
+            412
+          ],
+          "pixels": 30
+        }
+      ],
+      "portals": [
+        {
+          "kind": "opening",
+          "box": [
+            90.3181381225586,
+            317.9713134765625,
+            293.5653381347656,
+            529.9198608398438
+          ],
+          "approach_box": [
+            90,
+            524,
+            294,
+            568
+          ],
+          "opening_observed": true,
+          "passage_verified": false
+        }
+      ],
+      "connectors": [
+        {
+          "kind": "stairs",
+          "box": [
+            162,
+            385,
+            259,
+            430
+          ],
+          "approach_box": [
+            152,
+            420,
+            269,
+            440
+          ],
+          "direction": "unknown",
+          "from_level": null,
+          "to_level": null,
+          "passage_verified": false,
+          "requires_separate_surface_measurement": true
+        }
+      ],
+      "level_id": null,
+      "room_id": null,
+      "world_coordinates": null,
+      "executable": false
+    },
+    "rejected_doorways": [],
+    "look_hint": "left",
+    "building_visible": true,
+    "executable": false,
+    "world_coordinates": null,
+    "entrance_verified": false,
+    "ground_measurement": {
+      "ground_pixels": 47172,
+      "texture_features": 10,
+      "minimum_features": 40,
+      "look_hint": "right",
+      "look_basis": "near_ground_patch",
+      "translation_authorized": false
+    }
+  },
+  "request": {
+    "automatic": true,
+    "session_id": "3bf009ac9e144a45a8ad4e59c4acea21",
+    "models": "/Volumes/Mac SSD1/projects/wow-agnet/data/segmentation/models.json",
+    "checkpoint": "/Volumes/Mac SSD1/projects/wow-agnet/data/segmentation/sam2.1_hiera_large.pt",
+    "device": "cpu",
+    "quest_id": 90896,
+    "phase": "ACTIVE",
+    "objective_index": 1,
+    "convention": "ccw_west",
+    "blocked": [],
+    "visited": [],
+    "motion_history": [],
+    "strafe_verified": true,
+    "destination": [
+      0.28929928712776865,
+      0.3072054931693012
+    ],
+    "goal_mode": "building_entry",
+    "calibration_cache": "/Volumes/Mac SSD1/projects/wow-agnet/data/calibration/automatic-local.npz",
+    "frame": {
+      "frame_id": "63362cb015dd449fbd88878b8cb8627b",
+      "image_sha256": "9d588faff5006105cd9cc756b8e92b7d16294e3b0cfd9622e99f75d1ebdc2d8b",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.28079536513840214,
+        0.32080871659156474
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 4.984705284582059,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1389107.5532059376
+    }
+  },
+  "evidence": "saved real image, no new game movement"
+}

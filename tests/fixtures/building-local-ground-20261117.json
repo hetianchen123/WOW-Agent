@@ -1,0 +1,1614 @@
+[
+  {
+    "source": "/Volumes/Mac SSD1/projects/wow-agnet/data/terrain/building-a3c3a5ce5eb34654b062809336b13e8d/image.png",
+    "source_sha256": "ee04bcc36de0ddd2c3e78d19135ad4e0c352876f08ca71088494fa43e4aca2b7",
+    "names": {
+      "0": "wall",
+      "1": "building",
+      "2": "sky",
+      "3": "floor",
+      "4": "tree",
+      "5": "ceiling",
+      "6": "road",
+      "7": "bed ",
+      "8": "windowpane",
+      "9": "grass",
+      "10": "cabinet",
+      "11": "sidewalk",
+      "12": "person",
+      "13": "earth",
+      "14": "door",
+      "15": "table",
+      "16": "mountain",
+      "17": "plant",
+      "18": "curtain",
+      "19": "chair",
+      "20": "car",
+      "21": "water",
+      "22": "painting",
+      "23": "sofa",
+      "24": "shelf",
+      "25": "house",
+      "26": "sea",
+      "27": "mirror",
+      "28": "rug",
+      "29": "field",
+      "30": "armchair",
+      "31": "seat",
+      "32": "fence",
+      "33": "desk",
+      "34": "rock",
+      "35": "wardrobe",
+      "36": "lamp",
+      "37": "bathtub",
+      "38": "railing",
+      "39": "cushion",
+      "40": "base",
+      "41": "box",
+      "42": "column",
+      "43": "signboard",
+      "44": "chest of drawers",
+      "45": "counter",
+      "46": "sand",
+      "47": "sink",
+      "48": "skyscraper",
+      "49": "fireplace",
+      "50": "refrigerator",
+      "51": "grandstand",
+      "52": "path",
+      "53": "stairs",
+      "54": "runway",
+      "55": "case",
+      "56": "pool table",
+      "57": "pillow",
+      "58": "screen door",
+      "59": "stairway",
+      "60": "river",
+      "61": "bridge",
+      "62": "bookcase",
+      "63": "blind",
+      "64": "coffee table",
+      "65": "toilet",
+      "66": "flower",
+      "67": "book",
+      "68": "hill",
+      "69": "bench",
+      "70": "countertop",
+      "71": "stove",
+      "72": "palm",
+      "73": "kitchen island",
+      "74": "computer",
+      "75": "swivel chair",
+      "76": "boat",
+      "77": "bar",
+      "78": "arcade machine",
+      "79": "hovel",
+      "80": "bus",
+      "81": "towel",
+      "82": "light",
+      "83": "truck",
+      "84": "tower",
+      "85": "chandelier",
+      "86": "awning",
+      "87": "streetlight",
+      "88": "booth",
+      "89": "television receiver",
+      "90": "airplane",
+      "91": "dirt track",
+      "92": "apparel",
+      "93": "pole",
+      "94": "land",
+      "95": "bannister",
+      "96": "escalator",
+      "97": "ottoman",
+      "98": "bottle",
+      "99": "buffet",
+      "100": "poster",
+      "101": "stage",
+      "102": "van",
+      "103": "ship",
+      "104": "fountain",
+      "105": "conveyer belt",
+      "106": "canopy",
+      "107": "washer",
+      "108": "plaything",
+      "109": "swimming pool",
+      "110": "stool",
+      "111": "barrel",
+      "112": "basket",
+      "113": "waterfall",
+      "114": "tent",
+      "115": "bag",
+      "116": "minibike",
+      "117": "cradle",
+      "118": "oven",
+      "119": "ball",
+      "120": "food",
+      "121": "step",
+      "122": "tank",
+      "123": "trade name",
+      "124": "microwave",
+      "125": "pot",
+      "126": "animal",
+      "127": "bicycle",
+      "128": "lake",
+      "129": "dishwasher",
+      "130": "screen",
+      "131": "blanket",
+      "132": "sculpture",
+      "133": "hood",
+      "134": "sconce",
+      "135": "vase",
+      "136": "traffic light",
+      "137": "tray",
+      "138": "ashcan",
+      "139": "fan",
+      "140": "pier",
+      "141": "crt screen",
+      "142": "plate",
+      "143": "monitor",
+      "144": "bulletin board",
+      "145": "shower",
+      "146": "radiator",
+      "147": "glass",
+      "148": "clock",
+      "149": "flag"
+    },
+    "instances": [
+      {
+        "box": [
+          216.84725952148438,
+          284.20306396484375,
+          318.6912536621094,
+          449.7829284667969
+        ],
+        "label": "stairs",
+        "detection_score": 0.6664476990699768,
+        "mask_score": 0.9063308835029602,
+        "candidate_scores": [
+          0.8770635724067688,
+          0.9063308835029602,
+          0.8916881680488586
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          124.09964752197266,
+          218.25845336914062,
+          381.5142517089844,
+          460.88922119140625
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.4266907572746277,
+        "mask_score": 0.8576233983039856,
+        "candidate_scores": [
+          0.848253071308136,
+          0.8306897878646851,
+          0.8576233983039856
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          4.874692440032959,
+          5.0116729736328125,
+          1006.2885131835938,
+          580.4603881835938
+        ],
+        "label": "building",
+        "detection_score": 0.3960074186325073,
+        "mask_score": 0.6401697397232056,
+        "candidate_scores": [
+          0.17214630544185638,
+          0.31380289793014526,
+          0.6401697397232056
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          2.506382465362549,
+          376.3804626464844,
+          929.30126953125,
+          584.0169677734375
+        ],
+        "label": "road",
+        "detection_score": 0.3203979730606079,
+        "mask_score": 0.7721771001815796,
+        "candidate_scores": [
+          0.2501600980758667,
+          0.5958598852157593,
+          0.7721771001815796
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          182.33029174804688,
+          265.7740783691406,
+          328.0041809082031,
+          458.2816467285156
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.29199618101119995,
+        "mask_score": 0.9040224552154541,
+        "candidate_scores": [
+          0.5011207461357117,
+          0.9040224552154541,
+          0.8698781132698059
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          532.7130737304688,
+          395.6402282714844,
+          763.7584838867188,
+          505.0956726074219
+        ],
+        "label": "grass",
+        "detection_score": 0.28351515531539917,
+        "mask_score": 0.92926025390625,
+        "candidate_scores": [
+          0.8029272556304932,
+          0.8959850668907166,
+          0.92926025390625
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          3.3838860988616943,
+          451.222412109375,
+          921.6433715820312,
+          584.0684814453125
+        ],
+        "label": "road",
+        "detection_score": 0.26940301060676575,
+        "mask_score": 0.8911009430885315,
+        "candidate_scores": [
+          0.47318822145462036,
+          0.8405382633209229,
+          0.8911009430885315
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          92.2927474975586,
+          189.01841735839844,
+          425.2220153808594,
+          488.0787658691406
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.26554545760154724,
+        "mask_score": 0.8163604140281677,
+        "candidate_scores": [
+          0.8163604140281677,
+          0.569037914276123,
+          0.7999876141548157
+        ],
+        "selected": 0
+      },
+      {
+        "box": [
+          462.47515869140625,
+          374.4115905761719,
+          930.224853515625,
+          583.0278930664062
+        ],
+        "label": "grass",
+        "detection_score": 0.2645454704761505,
+        "mask_score": 0.8256641030311584,
+        "candidate_scores": [
+          0.14351478219032288,
+          0.7296680212020874,
+          0.8256641030311584
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          467.1444396972656,
+          374.5541076660156,
+          928.1672973632812,
+          511.5692443847656
+        ],
+        "label": "grass",
+        "detection_score": 0.2557295858860016,
+        "mask_score": 0.9375631213188171,
+        "candidate_scores": [
+          0.6453904509544373,
+          0.8943151235580444,
+          0.9375631213188171
+        ],
+        "selected": 2
+      }
+    ],
+    "camera_view": 2,
+    "scene": {
+      "schema": 1,
+      "surface": "unknown",
+      "support": {
+        "exterior": 0.11796410982646742,
+        "floor": 0.056857813193549066,
+        "structure": 0.08868973388852487,
+        "water": 0.0
+      },
+      "surface_evidence": {
+        "schema": 1,
+        "camera_view": 2,
+        "visible_surface_fraction": 0.26351165690854134,
+        "exterior_share_of_visible_surface": 0.44766182722387104,
+        "connected_patch_fraction": 0.11505780896620237,
+        "nearby_patch_fraction": 0.1099854171463658,
+        "nearby_structure_fraction": 0.0,
+        "nearby_water_fraction": 0.0,
+        "basis": "unconfirmed",
+        "occlusion_requirements": {
+          "overhead": false,
+          "visible_ground": false,
+          "surface_agreement": false,
+          "connected_patch": true,
+          "nearby_patch": false,
+          "no_surface_conflict": true
+        }
+      },
+      "doorways": [
+        {
+          "box": [
+            124.09964752197266,
+            218.25845336914062,
+            381.5142517089844,
+            460.88922119140625
+          ],
+          "threshold_box": [
+            124,
+            455,
+            382,
+            505
+          ],
+          "score": 0.4266907572746277,
+          "connected_ground_fraction": 0.10511627906976745,
+          "threshold_observed": false,
+          "passage_verified": false,
+          "surround_structure": [
+            1.0,
+            0.36488340192043894,
+            0.5524893084805939
+          ],
+          "opening_fraction": 0.1707180910453951
+        }
+      ],
+      "rejected_doorways": [],
+      "look_hint": "left",
+      "building_visible": true,
+      "executable": false,
+      "world_coordinates": null,
+      "entrance_verified": false,
+      "ground_measurement": {
+        "ground_pixels": 4979,
+        "texture_features": 1,
+        "minimum_features": 40,
+        "look_hint": "right",
+        "look_basis": "near_ground_patch",
+        "translation_authorized": false
+      }
+    },
+    "saved_native": {
+      "quest_id": 90896,
+      "map_id": 2451,
+      "destination_map": 2451,
+      "destination": [
+        0.28929928712776865,
+        0.3072054931693012
+      ],
+      "position": [
+        0.28079536513840214,
+        0.32080871659156474
+      ],
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "height": 0.0,
+      "phase": 2,
+      "flags": 6915,
+      "sequence": 124,
+      "flight_mount_active": false,
+      "interact_verified": true,
+      "descent_key": "x",
+      "sky_pitch_key": "0",
+      "sky_dismount_key": "z",
+      "sky_ascent_key": null,
+      "sky_halt_key": null,
+      "task": 33,
+      "npc_range_supported": true,
+      "mount_button": null,
+      "mount_button_key": null,
+      "objective_action": 1,
+      "objective_target": 0,
+      "objective_cursor": null,
+      "round_stage": 2,
+      "round_advance": false,
+      "round_blocked": false,
+      "round_immediate": false,
+      "objective_pin": false,
+      "minimap": null,
+      "corpse_lootable": null,
+      "fetch_ready": true,
+      "precise_object": false,
+      "apr_waypoint": false,
+      "strafe_verified": true,
+      "last_target_verified": true,
+      "recovery": {
+        "life": 1,
+        "corpse": null,
+        "button": null,
+        "ui_aspect": 0.0,
+        "dialog": false,
+        "hovered": false,
+        "pet": 2,
+        "pet_expected": true,
+        "follow": true,
+        "summon": true,
+        "revive": true,
+        "buff_missing": false,
+        "buff_unverified": false,
+        "walk_verified": null,
+        "facing": null,
+        "corpse_source": 0,
+        "corpse_distance": null,
+        "pet_health": null,
+        "mend_verified": true,
+        "mend_active": false,
+        "mend_unusable": false,
+        "mend_epoch": 0,
+        "patrol_id": 0,
+        "patrol_danger": 0,
+        "attacker_count": 0,
+        "attacker_cursor": null,
+        "attacker_hovered": false,
+        "attacker_scan_supported": false
+      },
+      "loot_epoch": 0,
+      "sweep_ready": true,
+      "search_area": null,
+      "sky_flight": null,
+      "camera_restore_available": true,
+      "camera_zoom_close": false,
+      "camera_epoch": 1,
+      "objective_index": 1,
+      "objectives_finished": false,
+      "objective_progress": [
+        0,
+        1
+      ],
+      "objective_resource": false,
+      "suspend_ready": true,
+      "suspend_epoch": 2,
+      "current_suspended": false,
+      "protocol_version": 15,
+      "camera": {
+        "zoom": 38.5,
+        "view": 2,
+        "scene": 1,
+        "applied": 1,
+        "request": 1,
+        "result": 2,
+        "paused": false,
+        "calibrated": false
+      },
+      "addon_build": 272,
+      "probe_camera_available": true,
+      "overhead_camera_available": true,
+      "calibration_orbit_available": true,
+      "calibration_orbit_active": false,
+      "round_pending_count": 0,
+      "extension_schema": 6
+    }
+  },
+  {
+    "source": "/Volumes/Mac SSD1/projects/wow-agnet/data/terrain/building-5f375368e72049149a876e132b78bcc4/image.png",
+    "source_sha256": "f0a9dd13f7dc0c732514333bb735c4115e5781f190edc77b61841738fa946885",
+    "names": {
+      "0": "wall",
+      "1": "building",
+      "2": "sky",
+      "3": "floor",
+      "4": "tree",
+      "5": "ceiling",
+      "6": "road",
+      "7": "bed ",
+      "8": "windowpane",
+      "9": "grass",
+      "10": "cabinet",
+      "11": "sidewalk",
+      "12": "person",
+      "13": "earth",
+      "14": "door",
+      "15": "table",
+      "16": "mountain",
+      "17": "plant",
+      "18": "curtain",
+      "19": "chair",
+      "20": "car",
+      "21": "water",
+      "22": "painting",
+      "23": "sofa",
+      "24": "shelf",
+      "25": "house",
+      "26": "sea",
+      "27": "mirror",
+      "28": "rug",
+      "29": "field",
+      "30": "armchair",
+      "31": "seat",
+      "32": "fence",
+      "33": "desk",
+      "34": "rock",
+      "35": "wardrobe",
+      "36": "lamp",
+      "37": "bathtub",
+      "38": "railing",
+      "39": "cushion",
+      "40": "base",
+      "41": "box",
+      "42": "column",
+      "43": "signboard",
+      "44": "chest of drawers",
+      "45": "counter",
+      "46": "sand",
+      "47": "sink",
+      "48": "skyscraper",
+      "49": "fireplace",
+      "50": "refrigerator",
+      "51": "grandstand",
+      "52": "path",
+      "53": "stairs",
+      "54": "runway",
+      "55": "case",
+      "56": "pool table",
+      "57": "pillow",
+      "58": "screen door",
+      "59": "stairway",
+      "60": "river",
+      "61": "bridge",
+      "62": "bookcase",
+      "63": "blind",
+      "64": "coffee table",
+      "65": "toilet",
+      "66": "flower",
+      "67": "book",
+      "68": "hill",
+      "69": "bench",
+      "70": "countertop",
+      "71": "stove",
+      "72": "palm",
+      "73": "kitchen island",
+      "74": "computer",
+      "75": "swivel chair",
+      "76": "boat",
+      "77": "bar",
+      "78": "arcade machine",
+      "79": "hovel",
+      "80": "bus",
+      "81": "towel",
+      "82": "light",
+      "83": "truck",
+      "84": "tower",
+      "85": "chandelier",
+      "86": "awning",
+      "87": "streetlight",
+      "88": "booth",
+      "89": "television receiver",
+      "90": "airplane",
+      "91": "dirt track",
+      "92": "apparel",
+      "93": "pole",
+      "94": "land",
+      "95": "bannister",
+      "96": "escalator",
+      "97": "ottoman",
+      "98": "bottle",
+      "99": "buffet",
+      "100": "poster",
+      "101": "stage",
+      "102": "van",
+      "103": "ship",
+      "104": "fountain",
+      "105": "conveyer belt",
+      "106": "canopy",
+      "107": "washer",
+      "108": "plaything",
+      "109": "swimming pool",
+      "110": "stool",
+      "111": "barrel",
+      "112": "basket",
+      "113": "waterfall",
+      "114": "tent",
+      "115": "bag",
+      "116": "minibike",
+      "117": "cradle",
+      "118": "oven",
+      "119": "ball",
+      "120": "food",
+      "121": "step",
+      "122": "tank",
+      "123": "trade name",
+      "124": "microwave",
+      "125": "pot",
+      "126": "animal",
+      "127": "bicycle",
+      "128": "lake",
+      "129": "dishwasher",
+      "130": "screen",
+      "131": "blanket",
+      "132": "sculpture",
+      "133": "hood",
+      "134": "sconce",
+      "135": "vase",
+      "136": "traffic light",
+      "137": "tray",
+      "138": "ashcan",
+      "139": "fan",
+      "140": "pier",
+      "141": "crt screen",
+      "142": "plate",
+      "143": "monitor",
+      "144": "bulletin board",
+      "145": "shower",
+      "146": "radiator",
+      "147": "glass",
+      "148": "clock",
+      "149": "flag"
+    },
+    "instances": [
+      {
+        "box": [
+          165.554931640625,
+          269.3928527832031,
+          272.35479736328125,
+          373.5722351074219
+        ],
+        "label": "stairs",
+        "detection_score": 0.48248711228370667,
+        "mask_score": 0.9736175537109375,
+        "candidate_scores": [
+          0.8566842675209045,
+          0.9667320847511292,
+          0.9736175537109375
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          19.22454071044922,
+          193.98550415039062,
+          364.05413818359375,
+          461.419921875
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.39900538325309753,
+        "mask_score": 0.9076559543609619,
+        "candidate_scores": [
+          0.8728234171867371,
+          0.8951736688613892,
+          0.9076559543609619
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          4.004818916320801,
+          4.09248161315918,
+          1007.63818359375,
+          579.1937866210938
+        ],
+        "label": "building",
+        "detection_score": 0.3876227140426636,
+        "mask_score": 0.8077756762504578,
+        "candidate_scores": [
+          0.2735266387462616,
+          0.8077756762504578,
+          0.6981410980224609
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          128.1162109375,
+          254.274169921875,
+          281.5167541503906,
+          441.8296813964844
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.3286702334880829,
+        "mask_score": 0.9386042952537537,
+        "candidate_scores": [
+          0.36736828088760376,
+          0.9219779372215271,
+          0.9386042952537537
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          157.40887451171875,
+          266.30316162109375,
+          278.3747863769531,
+          438.7558288574219
+        ],
+        "label": "stairs",
+        "detection_score": 0.30014875531196594,
+        "mask_score": 0.9675832390785217,
+        "candidate_scores": [
+          0.7305463552474976,
+          0.9548149704933167,
+          0.9675832390785217
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          451.5571594238281,
+          273.6816101074219,
+          1003.9011840820312,
+          515.3876342773438
+        ],
+        "label": "grass",
+        "detection_score": 0.29275935888290405,
+        "mask_score": 0.78726726770401,
+        "candidate_scores": [
+          0.19560863077640533,
+          0.78726726770401,
+          0.7222909927368164
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          1.5747113227844238,
+          1.0262813568115234,
+          549.4998779296875,
+          128.0693359375
+        ],
+        "label": "roof",
+        "detection_score": 0.2909141480922699,
+        "mask_score": 0.9452424645423889,
+        "candidate_scores": [
+          0.9278052449226379,
+          0.87920743227005,
+          0.9452424645423889
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          15.123224258422852,
+          190.6962432861328,
+          373.23699951171875,
+          579.8884887695312
+        ],
+        "label": "open doorway",
+        "detection_score": 0.2621105909347534,
+        "mask_score": 0.8936357498168945,
+        "candidate_scores": [
+          0.8936357498168945,
+          0.4978577196598053,
+          0.8751670122146606
+        ],
+        "selected": 0
+      },
+      {
+        "box": [
+          446.3235168457031,
+          271.45751953125,
+          1009.5962524414062,
+          581.110107421875
+        ],
+        "label": "grass",
+        "detection_score": 0.25899606943130493,
+        "mask_score": 0.908322274684906,
+        "candidate_scores": [
+          0.29824912548065186,
+          0.908322274684906,
+          0.8875783681869507
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          533.6607055664062,
+          349.9360046386719,
+          804.33154296875,
+          487.04949951171875
+        ],
+        "label": "grass",
+        "detection_score": 0.2574938237667084,
+        "mask_score": 0.9087707996368408,
+        "candidate_scores": [
+          0.893028736114502,
+          0.7614101767539978,
+          0.9087707996368408
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          1.4517340660095215,
+          1.0418201684951782,
+          382.2863464355469,
+          125.04927825927734
+        ],
+        "label": "roof",
+        "detection_score": 0.25611209869384766,
+        "mask_score": 0.980550229549408,
+        "candidate_scores": [
+          0.9707726836204529,
+          0.871222198009491,
+          0.980550229549408
+        ],
+        "selected": 2
+      }
+    ],
+    "camera_view": 4,
+    "scene": {
+      "schema": 1,
+      "surface": "unknown",
+      "support": {
+        "exterior": 0.03575278476464247,
+        "floor": 0.020439221322736786,
+        "structure": 0.2811396926718945,
+        "water": 0.0
+      },
+      "surface_evidence": {
+        "schema": 1,
+        "camera_view": 4,
+        "visible_surface_fraction": 0.33733169875927377,
+        "exterior_share_of_visible_surface": 0.10598702966884926,
+        "connected_patch_fraction": 0.03575278476464247,
+        "nearby_patch_fraction": 0.0,
+        "nearby_structure_fraction": 0.08699823470719165,
+        "nearby_water_fraction": 0.0,
+        "basis": "unconfirmed",
+        "occlusion_requirements": {
+          "overhead": true,
+          "visible_ground": false,
+          "surface_agreement": false,
+          "connected_patch": false,
+          "nearby_patch": false,
+          "no_surface_conflict": false
+        }
+      },
+      "doorways": [
+        {
+          "box": [
+            19.22454071044922,
+            193.98550415039062,
+            364.05413818359375,
+            461.419921875
+          ],
+          "threshold_box": [
+            19,
+            455,
+            364,
+            510
+          ],
+          "score": 0.39900538325309753,
+          "connected_ground_fraction": 0.635098814229249,
+          "threshold_observed": true,
+          "passage_verified": false,
+          "surround_structure": [
+            0.7912240184757505,
+            0.7656219199684605,
+            0.9470770232861098
+          ],
+          "opening_fraction": 0.24626825164196928
+        },
+        {
+          "box": [
+            128.1162109375,
+            254.274169921875,
+            281.5167541503906,
+            441.8296813964844
+          ],
+          "threshold_box": [
+            128,
+            436,
+            282,
+            476
+          ],
+          "score": 0.3286702334880829,
+          "connected_ground_fraction": 0.6805194805194805,
+          "threshold_observed": true,
+          "passage_verified": false,
+          "surround_structure": [
+            0.7915013227513228,
+            0.9051132463967055,
+            0.6111873713109128
+          ],
+          "opening_fraction": 0.6194390715667312
+        }
+      ],
+      "rejected_doorways": [],
+      "look_hint": "left",
+      "building_visible": true,
+      "executable": false,
+      "world_coordinates": null,
+      "entrance_verified": false,
+      "ground_measurement": {
+        "ground_pixels": 10188,
+        "texture_features": 63,
+        "minimum_features": 40,
+        "look_hint": "left",
+        "look_basis": "near_ground_patch",
+        "translation_authorized": false
+      }
+    },
+    "saved_native": {
+      "quest_id": 90896,
+      "map_id": 2451,
+      "destination_map": 2451,
+      "destination": [
+        0.28929928712776865,
+        0.3072054931693012
+      ],
+      "position": [
+        0.28079536513840214,
+        0.32080871659156474
+      ],
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "height": 0.0,
+      "phase": 2,
+      "flags": 6915,
+      "sequence": 53,
+      "flight_mount_active": false,
+      "interact_verified": true,
+      "descent_key": "x",
+      "sky_pitch_key": "0",
+      "sky_dismount_key": "z",
+      "sky_ascent_key": null,
+      "sky_halt_key": null,
+      "task": 33,
+      "npc_range_supported": true,
+      "mount_button": null,
+      "mount_button_key": null,
+      "objective_action": 1,
+      "objective_target": 0,
+      "objective_cursor": null,
+      "round_stage": 2,
+      "round_advance": false,
+      "round_blocked": false,
+      "round_immediate": false,
+      "objective_pin": false,
+      "minimap": null,
+      "corpse_lootable": null,
+      "fetch_ready": true,
+      "precise_object": false,
+      "apr_waypoint": false,
+      "strafe_verified": true,
+      "last_target_verified": true,
+      "recovery": {
+        "life": 1,
+        "corpse": null,
+        "button": null,
+        "ui_aspect": 0.0,
+        "dialog": false,
+        "hovered": false,
+        "pet": 2,
+        "pet_expected": true,
+        "follow": true,
+        "summon": true,
+        "revive": true,
+        "buff_missing": false,
+        "buff_unverified": false,
+        "walk_verified": null,
+        "facing": null,
+        "corpse_source": 0,
+        "corpse_distance": null,
+        "pet_health": null,
+        "mend_verified": true,
+        "mend_active": false,
+        "mend_unusable": false,
+        "mend_epoch": 0,
+        "patrol_id": 0,
+        "patrol_danger": 0,
+        "attacker_count": 0,
+        "attacker_cursor": null,
+        "attacker_hovered": false,
+        "attacker_scan_supported": false
+      },
+      "loot_epoch": 0,
+      "sweep_ready": true,
+      "search_area": null,
+      "sky_flight": null,
+      "camera_restore_available": true,
+      "camera_zoom_close": false,
+      "camera_epoch": 0,
+      "objective_index": 1,
+      "objectives_finished": false,
+      "objective_progress": [
+        0,
+        1
+      ],
+      "objective_resource": false,
+      "suspend_ready": true,
+      "suspend_epoch": 2,
+      "current_suspended": false,
+      "protocol_version": 15,
+      "camera": {
+        "zoom": 32.0,
+        "view": 4,
+        "scene": 1,
+        "applied": 14,
+        "request": 2,
+        "result": 2,
+        "paused": false,
+        "calibrated": false
+      },
+      "addon_build": 272,
+      "probe_camera_available": true,
+      "overhead_camera_available": true,
+      "calibration_orbit_available": true,
+      "calibration_orbit_active": false,
+      "round_pending_count": 0,
+      "extension_schema": 6
+    }
+  },
+  {
+    "source": "/Volumes/Mac SSD1/projects/wow-agnet/data/terrain/building-30d754ecc6e44081a1791a6f69f49148/image.png",
+    "source_sha256": "f17863e7082399275f92f2dc9b1129fec1f030c5f07062b64ebe10d5c19fc428",
+    "names": {
+      "0": "wall",
+      "1": "building",
+      "2": "sky",
+      "3": "floor",
+      "4": "tree",
+      "5": "ceiling",
+      "6": "road",
+      "7": "bed ",
+      "8": "windowpane",
+      "9": "grass",
+      "10": "cabinet",
+      "11": "sidewalk",
+      "12": "person",
+      "13": "earth",
+      "14": "door",
+      "15": "table",
+      "16": "mountain",
+      "17": "plant",
+      "18": "curtain",
+      "19": "chair",
+      "20": "car",
+      "21": "water",
+      "22": "painting",
+      "23": "sofa",
+      "24": "shelf",
+      "25": "house",
+      "26": "sea",
+      "27": "mirror",
+      "28": "rug",
+      "29": "field",
+      "30": "armchair",
+      "31": "seat",
+      "32": "fence",
+      "33": "desk",
+      "34": "rock",
+      "35": "wardrobe",
+      "36": "lamp",
+      "37": "bathtub",
+      "38": "railing",
+      "39": "cushion",
+      "40": "base",
+      "41": "box",
+      "42": "column",
+      "43": "signboard",
+      "44": "chest of drawers",
+      "45": "counter",
+      "46": "sand",
+      "47": "sink",
+      "48": "skyscraper",
+      "49": "fireplace",
+      "50": "refrigerator",
+      "51": "grandstand",
+      "52": "path",
+      "53": "stairs",
+      "54": "runway",
+      "55": "case",
+      "56": "pool table",
+      "57": "pillow",
+      "58": "screen door",
+      "59": "stairway",
+      "60": "river",
+      "61": "bridge",
+      "62": "bookcase",
+      "63": "blind",
+      "64": "coffee table",
+      "65": "toilet",
+      "66": "flower",
+      "67": "book",
+      "68": "hill",
+      "69": "bench",
+      "70": "countertop",
+      "71": "stove",
+      "72": "palm",
+      "73": "kitchen island",
+      "74": "computer",
+      "75": "swivel chair",
+      "76": "boat",
+      "77": "bar",
+      "78": "arcade machine",
+      "79": "hovel",
+      "80": "bus",
+      "81": "towel",
+      "82": "light",
+      "83": "truck",
+      "84": "tower",
+      "85": "chandelier",
+      "86": "awning",
+      "87": "streetlight",
+      "88": "booth",
+      "89": "television receiver",
+      "90": "airplane",
+      "91": "dirt track",
+      "92": "apparel",
+      "93": "pole",
+      "94": "land",
+      "95": "bannister",
+      "96": "escalator",
+      "97": "ottoman",
+      "98": "bottle",
+      "99": "buffet",
+      "100": "poster",
+      "101": "stage",
+      "102": "van",
+      "103": "ship",
+      "104": "fountain",
+      "105": "conveyer belt",
+      "106": "canopy",
+      "107": "washer",
+      "108": "plaything",
+      "109": "swimming pool",
+      "110": "stool",
+      "111": "barrel",
+      "112": "basket",
+      "113": "waterfall",
+      "114": "tent",
+      "115": "bag",
+      "116": "minibike",
+      "117": "cradle",
+      "118": "oven",
+      "119": "ball",
+      "120": "food",
+      "121": "step",
+      "122": "tank",
+      "123": "trade name",
+      "124": "microwave",
+      "125": "pot",
+      "126": "animal",
+      "127": "bicycle",
+      "128": "lake",
+      "129": "dishwasher",
+      "130": "screen",
+      "131": "blanket",
+      "132": "sculpture",
+      "133": "hood",
+      "134": "sconce",
+      "135": "vase",
+      "136": "traffic light",
+      "137": "tray",
+      "138": "ashcan",
+      "139": "fan",
+      "140": "pier",
+      "141": "crt screen",
+      "142": "plate",
+      "143": "monitor",
+      "144": "bulletin board",
+      "145": "shower",
+      "146": "radiator",
+      "147": "glass",
+      "148": "clock",
+      "149": "flag"
+    },
+    "instances": [
+      {
+        "box": [
+          165.66616821289062,
+          269.42816162109375,
+          272.4021301269531,
+          373.7391357421875
+        ],
+        "label": "stairs",
+        "detection_score": 0.4620217978954315,
+        "mask_score": 0.973205029964447,
+        "candidate_scores": [
+          0.8448308110237122,
+          0.966956615447998,
+          0.973205029964447
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          4.028072357177734,
+          4.127933979034424,
+          1007.4949340820312,
+          580.1600341796875
+        ],
+        "label": "building",
+        "detection_score": 0.39577651023864746,
+        "mask_score": 0.8172661066055298,
+        "candidate_scores": [
+          0.29973331093788147,
+          0.8172661066055298,
+          0.7036064267158508
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          19.700057983398438,
+          194.34303283691406,
+          363.24078369140625,
+          453.28143310546875
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.34744712710380554,
+        "mask_score": 0.8921235203742981,
+        "candidate_scores": [
+          0.8698968291282654,
+          0.8793820142745972,
+          0.8921235203742981
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          156.79568481445312,
+          266.2542419433594,
+          279.0615234375,
+          439.1137390136719
+        ],
+        "label": "stairs",
+        "detection_score": 0.32339319586753845,
+        "mask_score": 0.9633427858352661,
+        "candidate_scores": [
+          0.7418010830879211,
+          0.9449639916419983,
+          0.9633427858352661
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          128.51148986816406,
+          254.1969451904297,
+          281.7469482421875,
+          442.09307861328125
+        ],
+        "label": "open doorway entrance",
+        "detection_score": 0.3197067081928253,
+        "mask_score": 0.9311217665672302,
+        "candidate_scores": [
+          0.3614285886287689,
+          0.9131150245666504,
+          0.9311217665672302
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          13.825728416442871,
+          191.28958129882812,
+          370.4533386230469,
+          581.26318359375
+        ],
+        "label": "open doorway",
+        "detection_score": 0.3159934878349304,
+        "mask_score": 0.8696437478065491,
+        "candidate_scores": [
+          0.8696437478065491,
+          0.5872636437416077,
+          0.8256908059120178
+        ],
+        "selected": 0
+      },
+      {
+        "box": [
+          1.5284459590911865,
+          1.1999624967575073,
+          549.5927124023438,
+          128.26223754882812
+        ],
+        "label": "roof",
+        "detection_score": 0.29121530055999756,
+        "mask_score": 0.9452850818634033,
+        "candidate_scores": [
+          0.9266944527626038,
+          0.8802104592323303,
+          0.9452850818634033
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          452.064697265625,
+          273.61505126953125,
+          1003.9026489257812,
+          517.4246215820312
+        ],
+        "label": "grass",
+        "detection_score": 0.2741626501083374,
+        "mask_score": 0.7442498803138733,
+        "candidate_scores": [
+          0.15581102669239044,
+          0.7442498803138733,
+          0.666344165802002
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          446.7474670410156,
+          271.1783447265625,
+          1009.51171875,
+          581.606689453125
+        ],
+        "label": "grass",
+        "detection_score": 0.272930383682251,
+        "mask_score": 0.9099891185760498,
+        "candidate_scores": [
+          0.3184126913547516,
+          0.9099891185760498,
+          0.888851523399353
+        ],
+        "selected": 1
+      },
+      {
+        "box": [
+          1.4659695625305176,
+          1.0739455223083496,
+          382.4778137207031,
+          125.4880142211914
+        ],
+        "label": "roof",
+        "detection_score": 0.2567240595817566,
+        "mask_score": 0.9802647829055786,
+        "candidate_scores": [
+          0.9704501628875732,
+          0.872723400592804,
+          0.9802647829055786
+        ],
+        "selected": 2
+      },
+      {
+        "box": [
+          18.367666244506836,
+          191.16001892089844,
+          366.9020690917969,
+          502.55914306640625
+        ],
+        "label": "open",
+        "detection_score": 0.25318583846092224,
+        "mask_score": 0.9210243821144104,
+        "candidate_scores": [
+          0.9210243821144104,
+          0.7964137196540833,
+          0.8862510323524475
+        ],
+        "selected": 0
+      }
+    ],
+    "camera_view": 4,
+    "scene": {
+      "schema": 1,
+      "surface": "unknown",
+      "support": {
+        "exterior": 0.003455855932024265,
+        "floor": 0.08917587875969647,
+        "structure": 0.0952526896493416,
+        "water": 0.0
+      },
+      "surface_evidence": {
+        "schema": 1,
+        "camera_view": 4,
+        "visible_surface_fraction": 0.18788442434106234,
+        "exterior_share_of_visible_surface": 0.018393520080998985,
+        "connected_patch_fraction": 0.002451861089387246,
+        "nearby_patch_fraction": 0.0,
+        "nearby_structure_fraction": 0.03066236856243764,
+        "nearby_water_fraction": 0.0,
+        "basis": "unconfirmed",
+        "occlusion_requirements": {
+          "overhead": true,
+          "visible_ground": false,
+          "surface_agreement": false,
+          "connected_patch": false,
+          "nearby_patch": false,
+          "no_surface_conflict": true
+        }
+      },
+      "doorways": [
+        {
+          "box": [
+            19.700057983398438,
+            194.34303283691406,
+            363.24078369140625,
+            453.28143310546875
+          ],
+          "threshold_box": [
+            20,
+            447,
+            363,
+            500
+          ],
+          "score": 0.34744712710380554,
+          "connected_ground_fraction": 0.7448154463941911,
+          "threshold_observed": true,
+          "passage_verified": false,
+          "surround_structure": [
+            0.7067307692307693,
+            0.5395752895752896,
+            0.7758939063286889
+          ],
+          "opening_fraction": 0.30267793824645134
+        },
+        {
+          "box": [
+            128.51148986816406,
+            254.1969451904297,
+            281.7469482421875,
+            442.09307861328125
+          ],
+          "threshold_box": [
+            129,
+            436,
+            282,
+            476
+          ],
+          "score": 0.3197067081928253,
+          "connected_ground_fraction": 0.8602941176470589,
+          "threshold_observed": true,
+          "passage_verified": false,
+          "surround_structure": [
+            0.6269102990033223,
+            0.6336650652024708,
+            0.3361358956760467
+          ],
+          "opening_fraction": 0.6617299402030316
+        }
+      ],
+      "rejected_doorways": [],
+      "look_hint": "left",
+      "building_visible": true,
+      "executable": false,
+      "world_coordinates": null,
+      "entrance_verified": false,
+      "ground_measurement": {
+        "ground_pixels": 1930,
+        "texture_features": 23,
+        "minimum_features": 40,
+        "look_hint": "left",
+        "look_basis": "near_ground_patch",
+        "translation_authorized": false
+      }
+    },
+    "saved_native": {
+      "quest_id": 90896,
+      "map_id": 2451,
+      "destination_map": 2451,
+      "destination": [
+        0.28929928712776865,
+        0.3072054931693012
+      ],
+      "position": [
+        0.28079536513840214,
+        0.32080871659156474
+      ],
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "height": 0.0,
+      "phase": 2,
+      "flags": 6915,
+      "sequence": 85,
+      "flight_mount_active": false,
+      "interact_verified": true,
+      "descent_key": "x",
+      "sky_pitch_key": "0",
+      "sky_dismount_key": "z",
+      "sky_ascent_key": null,
+      "sky_halt_key": null,
+      "task": 33,
+      "npc_range_supported": true,
+      "mount_button": null,
+      "mount_button_key": null,
+      "objective_action": 1,
+      "objective_target": 0,
+      "objective_cursor": null,
+      "round_stage": 2,
+      "round_advance": false,
+      "round_blocked": false,
+      "round_immediate": false,
+      "objective_pin": false,
+      "minimap": null,
+      "corpse_lootable": null,
+      "fetch_ready": true,
+      "precise_object": false,
+      "apr_waypoint": false,
+      "strafe_verified": true,
+      "last_target_verified": true,
+      "recovery": {
+        "life": 1,
+        "corpse": null,
+        "button": null,
+        "ui_aspect": 0.0,
+        "dialog": false,
+        "hovered": false,
+        "pet": 2,
+        "pet_expected": true,
+        "follow": true,
+        "summon": true,
+        "revive": true,
+        "buff_missing": false,
+        "buff_unverified": false,
+        "walk_verified": null,
+        "facing": null,
+        "corpse_source": 0,
+        "corpse_distance": null,
+        "pet_health": null,
+        "mend_verified": true,
+        "mend_active": false,
+        "mend_unusable": false,
+        "mend_epoch": 0,
+        "patrol_id": 0,
+        "patrol_danger": 0,
+        "attacker_count": 0,
+        "attacker_cursor": null,
+        "attacker_hovered": false,
+        "attacker_scan_supported": false
+      },
+      "loot_epoch": 0,
+      "sweep_ready": true,
+      "search_area": null,
+      "sky_flight": null,
+      "camera_restore_available": true,
+      "camera_zoom_close": false,
+      "camera_epoch": 0,
+      "objective_index": 1,
+      "objectives_finished": false,
+      "objective_progress": [
+        0,
+        1
+      ],
+      "objective_resource": false,
+      "suspend_ready": true,
+      "suspend_epoch": 2,
+      "current_suspended": false,
+      "protocol_version": 15,
+      "camera": {
+        "zoom": 32.0,
+        "view": 4,
+        "scene": 1,
+        "applied": 14,
+        "request": 2,
+        "result": 2,
+        "paused": false,
+        "calibrated": false
+      },
+      "addon_build": 272,
+      "probe_camera_available": true,
+      "overhead_camera_available": true,
+      "calibration_orbit_available": true,
+      "calibration_orbit_active": false,
+      "round_pending_count": 0,
+      "extension_schema": 6
+    }
+  }
+]

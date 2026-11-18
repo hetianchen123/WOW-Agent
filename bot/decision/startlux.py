@@ -4,10 +4,15 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import subprocess
 import time
+from threading import Event, Lock
 from concurrent.futures import Future, ThreadPoolExecutor
 from urllib.error import URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+from ..core.paths import DATA_DIR
 
 REQUEST_TIMEOUT_S = 8.0
 DECISION_WAIT_S = 2 * REQUEST_TIMEOUT_S + 2
@@ -21,16 +26,84 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class LocalStartLux:
-    def __init__(self, port: int = 8090, timeout: float = REQUEST_TIMEOUT_S):
+    def __init__(self, port: int = 8090, timeout: float = REQUEST_TIMEOUT_S, *, autostart=False):
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("StartLux 本地端口无效")
         self.url = f"http://127.0.0.1:{port}/v1/systemone"
         self.timeout = timeout
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
+        self.port, self.autostart = port, autostart
+        self.server = None
+        self.closed, self.service_lock = Event(), Lock()
+        self.start_failed = False
+
+    def service_ready(self):
+        try:
+            with self.opener.open(f"http://127.0.0.1:{self.port}/health", timeout=.5) as response:
+                health = json.load(response)
+        except URLError:
+            return False
+        if not str(health.get("model", "")).startswith("StartLux-Decision"):
+            raise ValueError("本地端口的服务不是 StartLux")
+        return health.get("status") == "ok"
+
+    def ensure_service(self):
+        """Called in the decision worker only; ordinary navigation never waits."""
+        if self.closed.is_set():
+            raise ValueError("StartLux client closed")
+        if self.service_ready():
+            return
+        with self.service_lock:
+            if self.closed.is_set() or self.start_failed:
+                raise ValueError("StartLux startup unavailable for this session")
+            if self.server is None:
+                executable = DATA_DIR / "startlux/.venv/bin/startlux-decide"
+                if not executable.is_file():
+                    raise ValueError("StartLux executable missing")
+                with (DATA_DIR / "startlux/server.log").open("a") as output:
+                    self.server = subprocess.Popen([
+                        str(executable), "serve", "--backend", "mlx", "--model", str(DATA_DIR / "startlux/model"),
+                        "--name", "StartLux-Decision-v1.1-9B-Instant-MLX-4bit",
+                        "--host", "127.0.0.1", "--port", str(self.port),
+                    ], stdout=output, stderr=output, stdin=subprocess.DEVNULL,
+                       env={**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+                            "HF_HUB_DISABLE_TELEMETRY": "1"})
+                log.info("startlux_service_starting port=%s pid=%s", self.port, self.server.pid)
+        deadline = time.monotonic() + 15
+        while not self.closed.is_set():
+            if self.service_ready():
+                log.info("startlux_service_ready port=%s", self.port)
+                return
+            server = self.server
+            if server is None:
+                raise ValueError("StartLux startup cancelled")
+            if server.poll() is not None or time.monotonic() >= deadline:
+                self.start_failed = True
+                self.stop_owned_service()
+                raise RuntimeError("StartLux 未在 15 秒内就绪，详见 data/startlux/server.log")
+            self.closed.wait(.25)
+        raise ValueError("StartLux startup cancelled")
+
+    def stop_owned_service(self):
+        with self.service_lock:
+            server, self.server = self.server, None
+        if server is not None and server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=2)
+
+    def close(self):
+        self.closed.set()
+        self.stop_owned_service()
 
     def decide(self, state: dict, criteria: dict[str, str], *, instructions: str | None = None) -> dict:
         if state.get("observation_age_ms", 0) > OBSERVATION_MAX_AGE_MS:
             return {"recommendation": None, "reason": "stale_state"}
+        if self.autostart:
+            self.ensure_service()
         request = Request(self.url, data=json.dumps({
             "state": state,
             "questions": {"action": {
@@ -119,3 +192,5 @@ class QuestPlanner:
         if self.future:
             self.future.cancel()
         self.pool.shutdown(wait=False, cancel_futures=True)
+        if hasattr(self.client, "close"):
+            self.client.close()

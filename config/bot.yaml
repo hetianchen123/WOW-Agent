@@ -28,6 +28,26 @@ input:
 navigation:
   facing_convention: ccw_west   # 转向镜像时改 cw_east
 
+# 历史大模型路线分支关闭；当前采用分割地图与本地搜索，先完成测量标定。
+route_planner:
+  enabled: false
+  base_url: https://api.deepseek.com
+  model: deepseek-flash
+  credentials_file: deepseek/apikey.txt
+  request_timeout_s: 12
+  max_requests: 3
+  staged_grounding: true
+  ground_pitch_deg: 20
+  overhead_observation: true  # Requires the explicit user-saved view 4; image review only until calibrated.
+
+# 本地分割入口自动测量地面坐标并生成 NPC 搜索区域，不需要人工标定包。
+segmented_navigation:
+  enabled: true
+  building_access: true
+  models: data/segmentation/models.json
+  checkpoint: data/segmentation/sam2.1_hiera_large.pt
+  device: cpu
+
 fishing:
   key_cast: "1"
   key_interact: "f"

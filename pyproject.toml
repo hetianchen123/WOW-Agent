@@ -16,7 +16,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "pillow>=11",
+    "pytest>=8.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -33,6 +36,9 @@ packages = [
     "bot.decision",
     "bot.ops",
 ]
+
+[tool.setuptools.package-data]
+"bot.perception" = ["assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

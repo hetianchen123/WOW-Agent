@@ -10,6 +10,8 @@ function methods:SetText(value)
     if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self) end
 end
 function methods:GetText() return self.text or "" end
+function methods:SetChecked(value) self.checked = value end
+function methods:GetChecked() return self.checked end
 function methods:SetShown(shown)
     local changed = self.shown ~= shown
     self.shown = shown
@@ -200,3 +202,25 @@ click("启用游戏互动键")
 assert(softTargetInteract == "3" and button("停用游戏互动键"))
 click("停用游戏互动键")
 assert(softTargetInteract == "1" and button("启用游戏互动键"))
+
+local applied, restored, options = 0, 0, {bars=true, chat=false, tracker=false, portraits=false}
+WowAgent.VisualUI = {
+    GetOptions = function() return options end,
+    Status = function() return {active=applied>restored, pendingRestore=false} end,
+    SetOption = function(key, value) options[key]=value end,
+    Apply = function() applied=applied+1; return true end,
+    Restore = function() restored=applied; return true end,
+}
+click("视觉界面")
+for _, widget in ipairs(frames) do
+    if widget.kind == "CheckButton" and widget.y == -103 then
+        widget:SetChecked(true); widget.scripts.OnClick(widget)
+    end
+end
+assert(options.chat and options.bars)
+click("隐藏所选 UI")
+assert(applied==1 and not main:IsShown())
+click("WowAgent")
+click("视觉界面")
+click("恢复 UI")
+assert(restored==1 and main:IsShown())

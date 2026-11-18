@@ -130,10 +130,23 @@ inRange = true
 frames[1].scripts.OnUpdate(nil, .2)
 assert(rows[0] % 4 == 1)
 local beforeRangeError = rows[112]
+function GetTime() return 10 end
+SPELL_FAILED_LINE_OF_SIGHT = "目标不在视野中"
+function UnitHealth(unit) return unit == "target" and 72 or 100 end
+frames[2].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, SPELL_FAILED_LINE_OF_SIGHT)
 C_Spell.IsSpellInRange = function() error("range unavailable") end
 C_NamePlate = {GetNamePlateForUnit = function() error("restricted nameplate must not be measured") end}
 frames[1].scripts.OnUpdate(nil, .2)
 assert(rows[96] == 244669 and rows[112] ~= beforeRangeError)
+assert(rows[-16] % 256 == 73 + 128)
+C_AssistedCombat.GetRotationSpells = function() return {257284} end
+frames[2].scripts.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "pet", "Cast-0-1", 257284)
+frames[2].scripts.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "Cast-0-2", 1459)
+frames[1].scripts.OnUpdate(nil, .2)
+assert(rows[-32] % 128 == 0)
+frames[2].scripts.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "Cast-0-3", 257284)
+frames[1].scripts.OnUpdate(nil, .2)
+assert(rows[-32] % 128 == 1 and math.floor(rows[-32] / 128) == math.floor(rows[112] / 128))
 C_NamePlate = nil
 C_AssistedCombat.GetNextCastSpell, C_Spell.IsSpellInRange = nil, nil
 frames[2].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, "距离太远")
@@ -155,6 +168,7 @@ assert(math.floor(rows[0] / 4) % 128 == foughtEpoch + 1)
 UnitIsDead = originalDead
 frames[1].scripts.OnUpdate(nil, .2)
 assert(math.floor(rows[16] / 65536) % 8 == 0)
+assert(rows[-16] % 256 == 73)
 GetBindingAction = previousBinding
 UnitThreatSituation = function(unit, target)
     assert(target == "target")
@@ -478,3 +492,33 @@ assert(not failed and reason == "macro_pending" and #macros == count)
 indexed = true
 assert(WowAgent.LayoutSupport.WriteMacro("WATLand", expected) == macroIDs.WATLand)
 assert(#macros == count and macro("WATLand") == expected)
+
+-- A remaining attacker can have the same NPC ID as the defeated target.
+local hover = "Creature-0-0-0-0-244669-02"
+UnitGUID = function(unit)
+    return ({target = "Creature-0-0-0-0-244669-01", nameplate1 = "Creature-0-0-0-0-244669-01",
+        nameplate2 = hover, nameplate3 = "Creature-0-0-0-0-244669-03", mouseover = hover})[unit]
+end
+UnitCanAttack = function() return true end
+UnitIsDead = function(unit) return unit == "target" or unit == "nameplate1" end
+UnitIsUnit = function(unit, other) return other == "pet" and (unit == "nameplate2target" or unit == "mouseovertarget") end
+UnitThreatSituation = function() error("restricted") end
+UIParent.GetEffectiveScale = function() return 1 end
+UIParent.GetWidth = function() return 1000 end
+UIParent.GetHeight = function() return 500 end
+UIParent.GetLeft = function() return 0 end
+UIParent.GetTop = function() return 500 end
+local function plate(unit)
+    return {GetUnit = function() return unit end, IsVisible = function() return true end,
+        GetCenter = function() return 400, 300 end, GetEffectiveScale = function() return 1 end}
+end
+C_NamePlate = {GetNamePlates = function(includeForbidden)
+    assert(includeForbidden == false)
+    return {plate("nameplate1"), plate("nameplate2"), plate("nameplate2"), plate("nameplate3"),
+        {IsForbidden = function() return true end, GetUnit = function() error("forbidden plate") end}}
+end}
+local point, flags = WowAgent.CombatHandoff()
+assert(point == 409 * 1024 + 409 and flags == 17)
+UnitIsUnit = function() return false end
+point, flags = WowAgent.CombatHandoff()
+assert(point == 0 and flags == 0)

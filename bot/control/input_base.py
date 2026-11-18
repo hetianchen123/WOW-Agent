@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
 import time
 from typing import Optional, Set
@@ -42,8 +43,21 @@ class InputBase:
 
     def tap(self, key: str, hold_s: float = 0.03) -> None:
         self.down(key)
-        time.sleep(jitter(hold_s) if self.key_jitter else hold_s)
-        self.up(key)
+        try:
+            time.sleep(jitter(hold_s) if self.key_jitter else hold_s)
+        finally:
+            self.up(key)
+
+    def tap_precise(self, key: str, hold_s: float) -> None:
+        """Measured navigation pulses do not add artificial duration jitter."""
+        limit = .12 if key in {'w', 's', 'q', 'e', 'left', 'right'} else .07
+        if not 0 < hold_s <= limit:
+            raise ValueError('precise_pulse_duration_invalid')
+        self.down(key)
+        try:
+            time.sleep(hold_s)
+        finally:
+            self.up(key)
 
     def press_for(self, key: str, seconds: float) -> None:
         self.down(key)
@@ -90,9 +104,19 @@ class InputBase:
             return
         cur = self.position()
         self._mouse_down_raw("right")
-        self._move_raw(int(cur[0] + dx_px), int(cur[1]))
-        time.sleep(jitter(0.03) if self.key_jitter else 0.03)
-        self._mouse_up_raw("right")
+        self._held_buttons.add("right")
+        try:
+            # Let the game enter mouse-look before sending relative motion.
+            # One move in the same frame as button-down can be discarded.
+            time.sleep(.06)
+            steps = min(6, max(2, math.ceil(abs(dx_px)/40)))
+            for step in range(1, steps+1):
+                self._move_raw(round(cur[0] + dx_px*step/steps), int(cur[1]))
+                time.sleep(.015)
+            time.sleep(.03)
+        finally:
+            self._mouse_up_raw("right")
+            self._held_buttons.discard("right")
 
     def position(self) -> tuple[int, int]:  # pragma: no cover - abstract
         raise NotImplementedError

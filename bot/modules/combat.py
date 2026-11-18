@@ -1,6 +1,9 @@
 """Bounded use of a client-verified action against one selected creature."""
 from __future__ import annotations
 
+from ..control.approach import ApproachAttempt, ApproachGoal, ApproachObservation, ActionState
+from ..perception.travel_channel import TravelFlags
+
 import math
 import time
 
@@ -8,14 +11,14 @@ from ..control.navigation import heading_error
 from ..data.combat import client_edition
 from ..perception.combat_channel import CombatSample
 
-TURN_OFFSETS = (math.pi, math.pi / 2, -math.pi / 2)
+FACING_PROBE_ANGLE = math.radians(24)
 SEARCH_ARC = tuple(map(math.radians, (0, 20, 40, 60, 80, 60, 40, 20, 0, -20, -40, -60, -80)))
 TURN_INTERVAL = .45
 TURN_SETTLE = .50
 
 
 class Fight:
-    def __init__(self, target_id: int, *, approach=False):
+    def __init__(self, target_id: int, *, approach=False, defense=False):
         self.target_id = target_id
         self.identity = None
         self.state_epoch = None
@@ -25,17 +28,26 @@ class Fight:
         self.last_action = float("-inf")
         self.presses = 0
         self.last_facing_error = None
-        self.turn_origin: float | None = None
         self.turn_goal: float | None = None
         self.turn_deadline = 0.0
-        self.turn_attempts = 0
+        self.facing_probed = False
         self.turn_at = float("-inf")
         self.approach = approach
+        self.defense = defense
         self.approach_at = float("-inf")
         self.approach_deadline: float | None = None
+        self.approach_attempt = None
         self.out_of_range_at = float("-inf")
+        self.last_health = None
+        self.cast_epoch = None
+        self.pending_action_at = None
+        self.no_receipts = 0
+        self.last_damage_at = None
+        self.first_output_at = None
+        self.last_credit_at = None
+        self.receipt_at = None
 
-    def step(self, now: float, sample: CombatSample | None) -> tuple[str, str | None]:
+    def step(self, now: float, sample: CombatSample | None, navigation=None) -> tuple[str, str | None]:
         if sample is None:
             return "telemetry_missing", None
         if sample.sequence == self.last_sequence:
@@ -63,13 +75,33 @@ class Fight:
         self.identity, self.state_epoch, self.key = sample.identity, sample.state_epoch, sample.key
         if starting:
             self.last_facing_error = sample.facing_error
+            self.last_health, self.cast_epoch = sample.target_health, sample.cast_epoch
+            self.receipt_at = now if sample.cast_epoch is not None else None
             return "waiting", None
+        if self.receipt_at is not None and sample.cast_epoch is None:
+            return ("telemetry_stale" if now - self.receipt_at > .75 else "waiting"), None
+        if sample.cast_epoch is not None:
+            self.receipt_at = now
+        if sample.cast_epoch is not None and self.cast_epoch != sample.cast_epoch:
+            if self.cast_epoch is not None and self.pending_action_at is not None:
+                self.pending_action_at, self.no_receipts = None, 0
+            self.cast_epoch = sample.cast_epoch
+        if sample.target_health is not None:
+            if self.last_health is not None and sample.target_health < self.last_health:
+                self.last_damage_at = now
+                self.pending_action_at, self.no_receipts = None, 0
+            self.last_health = sample.target_health
+        if self.presses and sample.line_of_sight_blocked:
+            self.pending_action_at = None
+            return "line_of_sight_blocked", None
         if self.turn_goal is not None or (sample.facing_error is not None
                                           and sample.facing_error != self.last_facing_error):
+            self.pending_action_at = None
             turn = self.correct_facing(now, sample)
             if turn is not None:
                 return turn
         if sample.in_range is False:
+            self.pending_action_at = None
             self.out_of_range_at = now
             if not self.approach:
                 return "attack_out_of_range", None
@@ -77,18 +109,51 @@ class Fight:
                 self.approach_deadline = now + 10
             if now >= self.approach_deadline:
                 return "approach_timeout", None
-            if now - self.approach_at < .26:
-                return "waiting", None
+            identity = (sample.target_id, sample.state_epoch, navigation.map_id if navigation else None)
+            safe = navigation is None or (bool(navigation.flags & TravelFlags.KEYS_VERIFIED)
+                and not navigation.flags & (TravelFlags.FLYING | TravelFlags.FALLING | TravelFlags.SWIMMING
+                                             | TravelFlags.MOUNTED | TravelFlags.CASTING))
+            if not safe:
+                return "unsafe_player_state", None
+            observation = ApproachObservation(identity, navigation.sequence if navigation else sample.sequence,
+                sample.in_range, safe, navigation.position if navigation else None,
+                navigation.world_size if navigation else None)
+            if self.approach_attempt is not None:
+                result = self.approach_attempt.poll(now, observation)
+                if result.state == ActionState.WAITING:
+                    return "waiting", None
+                if result.state != ActionState.CONFIRMED:
+                    if result.reason in {"movement_evidence_missing", "displacement_unexpected", "clock_changed"}:
+                        return "unsafe_player_state", None
+                    return ("telemetry_stale" if result.reason == "feedback_stale" else "approach_blocked"), None
+            self.approach_attempt = ApproachAttempt(ApproachGoal("combat", identity, pulse_s=.14), now, observation)
             self.approach_at = now
             return "approach", "w"
         if sample.in_range is True:
             self.approach_deadline = None
+            self.approach_attempt = None
         elif now - self.out_of_range_at < .6:
             return "waiting", None
+        if sample.cast_epoch is not None:
+            last_progress = max((stamp for stamp in (self.first_output_at, self.last_damage_at, self.last_credit_at)
+                                 if stamp is not None), default=now)
+            if now - last_progress >= 12:
+                return "no_progress", None
+            if self.pending_action_at is not None:
+                if now - self.pending_action_at < 1.6:
+                    return "waiting", None
+                self.no_receipts += 1
+                self.pending_action_at = None
+                if self.no_receipts >= 3:
+                    return "no_cast_or_damage_receipt", None
         if now - self.last_action < .8:
             return "waiting", None
         self.last_action = now
         self.presses += 1
+        if sample.cast_epoch is not None:
+            self.pending_action_at = now
+            if self.first_output_at is None:
+                self.first_output_at = now
         return "action", str(sample.key)
 
     def correct_facing(self, now: float, sample: CombatSample) -> tuple[str, str | None] | None:
@@ -101,13 +166,11 @@ class Fight:
         if sample.facing_error is None or sample.facing is None or not sample.turn_verified:
             return "facing_feedback_unavailable", None
         if self.turn_goal is None:
-            if self.turn_attempts >= len(TURN_OFFSETS):
+            if self.facing_probed:
                 return "facing_unconfirmed", None
-            if self.turn_origin is None:
-                self.turn_origin = sample.facing
-            self.turn_goal = (self.turn_origin + TURN_OFFSETS[self.turn_attempts]) % math.tau
-            self.turn_attempts += 1
-            self.turn_deadline = now + 12
+            self.turn_goal = (sample.facing + FACING_PROBE_ANGLE) % math.tau
+            self.facing_probed = True
+            self.turn_deadline = now + 3
         error = heading_error(sample.facing, self.turn_goal)
         if abs(error) <= math.radians(15):
             if now - self.turn_at < TURN_SETTLE:
@@ -128,7 +191,7 @@ def tap_combat_key(backend, status, key):
     elif status == "search_turn":
         backend.tap(key, hold_s=.06)
     elif status == "approach":
-        backend.tap(key, hold_s=.18)
+        backend.tap(key, hold_s=.14)
     else:
         backend.tap(key)
 
@@ -136,11 +199,15 @@ def tap_combat_key(backend, status, key):
 class QuestHunt:
     """Select quest creatures at a waypoint and wait for quest credit."""
 
-    def __init__(self, targets: frozenset[int]):
+    def __init__(self, targets: frozenset[int], *, resource: bool = False):
         self.targets = targets
+        self.resource = resource
+        self.uncredited_kills = 0
+        self.resource_best = -1
         self.fight: Fight | None = None
         self.started_at = 0.0
         self.baseline = 0
+        self.observed_progress = 0
         self.credit_deadline: float | None = None
         self.search_at = float("-inf")
         self.searches = 0
@@ -150,6 +217,11 @@ class QuestHunt:
         self.search_heading: float | None = None
         self.search_turn_at = float("-inf")
         self.search_sector_at: float | None = None
+
+    def reset_search(self, now=float("-inf")):
+        self.searches, self.search_at = 0, now
+        self.search_heading = self.search_sector_at = None
+        self.search_turn_at = float("-inf")
 
     def search_target(self, now, sample):
         if now - self.search_at < 1:
@@ -181,6 +253,7 @@ class QuestHunt:
 
     def step(
         self, now: float, sample: CombatSample | None, progress: int, in_combat: bool, verified_target: int = 0,
+        navigation=None,
     ) -> tuple[str, str | None]:
         if sample is None:
             return "telemetry_missing", None
@@ -198,20 +271,30 @@ class QuestHunt:
             return "action_binding_changed", None
         self.binding = binding
 
+        if self.resource and progress > self.resource_best:
+            self.resource_best, self.uncredited_kills = progress, 0
         if self.credit_deadline is not None:
             if progress > self.baseline:
-                self.credit_deadline, self.fight, self.searches = None, None, 0
-                self.search_at = now
-                self.search_heading = self.search_sector_at = None
+                self.credit_deadline, self.fight = None, None
+                self.reset_search(now)
                 return "credited", None
-            return ("no_quest_credit" if now >= self.credit_deadline else "waiting"), None
+            if now < self.credit_deadline:
+                return "waiting", None
+            if self.resource and not in_combat:
+                self.uncredited_kills += 1
+                if self.uncredited_kills < 4:
+                    self.credit_deadline, self.fight = None, None
+                    self.reset_search(now)
+                    return "resource_try_next", None
+                return "resource_no_progress", None
+            return "no_quest_credit", None
 
         matches = sample.target_id in self.targets or (not self.targets and verified_target != 0
                                                         and sample.target_id == verified_target)
         if self.fight is None:
-            if matches and not sample.target_dead:
+            if matches and not sample.target_dead and not sample.target_danger:
                 self.fight = Fight(sample.target_id, approach=True)
-                self.started_at, self.baseline = now, progress
+                self.started_at, self.baseline, self.observed_progress = now, progress, progress
             elif in_combat:
                 if (sample.target_dead or sample.target_id == 0) and now - self.search_at <= 5:
                     return "waiting", None
@@ -219,15 +302,22 @@ class QuestHunt:
             else:
                 return self.search_target(now, sample)
 
-        if now - self.started_at >= 20:
+        if progress > self.observed_progress:
+            self.observed_progress = progress
+            self.fight.last_credit_at = now
+            self.fight.pending_action_at, self.fight.no_receipts = None, 0
+        last_damage = max(self.fight.last_damage_at or self.started_at,
+                          self.fight.last_credit_at or self.started_at)
+        if now - self.started_at >= 60 or (now - self.started_at >= 20
+                                            and now - last_damage >= 8):
             return "fight_timeout", None
-        if sample.target_id == self.fight.target_id and not sample.target_dead and not matches:
+        locked_resource_target = (self.resource and self.fight.state_epoch is not None
+                                  and sample.state_epoch == self.fight.state_epoch)
+        if (sample.target_id == self.fight.target_id and not sample.target_dead
+                and not matches and not locked_resource_target):
             return "waiting", None
-        status, key = self.fight.step(now, sample)
-        target_gone = status in {"target_defeated", "target_missing_or_changed"}
-        if status == "target_or_arm_changed" and sample.target_dead:
-            target_gone = True
-        if self.fight.presses and target_gone:
+        status, key = self.fight.step(now, sample, navigation)
+        if self.fight.presses and status in {"target_defeated", "target_missing_or_changed", "target_or_arm_changed"}:
             self.credit_deadline = now + 5
             return "waiting", None
         return status, key
@@ -238,14 +328,34 @@ class QuestDefense:
 
     def __init__(self, now: float):
         self.started_at = now
+        self.grounded_at = None
+        self.dismount_at = float("-inf")
+        self.dismount_attempts = 0
+        self.repositioned = False
+        self.retreat = None
+        self.retreat_at = None
+        self.retreat_origin = None
         self.sequence = None
         self.binding = None
         self.fight: Fight | None = None
         self.next_select_at = now
         self.selects = 0
+        self.target_health = None
+        self.last_progress_at = now
+        self.damage_at = float("-inf")
+        self.progress_presses = 0
+        self.select_started_at = None
+        self.handoff_probe = None
+        self.handoff_tried = []
+        self.handoff_scene = None
+        self.handoff_until = 0.0
+        self.handoff_started = None
 
-    def step(self, now: float, sample: CombatSample | None) -> tuple[str, str | None]:
-        if now - self.started_at >= 35:
+    def step(self, now: float, sample: CombatSample | None, navigation=None) -> tuple[str, str | None]:
+        if self.grounded_at is None:
+            self.grounded_at = now
+        budget = 60 if now - self.damage_at < 8 else 35
+        if now - self.grounded_at >= budget:
             return ("timeout" if self.binding else "binding_or_telemetry_unavailable"), None
         if sample is None or sample.sequence == self.sequence:
             return "waiting", None
@@ -259,17 +369,42 @@ class QuestDefense:
             return "action_binding_changed", None
         self.binding = binding
 
+        if sample.target_id and not sample.target_dead and sample.target_engaged and sample.target_danger:
+            return "dangerous_attacker", None
         if not (sample.target_id and sample.target_engaged and not sample.target_dead):
             self.fight = None
-            if self.selects < 8 and now >= self.next_select_at:
-                self.selects += 1
-                self.next_select_at = now + 1
-                return "select_target", "tab"
-            return "waiting", None
+            if now < self.next_select_at:
+                return "waiting", None
+            if self.selects >= 4 or (self.select_started_at is not None and now - self.select_started_at >= 3):
+                return "attacker_unconfirmed", None
+            if self.select_started_at is None:
+                self.select_started_at = now
+            self.selects += 1
+            self.next_select_at = now + 1
+            return "select_target", "tab"
+        self.select_started_at, self.selects = None, 0
         if (self.fight is None or self.fight.target_id != sample.target_id
                 or self.fight.state_epoch != sample.state_epoch):
-            self.fight = Fight(sample.target_id, approach=True)
-        return self.fight.step(now, sample)
+            self.fight = Fight(sample.target_id, approach=True, defense=True)
+            self.target_health = sample.target_health
+            self.last_progress_at, self.progress_presses = now, 0
+        elif sample.target_health is not None:
+            if self.target_health is not None and sample.target_health < self.target_health:
+                self.damage_at = now
+            if self.target_health is None or sample.target_health < self.target_health:
+                self.target_health = sample.target_health
+                self.last_progress_at, self.progress_presses = now, self.fight.presses
+
+        if sample.line_of_sight_blocked and self.fight.presses:
+            return "line_of_sight_blocked", None
+        stalled_for, attempts = (8, 4) if sample.target_health is not None else (12, 6)
+        if (now - self.last_progress_at >= stalled_for
+                and self.fight.presses - self.progress_presses >= attempts):
+            return "no_progress", None
+        status, key = self.fight.step(now, sample, navigation)
+        if status == "action" and self.fight.presses == 1:
+            self.last_progress_at = now
+        return status, key
 
 
 def run_fight(fight, read, backend, estop, foreground, duration: float) -> str:

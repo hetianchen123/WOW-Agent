@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
+/data/
 !data/.gitkeep
 .DS_Store
+/config/deepseek.local.json
+/deepseek/apikey*
+/DeepSeek/apikey*
+/glm/apikey*
+/GLM/apikey*

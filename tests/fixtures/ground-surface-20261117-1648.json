@@ -1,0 +1,89 @@
+{
+  "source_run": "20261117T084834-22de26bb",
+  "frames": [
+    {
+      "frame_id": "5df25e7a550e4685841ae3d92db6849a",
+      "image_sha256": "b8004dd9bf7fbe183e406ccda8024b29400a6ed717fb2d3a4649ae1d2e39d02e",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.2456591087905014,
+        0.3667272250435114
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.717851661671053,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1370024.9536936246
+    },
+    {
+      "frame_id": "7c0dbd906fd6480288421e1dc6ecb9b0",
+      "image_sha256": "1e596e193b0aff02b78733fe89ee241b3f46715ea951af5504b5a893b9634a2c",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.2456591087905014,
+        0.3667272250435114
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.9566136021616027,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1370031.8744384164
+    },
+    {
+      "frame_id": "e6d552efa4094aad8cfc09278aec8c0a",
+      "image_sha256": "65d80e735178fd9bfad0aba2d1038ff88f1976fe89c8667b4bd2a827a2176134",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.2456591087905014,
+        0.3667272250435114
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.9566136021616027,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1370033.8776478744
+    }
+  ],
+  "last_two_same_rotation": true,
+  "world_projection_ready": false,
+  "live_route_executed": false
+}

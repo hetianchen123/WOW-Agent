@@ -1,14 +1,18 @@
 import math
 from dataclasses import replace
+from concurrent.futures import Future
+from types import SimpleNamespace
 
 import numpy as np
 
 from bot.control.pathfinding import GridRouter
+from bot.control import quest_terrain
 from bot.control.quest_travel import QuestTrip
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import QuestState
 from bot.perception.travel_channel import (
-    LifeState, ObjectiveAction, RoundStage, TaskFlags, TravelFlags as Flags, TravelSample, decode_travel,
+    CorpseSource, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
+    decode_travel,
 )
 
 
@@ -37,6 +41,78 @@ def test_ground_stall_tries_jump_turn_jump_and_both_strafes():
     assert trip.step(14.9, grounded, east).keys == {"e"}
 
 
+def test_ground_slide_along_wall_does_not_reset_forward_progress_timer():
+    nav = sample(flags=Flags.KEYS_VERIFIED)
+    trip = QuestTrip(nav.world_size, nav.destination, "ccw_west")
+    east = 3 * math.pi / 2
+    assert trip.step(0, nav, east).keys == {"w"}
+    assert trip.step(1.6, replace(nav, position=(.2, .206), sequence=2), east).tap is None
+    assert trip.step(3.1, replace(nav, position=(.2, .212), sequence=3), east).tap == "space"
+
+
+def test_terrain_detour_observes_both_sides_rechecks_then_confirms_displacement(monkeypatch):
+    nav = sample(flags=Flags.KEYS_VERIFIED)
+    trip = QuestTrip(nav.world_size, nav.destination, "ccw_west")
+    events = {}
+    ctx = SimpleNamespace(heading_age=lambda: 0, capture=None, log_event=events.__setitem__)
+    requests = []
+
+    def request(frames, decide=None, **_):
+        requests.append(tuple(frames))
+        future = Future()
+        views = {name: {"front": "blocked"} if name == "left" else
+                 {"front": "open", "feature": "ramp", "landmark": [500, 690]} for name in frames}
+        future.set_result((views, decide(views) if decide else None))
+        return SimpleNamespace(future=future, close=lambda: None)
+
+    monkeypatch.setattr(quest_terrain, "SceneRequest", request)
+    monkeypatch.setattr(quest_terrain, "capture_scene", lambda _: object())
+    client = SimpleNamespace(decide=lambda state, choices, **_: {"recommendation": "right"})
+    detour = quest_terrain.TerrainDetour(0, nav, 0, trip, client, retreat_first=False)
+    assert detour.step(ctx, 0, nav, 0).tap == "left"
+    left, right = math.radians(55), math.radians(-55)
+    assert not detour.step(ctx, .6, nav, left).keys
+    assert not detour.step(ctx, 1.2, nav, left).keys  # Consume the left result first.
+    assert detour.step(ctx, 1.8, nav, left).tap == "right"
+    assert not detour.step(ctx, 2.4, nav, right).keys
+    assert requests == [("left",), ("right",)]
+    assert not detour.step(ctx, 2.6, nav, right).keys
+    assert not detour.step(ctx, 3.2, nav, right).keys
+    assert requests[-1] == ("confirm",)
+    assert detour.step(ctx, 3.4, nav, right).keys == {"w"}
+    moved = replace(nav, position=(.206, .191))
+    assert detour.step(ctx, 4.2, moved, right).outcome == "detoured"
+    mark = events["quest_terrain_waypoint"]
+    assert mark["position"] == moved.position and mark["landmark_on_screen"] == [500, 690]
+    assert trip.router.passages
+    interrupted = replace(nav, flags=nav.flags | Flags.IN_COMBAT)
+    assert detour.step(ctx, 4.3, interrupted, right).outcome == "probe_interrupted"
+
+
+def test_terrain_unknown_or_blocked_views_never_authorize_walking(monkeypatch):
+    nav = sample(flags=Flags.KEYS_VERIFIED)
+    trip = QuestTrip(nav.world_size, nav.destination, "ccw_west")
+    ctx = SimpleNamespace(heading_age=lambda: 0, capture=None, log_event=lambda *_: None)
+
+    def request(frames, decide=None, **_):
+        future = Future()
+        views = {name: {"front": "blocked" if name == "left" else "unknown"} for name in frames}
+        future.set_result((views, decide(views) if decide else None))
+        return SimpleNamespace(future=future, close=lambda: None)
+
+    monkeypatch.setattr(quest_terrain, "SceneRequest", request)
+    monkeypatch.setattr(quest_terrain, "capture_scene", lambda _: object())
+    detour = quest_terrain.TerrainDetour(0, nav, 0, trip, None)
+    commands = []
+    for now in range(25):
+        commands.append(detour.step(ctx, now, nav, detour.angles[detour.direction]))
+        if commands[-1].outcome:
+            break
+    assert commands[-1].outcome == "no_passage"
+    assert set(detour.observations) == {"left", "right", "wide_left", "wide_right", "back"}
+    assert all(not command.keys and command.tap != "space" for command in commands)
+
+
 def test_fly_before_mount_and_land_before_dismount():
     start = sample()
     trip = QuestTrip(start.world_size, start.destination, "ccw_west")
@@ -62,6 +138,23 @@ def test_fly_before_mount_and_land_before_dismount():
     assert trip.step(13, landed, east).outcome is None
     grounded = replace(landed, flags=landed.flags & ~Flags.MOUNTED)
     assert trip.step(14, grounded, east).outcome == "arrived"
+
+
+def test_local_object_travel_mounts_for_the_long_leg_and_walks_at_the_end():
+    east = 3 * math.pi / 2
+    start = sample(position=(.224, .2))  # 76 yards, like the catapult approach in the log.
+    trip = QuestTrip(start.world_size, start.destination, "ccw_west", local_travel=True, approach_on_foot=True)
+    assert trip.step(0, start, east).tap == "6"
+    middle = replace(start, position=(.260, .2))
+    trip = QuestTrip(start.world_size, start.destination, "ccw_west", local_travel=True, approach_on_foot=True)
+    assert trip.step(0, middle, east).tap == "7"
+    riding = replace(middle, flags=(middle.flags | Flags.MOUNTED) & ~Flags.CAN_MOUNT)
+    assert trip.step(2, riding, east).keys == {"w"}
+    close = replace(riding, position=(.292, .2))
+    assert trip.step(5, close, east).tap == "8"
+    walking = replace(close, flags=middle.flags, sequence=2)
+    assert trip.step(6, walking, east).tap == "w"
+    assert trip.mode == "walk"
 
 
 def test_summon_timeout_falls_back_to_ground_mount_then_walk():
@@ -140,6 +233,89 @@ def test_skyriding_resume_near_destination_dismounts_and_walks():
     assert trip.mode == "walk"
 
 
+def test_skyriding_free_launch_replenishes_then_uses_surge_without_spending_reserve():
+    east = 3 * math.pi / 2
+    mounted = sample(destination=(.8, .2), sky_pitch_key="f12", sky_dismount_key="f11",
+                     flags=Flags.MOUNTED | Flags.SKYRIDING | Flags.KEYS_VERIFIED,
+                     sky_flight=SkyFlight(charges=0))
+    events = []
+    trip = QuestTrip(mounted.world_size, mounted.destination, "ccw_west",
+                     log_event=lambda event, fields: events.append((event, fields)))
+    assert trip.step(0, mounted, east).tap == "space"
+    jumping = replace(mounted, flags=mounted.flags | Flags.FALLING, sequence=2)
+    assert trip.step(.15, jumping, east).tap is None
+    assert trip.step(.4, jumping, east).tap == "space"
+    assert trip.step(.6, jumping, east).tap is None
+    flight = SkyFlight(surge_key="1", second_wind_key="5", speed=20, charges=1)
+    airborne = replace(mounted, flags=mounted.flags | Flags.FLYING, height=118, sequence=3, sky_flight=flight)
+    assert trip.step(.8, airborne, east).tap is None
+    assert trip.step(1.3, airborne, east).tap == "5"
+    assert trip.step(1.9, airborne, east).tap is None
+    restored = replace(airborne, sequence=4, sky_flight=replace(flight, charges=2, cast="second_wind", cast_epoch=1))
+    assert trip.step(3, restored, east).tap == "1"
+    used = replace(restored, sequence=5, sky_flight=replace(flight, cast="surge", cast_epoch=2))
+    assert trip.step(5, used, east).tap == "5"
+    assert [event[1]["action"] for event in events if event[0].endswith("cast_result")] == ["second_wind", "surge"]
+    assert all(event[1]["confirmed"] for event in events if event[0].endswith("cast_result"))
+
+
+def test_skyriding_unconfirmed_boost_is_not_repeated_and_fast_approach_brakes_early():
+    east = 3 * math.pi / 2
+    flight = SkyFlight(surge_key="1", whirling_key="3", speed=16, charges=3)
+    airborne = sample(destination=(.8, .2), sky_pitch_key="f12", sky_dismount_key="f11", sky_halt_key="4",
+                      flags=Flags.MOUNTED | Flags.SKYRIDING | Flags.FLYING | Flags.KEYS_VERIFIED, sky_flight=flight)
+    trip = QuestTrip(airborne.world_size, airborne.destination, "ccw_west")
+    trip.step(0, airborne, east)
+    assert trip.step(.5, airborne, east).tap == "3"
+    assert trip.step(1.9, airborne, east).tap is None
+    # The game never acknowledged Whirling Surge, so try the independently verified Surge Forward.
+    assert trip.step(2.6, replace(airborne, sequence=2), east).tap == "1"
+    fast = replace(airborne, position=(.7, .2), sequence=3,
+                   sky_flight=replace(flight, speed=72, charges=2, cast="surge", cast_epoch=1))
+    assert trip.step(3, fast, east).tap == "4"
+    assert trip.phase == "sky_brake"
+
+
+def test_skyriding_retries_unconfirmed_ascent_and_climbs_again_when_sinking():
+    east = 3 * math.pi / 2
+    mounted = sample(destination=(.95, .2), sky_pitch_key="0", sky_dismount_key="z", sky_ascent_key="2",
+                     flags=Flags.MOUNTED | Flags.SKYRIDING | Flags.KEYS_VERIFIED, sky_flight=SkyFlight(charges=6))
+    trip = QuestTrip(mounted.world_size, mounted.destination, "ccw_west")
+    assert trip.step(0, mounted, east).tap == "space"
+    airborne = replace(mounted, flags=mounted.flags | Flags.FLYING, height=105, sequence=2)
+    assert trip.step(.6, airborne, east).tap is None
+    assert trip.step(1.8, replace(airborne, sequence=3), east).tap == "2"
+    assert trip.step(3.9, replace(airborne, sequence=4), east).tap is None
+    assert trip.step(4.4, replace(airborne, sequence=5), east).tap == "2"
+    climbed = replace(airborne, sequence=6, height=134, sky_flight=SkyFlight(charges=5))
+    assert trip.step(5, climbed, east).tap is None
+    assert trip.sky_pending_cast is None and trip.sky_ascent_misses == 0
+    assert trip.step(6.4, replace(climbed, sequence=7, height=130), east).tap is None
+    assert trip.step(7.8, replace(climbed, sequence=8, height=122), east).tap == "2"
+
+
+def test_early_landing_after_failed_ascent_switches_to_steady_flight_out_of_the_saddle():
+    east = 3 * math.pi / 2
+    mounted = sample(destination=(.8, .2), sky_pitch_key="0", sky_dismount_key="z", sky_ascent_key="2",
+                     flags=Flags.MOUNTED | Flags.SKYRIDING | Flags.KEYS_VERIFIED | Flags.CAN_FLY | Flags.STYLE_SWITCH,
+                     flight_mount_active=True, sky_flight=SkyFlight(charges=6, speed=24))
+    trip = QuestTrip(mounted.world_size, mounted.destination, "ccw_west")
+    assert trip.step(0, mounted, east).tap == "space"
+    airborne = replace(mounted, flags=mounted.flags | Flags.FLYING, height=104)
+    trip.step(.6, airborne, east)
+    assert trip.step(1.7, replace(airborne, sequence=2), east).tap == "2"
+    landed = replace(mounted, position=(.35, .2), sequence=3)
+    assert trip.step(19, replace(landed, flags=landed.flags | Flags.FALLING), east).tap is None
+    assert trip.step(20, landed, east).tap == "z"
+    assert trip.step(21, landed, east).tap is None
+    unmounted = replace(landed, flags=landed.flags & ~(Flags.MOUNTED | Flags.SKYRIDING), flight_mount_active=False)
+    assert trip.step(21.5, unmounted, east).tap == "5"
+    assert trip.step(22, unmounted, east).tap is None
+    assert trip.step(23, replace(unmounted, flags=unmounted.flags | Flags.CASTING), east).tap is None
+    assert trip.step(27, unmounted, east).tap == "6"
+    assert trip.step(29, replace(landed, flags=landed.flags & ~Flags.SKYRIDING), east).keys == {"space"}
+
+
 def test_objective_area_can_be_reached_without_walking_into_its_center():
     start = sample(position=(.291, .2))
     east = 3 * math.pi / 2
@@ -149,7 +325,7 @@ def test_objective_area_can_be_reached_without_walking_into_its_center():
     assert exact_trip.step(0, start, east).keys == {"w"}
 
 
-def test_ground_route_steers_in_map_scale_and_replans_after_blockage():
+def test_ground_route_marks_blockage_before_visual_recovery():
     start = sample(flags=Flags.KEYS_VERIFIED)
     trip = QuestTrip(start.world_size, start.destination, "ccw_west")
     east = 3 * math.pi / 2
@@ -159,12 +335,12 @@ def test_ground_route_steers_in_map_scale_and_replans_after_blockage():
     assert trip.step(7.2, start, east).tap in {"left", "right"}
     assert trip.step(7.4, start, east).tap == "space"
     assert trip.step(8.2, start, east).keys == {"w"}
-    assert trip.step(11.4, start, east).keys == {"s"}
-    command = trip.step(12.2, start, east)
-    assert trip.path[-1] == start.destination
-    assert any(point[1] != start.position[1] for point in trip.path[:-1])
-    assert all(trip.router.cell(point) not in trip.router.blocked for point in trip.path)
-    assert command.keys & {"left", "right"}
+    command = trip.step(11.4, start, east)
+    assert command.outcome == "route_blocked" and not command.keys
+    path = trip.router.route(start.position, start.destination)
+    assert path[-1] == start.destination
+    assert any(point[1] != start.position[1] for point in path[:-1])
+    assert all(trip.router.cell(point) not in trip.router.blocked for point in path)
 
 
 def test_ground_approach_releases_movement_and_pulses_only_on_fresh_frames():
@@ -172,11 +348,30 @@ def test_ground_approach_releases_movement_and_pulses_only_on_fresh_frames():
     trip = QuestTrip(start.world_size, start.destination, "ccw_west", arrival_radius=2.5)
     east = 3 * math.pi / 2
     turn = trip.step(0, start, east + math.radians(20))
-    assert turn.tap == "right" and turn.hold_s == .08 and not turn.keys
+    assert turn.tap == "right" and .03 <= turn.hold_s <= .16 and not turn.keys
     assert trip.step(.1, start, east).tap is None
     move = trip.step(.3, replace(start, sequence=2), east)
     assert move.tap == "w" and 0 < move.hold_s <= .16 and not move.keys
     assert trip.step(.6, replace(start, position=(.298, .2), sequence=3), east).outcome == "arrived"
+
+
+def test_ground_cruise_pulses_turns_and_waits_for_fresh_feedback():
+    start = sample(position=(.2, .2), flags=Flags.KEYS_VERIFIED)
+    trip = QuestTrip(start.world_size, start.destination, "ccw_west")
+    east, south = 3 * math.pi / 2, math.pi
+    first = trip.step(0, start, south)  # Facing south, waypoint east: 90 degrees off.
+    assert first.tap == "left" and not first.keys and .03 <= first.hold_s <= .16
+    assert trip.step(.2, start, south).tap is None  # No fresh frame since the pulse.
+    assert trip.step(.3, replace(start, sequence=2), south).tap is None  # Inside the interval.
+    assert trip.step(.5, replace(start, sequence=3), south, heading_age=.4).tap is None
+    second = trip.step(.6, replace(start, sequence=4), south)
+    assert second.tap == "left" and not second.keys
+    early_reverse = trip.step(1.1, replace(start, sequence=5), east + math.radians(20))
+    assert early_reverse.tap is None and early_reverse.keys == {"w"}
+    arc = trip.step(1.6, replace(start, sequence=6), east + math.radians(20))
+    assert arc.tap == "right" and arc.keys == {"w"}  # Small deviation keeps moving.
+    settled = trip.step(2.1, replace(start, sequence=7), east + math.radians(4))
+    assert settled.tap is None and settled.keys == {"w"}
 
 
 def test_grid_search_never_routes_through_a_blocked_goal_cell():
@@ -184,6 +379,153 @@ def test_grid_search_never_routes_through_a_blocked_goal_cell():
     start, goal = (.2, .5), (.8, .5)
     router.blocked.add(router.cell(goal))
     assert not router.route(start, goal)
+
+
+def test_grid_replanning_prefers_observed_passage_around_the_same_obstacle():
+    router = GridRouter(60., 60.)
+    def point(x, y):
+        return ((x + .5) / 10, (y + .5) / 10)
+
+    start, goal = point(3, 4), point(7, 4)
+    router.blocked.add((5, 4))
+    router.remember_passage([start, point(4, 5), point(5, 5), point(6, 5), goal])
+    assert point(5, 5) in router.route(start, goal)
+    router.blocked.add((5, 5))
+    assert point(5, 5) not in router.route(start, goal)
+
+
+def test_v12_loot_receipts_and_blob_mask_share_the_navigation_frame():
+    image = np.zeros((29 * 16, 142, 3), np.uint8)
+    sequence = 19
+    values = [90886, 2451, round(.5*1048575), round(.5*1048575), sequence*8192,
+              524288, 10000, 5000, 12 + 2*16 + 128 + 512 + 1024,
+              round(.51*1048575), round(.51*1048575), 2451]
+    for row, value in enumerate(values):
+        spec.render_frame(image, 0, (17+row)*16, spec.encode_frame(4+row, value))
+    for row in range(5):
+        # First and final corner grid points: scale conversion must use yards on each axis.
+        mask = 1 if row == 0 else 32768 if row == 4 else 0
+        spec.render_frame(image, 0, row*16, spec.encode_frame(4+row, mask+(sequence%16)*65536))
+    spec.render_frame(image, 0, 5*16, spec.encode_frame(9, 255+256+512+sequence*1024))
+    for row, value in enumerate((1+sequence*8192, 0, 0, 0)):
+        spec.render_frame(image, 0, (6+row)*16, spec.encode_frame(12+row, value))
+    spec.render_frame(image, 0, 13*16, spec.encode_frame(3, sequence*64))
+    spec.render_frame(image, 0, 14*16, spec.encode_frame(2, 0))
+    spec.render_frame(image, 0, 15*16, spec.encode_frame(1, sequence*1024+131072+1))
+    spec.render_frame(image, 0, 16*16, spec.encode_frame(0, 0))
+    result = decode_travel(image)
+    assert result.loot_epoch == 255 and result.sweep_ready
+    assert not result.camera_restore_available and not result.camera_zoom_close
+    assert len(result.search_area) == 2
+    assert math.dist(result.search_area[0], (.38, .26)) < .00001
+    assert math.dist(result.search_area[1], (.62, .74)) < .00001
+    spec.render_frame(image, 0, 5*16, spec.encode_frame(9, (sequence-1)*1024))
+    assert decode_travel(image) is None
+    spec.render_frame(image, 0, 5*16, spec.encode_frame(9, 255+256+512+sequence*1024+(7<<17)))
+    calibrated = decode_travel(image)
+    assert calibrated.camera_restore_available and calibrated.camera_zoom_close and calibrated.camera_epoch == 1
+    assert calibrated.search_area == result.search_area
+    for row, value in enumerate((1025+sequence*8192, 0, 409*1024+409, 17)):
+        spec.render_frame(image, 0, (6+row)*16, spec.encode_frame(12+row, value))
+    handoff = decode_travel(image).recovery
+    assert handoff.attacker_scan_supported and handoff.attacker_hovered and handoff.attacker_count == 1
+    assert handoff.attacker_cursor == (409 / 1023, 409 / 1023) and not handoff.patrol_id
+    extended = np.vstack((np.zeros((32, 142, 3), np.uint8), image))
+    spec.render_frame(extended, 0, 0, spec.encode_frame(10, 1+5*16+3*256+sequence*8192))
+    spec.render_frame(extended, 0, 16, spec.encode_frame(11, 9+3*32+2*256+1*2048+sequence*8192))
+    spec.render_frame(extended, 0, 23*16, spec.encode_frame(8, sequence*8192+int(Flags.SKYRIDING)))
+    spec.render_frame(extended, 0, 27*16, spec.encode_frame(12, values[8]+1))
+    assert decode_travel(extended).sky_flight == SkyFlight("1", "5", "3", 32, 2, "second_wind", 1)
+    new = np.vstack((np.zeros((32, 142, 3), np.uint8), extended))
+    spec.render_frame(new, 0, 0, spec.encode_frame(sequence % 16, 2 * 1024 + 4))
+    spec.render_frame(new, 0, 16, spec.encode_frame(12, sequence * 8192 + 3 * 1024 + 512 + 64 + 2))
+    spec.render_frame(new, 0, 29 * 16, spec.encode_frame(12, values[8] + 2))
+    result = decode_travel(new)
+    assert result.objective_index == 2 and result.objective_progress == (2, 4)
+    assert result.suspend_ready and result.current_suspended and result.suspend_epoch == 3
+    camera = np.vstack((np.zeros((32, 142, 3), np.uint8), new))
+    spec.render_frame(camera, 0, 31 * 16, spec.encode_frame(12, values[8] + 3))
+    spec.render_frame(camera, 0, 16, spec.encode_frame(13, 41 + 2 * 128 + 5 * 1024 + sequence * 8192))
+    spec.render_frame(camera, 0, 0, spec.encode_frame(14, 7 + 7 * 16 + 3 * 256 + 4096 + sequence * 8192))
+    decoded = decode_travel(camera)
+    assert decoded.protocol_version == 15 and decoded.camera.zoom == 20
+    assert decoded.camera.scene.name == "MELEE" and decoded.camera.applied.name == "MELEE"
+    assert decoded.camera.result.name == "DISTANCE_VERIFIED" and decoded.camera.calibrated
+    assert decoded.camera.request == 3 and decoded.camera.view == 5
+    assert decoded.addon_build is None
+    build_image = np.vstack((np.zeros((32, 142, 3), np.uint8), camera))
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357377))
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 263 + sequence * 4096))
+    assert decode_travel(build_image).addon_build == 263
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 263 + (sequence - 1) * 4096))
+    assert decode_travel(build_image).addon_build is None  # Mixed frames do not claim a loaded build.
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357378))
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 264 + sequence * 4096 + 524288))
+    assert decode_travel(build_image).addon_build == 264
+    assert not decode_travel(build_image).probe_camera_available  # Old F9 never authorizes F6.
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357379))
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 265 + sequence * 4096 + 524288))
+    assert decode_travel(build_image).addon_build == 265
+    assert decode_travel(build_image).probe_camera_available
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357380))
+    assert not decode_travel(build_image).overhead_camera_available
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357380 + 524288))
+    assert decode_travel(build_image).overhead_camera_available
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 267 + sequence * 4096))
+    assert not decode_travel(build_image).overhead_camera_available  # Preset without F6 binding.
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 267 + (sequence-1) * 4096 + 524288))
+    assert not decode_travel(build_image).overhead_camera_available  # Torn build receipt.
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357381))
+    assert decode_travel(build_image).addon_build is None  # Unknown extension keeps the v15 core readable.
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 268+sequence*4096+524288))
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357384+1+2+524288))
+    automatic=decode_travel(build_image)
+    assert automatic.calibration_orbit_available and automatic.calibration_orbit_active
+    assert automatic.overhead_camera_available and automatic.addon_build==268
+    assert automatic.extension_schema == 5 and automatic.round_pending_count is None
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357384+524288))
+    assert not decode_travel(build_image).calibration_orbit_available
+    spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357380+524288))
+    assert not decode_travel(build_image).calibration_orbit_available  # Old schema cannot lease mouse input.
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 269+sequence*4096+524288))
+    for count in (0, 1, 2, 127):
+        spec.render_frame(build_image, 0, 0, spec.encode_frame(15, 357888+count*4+1+2+524288))
+        pending = decode_travel(build_image)
+        assert pending.round_pending_count == count and pending.extension_schema == 6
+        assert pending.calibration_orbit_available and pending.calibration_orbit_active
+        assert pending.overhead_camera_available and pending.addon_build == 269
+    # A separately versioned optional row can be missing/torn without losing
+    # navigation. Only current verified UI receipts may unmask image regions.
+    ui_image = np.vstack((np.zeros((16, 142, 3), np.uint8), build_image))
+    spec.render_frame(ui_image, 0, 32, spec.encode_frame(14, 274+sequence*4096+524288))
+    for hidden in range(16):
+        spec.render_frame(ui_image, 0, 0, spec.encode_frame(13, 45*16384+sequence*128+16+hidden))
+        current = decode_travel(ui_image)
+        assert current.visual_ui_hidden == hidden
+        assert replace(current, addon_build=269, visual_ui_hidden=None) == pending
+        assert decode_travel(ui_image[16:]).visual_ui_hidden is None  # Older capture crop.
+    for kind, payload in ((13, 0), (12, 45*16384+sequence*128+16+15),
+                          (13, 44*16384+sequence*128+16+15),
+                          (13, 45*16384+sequence*128+32+15),
+                          (13, 45*16384+(sequence-1)*128+16+15)):
+        spec.render_frame(ui_image, 0, 0, spec.encode_frame(kind, payload))
+        decoded = decode_travel(ui_image)
+        assert decoded.visual_ui_hidden is None
+        assert replace(decoded, addon_build=269) == pending
+    spec.render_frame(ui_image, 0, 0, spec.encode_frame(13, 45*16384+sequence*128+16+15))
+    spec.render_frame(ui_image, 0, 32, spec.encode_frame(14, 273+sequence*4096+524288))
+    assert decode_travel(ui_image).visual_ui_hidden is None
+    spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 269+(sequence-1)*4096+524288))
+    assert decode_travel(build_image).round_pending_count is None  # Stale receipt is unknown, never zero.
+    assert decode_travel(build_image).extension_schema is None
+    spec.render_frame(camera, 0, 16, spec.encode_frame(13, sequence * 8192))
+    assert decode_travel(camera).camera.zoom is None
+    spec.render_frame(camera, 0, 0, spec.encode_frame(14, (sequence - 1) * 8192))
+    assert decode_travel(camera) is None
+    spec.render_frame(new, 0, 16, spec.encode_frame(12, (sequence - 1) * 8192))
+    assert decode_travel(new) is None
+    spec.render_frame(extended, 0, 16, spec.encode_frame(11, (sequence-1)*8192))
+    assert decode_travel(extended) is None
 
 
 def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows():
@@ -289,8 +631,19 @@ def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows()
     assert recovery.life == LifeState.GHOST and recovery.dialog and recovery.hovered
     assert recovery.corpse == (200 / 1023, 300 / 1023)
     assert recovery.button == (500 / 1023, 400 / 1023) and recovery.ui_aspect == .5625
+    assert recovery.walk_verified is None and recovery.facing is None
     spec.render_frame(recovery_strip, 0, 0, spec.encode_frame(12, recovery_rows[0] - 8192))
     assert decode_travel(recovery_strip) is None
+    spec.render_frame(recovery_strip, 0, 19 * 16, spec.encode_frame(12, values[8] + 10))
+    spec.render_frame(recovery_strip, 0, 0, spec.encode_frame(12, 3 * 8192 + 3 + 8 + 256 + 512))
+    spec.render_frame(recovery_strip, 0, 32, spec.encode_frame(14, 1))  # North is valid.
+    recovery = decode_travel(recovery_strip).recovery
+    assert recovery.walk_verified and recovery.facing == 0 and recovery.button is None
+    assert recovery.corpse_source == CorpseSource.PARENT_MAP
+    spec.render_frame(recovery_strip, 0, 0, spec.encode_frame(12, 3 * 8192 + 3 + 256))
+    spec.render_frame(recovery_strip, 0, 48, spec.encode_frame(15, 432))
+    recovery = decode_travel(recovery_strip).recovery
+    assert recovery.corpse is None and recovery.corpse_distance == 43.2 and recovery.ui_aspect == 0
     spec.render_frame(with_minimap, 0, 32, spec.encode_frame(2, 2 * 2048 + 233))
     assert decode_travel(with_minimap).minimap is None
     spec.render_frame(with_round, 0, 0, spec.encode_frame(3, 2 * 64 + int(RoundStage.PICKUP)))

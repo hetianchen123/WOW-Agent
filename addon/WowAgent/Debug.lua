@@ -58,6 +58,8 @@ SlashCmdList["WOWAGENT"] = function(msg)
     msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
     if msg == "" and WowAgent_TogglePanel then
         WowAgent_TogglePanel()
+    elseif msg == "ui" or msg:match("^ui%s") then
+        if WowAgent.VisualUI then WowAgent.VisualUI.Command(msg:sub(3):gsub("^%s+", "")) end
     elseif msg == "combat" or msg:match("^combat%s") then
         if WowAgent.CombatCommand then
             WowAgent.CombatCommand(msg:sub(7):gsub("^%s+", ""))

@@ -1,0 +1,225 @@
+{
+  "run_id": "20261117T101406-5c86c8c5",
+  "frames": [
+    {
+      "frame_id": "74d7e75705ca4f4aa75e445032c0b694",
+      "image_sha256": "aaa8ae03f7af6c80759e566dc967964201904441277859a0e59190b5cfa3be38",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24610256777054573,
+        0.36647068640774383
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.362854612973013,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375152.7862891667
+    },
+    {
+      "frame_id": "09545d16696c455c9e3e204a472b53c1",
+      "image_sha256": "0668cbff5dd2bc9e6cf4ed0fc00351d8293c25c3c1df361eb10244189a59c1db",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24610256777054573,
+        0.36647068640774383
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.579625479789911,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375159.9401432495
+    },
+    {
+      "frame_id": "01d52a8daae44e258f4e4d2dc5e6ac16",
+      "image_sha256": "01929f13b5dfe3624cc8598f6f1728b930c6fafcc428f72a13771e1c885be3f4",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24610256777054573,
+        0.36647068640774383
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.1303784044398646,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375162.0726861665
+    },
+    {
+      "frame_id": "0706a67cfffc46b98e0b0a1fe9fd9f42",
+      "image_sha256": "c3ccfbf3f0b6ba36411144ff79356ca804bde964fdbb14be770b47922b481b95",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24610352144577163,
+        0.36632382042295497
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.1303784044398646,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375170.0185153955
+    },
+    {
+      "frame_id": "8e23d380086943338d6e694591ad3e5c",
+      "image_sha256": "7a32cc12637b3f3e398125ceb8076a169ff3e050ea4b886b2a17fc9fb6771051",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24594425768304604,
+        0.36632095939727727
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.1303784044398646,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375176.6280846244
+    },
+    {
+      "frame_id": "4b90f826a1f4499085a3ec976cc95c59",
+      "image_sha256": "6f47e8acea0adcb1ba35fe538417e4623105b80a3aa85fadbb04704dc6c36e58",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24610542879622344,
+        0.36632382042295497
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.1303784044398646,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375183.3524861454
+    },
+    {
+      "frame_id": "4f6fe512b4a845b98fd09514bf8020ea",
+      "image_sha256": "fc90b29695f1ff0f29e9c537fe776a1a393304234f6236018c832bfc12a82f92",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24610638247144934,
+        0.36617600076294016
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.1303784044398646,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375190.151414979
+    },
+    {
+      "frame_id": "4435faacd5b1489cbc704bcbd85aab05",
+      "image_sha256": "529cc7f06eeb118c3a04c5a17be9c25b55bfcaadd9534cf804e88181ad87792c",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24614548315571133,
+        0.3663848556374127
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.4131224922777164,
+      "camera_signature": [
+        4,
+        32.0,
+        0
+      ],
+      "captured_at": 1375197.474859958
+    }
+  ],
+  "calibration_frames": 7,
+  "current_validation_frame": 7,
+  "created_at": 1794910502.5907829,
+  "live_route_completed": false
+}

@@ -1,0 +1,155 @@
+{
+  "run_id": "20261116T090422-d0af91a9",
+  "cases": [
+    {
+      "source": "data/terrain/20261116_170434_11873572/report.json",
+      "metadata": {
+        "id": 90893,
+        "map": 2451,
+        "phase": "view_check",
+        "direction": "back",
+        "pose": {
+          "composition": {
+            "position": [
+              0.24773525975728966,
+              0.3704913811601459
+            ],
+            "heading": 1.4837623084457496,
+            "sequence": 89,
+            "at": 1284562.831056708
+          }
+        },
+        "failed": [],
+        "run_id": "20261116T090422-d0af91a9"
+      },
+      "views": {
+        "composition": {
+          "view": "normal",
+          "player_visible": true,
+          "near_ground_visible": true,
+          "evidence": "Player character and surrounding ground are clearly visible with normal framing.",
+          "usable": true
+        }
+      }
+    },
+    {
+      "source": "data/terrain/20261116_170449_82170ad0/report.json",
+      "metadata": {
+        "id": 90893,
+        "map": 2451,
+        "phase": "retreat_observe",
+        "direction": "back",
+        "pose": {
+          "composition": {
+            "position": [
+              0.24773525975728966,
+              0.3704913811601459
+            ],
+            "heading": 1.4837623084457496,
+            "sequence": 89,
+            "at": 1284562.831056708
+          },
+          "retreat": {
+            "position": [
+              0.24773525975728966,
+              0.3704913811601459
+            ],
+            "heading": 4.571950208870306,
+            "sequence": 31,
+            "at": 1284577.090134291
+          }
+        },
+        "failed": [],
+        "run_id": "20261116T090422-d0af91a9"
+      },
+      "views": {
+        "retreat": {
+          "front": "unknown",
+          "left": "unknown",
+          "right": "unknown",
+          "next_view": "scan",
+          "feature": "unknown",
+          "evidence": "Player not identifiable; feet not visible; immediate ground obscured by logs and terrain",
+          "schema": 2,
+          "feet": null,
+          "scope": "one_short_step"
+        }
+      }
+    },
+    {
+      "source": "data/terrain/20261116_170500_59504696/report.json",
+      "metadata": {
+        "id": 90893,
+        "map": 2451,
+        "phase": "view_recheck",
+        "direction": "back",
+        "pose": {
+          "composition": {
+            "position": [
+              0.24773525975728966,
+              0.3704913811601459
+            ],
+            "heading": 4.571950208870306,
+            "sequence": 86,
+            "at": 1284588.410379416
+          }
+        },
+        "failed": [],
+        "run_id": "20261116T090422-d0af91a9"
+      },
+      "views": {
+        "composition": {
+          "view": "normal",
+          "player_visible": true,
+          "near_ground_visible": true,
+          "evidence": "Player character is centered with visible ground and nearby small characters/pets.",
+          "usable": true
+        }
+      }
+    },
+    {
+      "source": "data/terrain/20261116_170505_b7d88fad/report.json",
+      "metadata": {
+        "id": 90893,
+        "map": 2451,
+        "phase": "retreat_observe",
+        "direction": "back",
+        "pose": {
+          "composition": {
+            "position": [
+              0.24773525975728966,
+              0.3704913811601459
+            ],
+            "heading": 4.571950208870306,
+            "sequence": 86,
+            "at": 1284588.410379416
+          },
+          "retreat": {
+            "position": [
+              0.24773525975728966,
+              0.3704913811601459
+            ],
+            "heading": 4.571950208870306,
+            "sequence": 110,
+            "at": 1284593.3279105
+          }
+        },
+        "failed": [],
+        "run_id": "20261116T090422-d0af91a9"
+      },
+      "views": {
+        "retreat": {
+          "front": "unknown",
+          "left": "unknown",
+          "right": "unknown",
+          "next_view": "scan",
+          "feature": "unknown",
+          "evidence": "Player not identifiable; feet not visible; immediate ground obscured by foliage and objects",
+          "schema": 2,
+          "feet": null,
+          "scope": "one_short_step"
+        }
+      }
+    }
+  ]
+}

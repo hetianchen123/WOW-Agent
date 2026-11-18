@@ -1,5 +1,7 @@
 import numpy as np
 import cv2
+from pathlib import Path
+import pytest
 
 from bot.perception import cv as cvmod
 
@@ -30,6 +32,24 @@ def test_match_best_miss():
     assert cvmod.match_best(frame, _dot_template(), threshold=0.9) is None
 
 
+def test_minimap_corpse_pin_requires_a_unique_icon_inside_the_map():
+    frame = np.full((194, 194, 3), (36, 46, 22), dtype=np.uint8)
+    icon = cvmod._corpse_minimap_template()
+    h, w = icon.shape[:2]
+    mask = icon[:, :, 3] != 0
+
+    def draw(x, y):
+        frame[y:y + h, x:x + w][mask] = icon[:, :, :3][mask]
+
+    draw(2, 80)  # Edge-clamped or clipped points cannot give a usable distance.
+    assert cvmod.minimap_corpse_pin(frame) is None
+    draw(80, 100)
+    dx, dy = cvmod.minimap_corpse_pin(frame)
+    assert abs(dx - (87 / 97 - 1)) < .03 and abs(dy - (108.5 / 97 - 1)) < .03
+    draw(113, 56)
+    assert cvmod.minimap_corpse_pin(frame) is None
+
+
 def test_absdiff_score():
     a = np.full((60, 60, 3), 100, dtype=np.uint8)
     b = np.full((60, 60, 3), 100, dtype=np.uint8)
@@ -38,6 +58,35 @@ def test_absdiff_score():
     assert cvmod.absdiff_score(a, c) == pytest_approx(70.0)
     d = np.zeros((10, 10, 3), dtype=np.uint8)
     assert cvmod.absdiff_score(a, d) == 255.0  # shape mismatch sentinel
+
+
+@pytest.mark.parametrize("turn", range(4))
+def test_corpse_arrow_from_live_minimap_at_different_bearings(turn):
+    frame = cv2.cvtColor(cv2.imread(str(Path(__file__).with_name("fixtures") / "corpse-minimap-arrow.png")),
+                         cv2.COLOR_BGR2RGB)
+    frame = np.ascontiguousarray(np.rot90(frame, turn))
+    direction = cvmod.minimap_corpse_bearing(frame)
+    expected = np.array((-.6763, .7367))
+    for _ in range(turn):
+        expected = np.array((expected[1], -expected[0]))
+    assert direction == pytest.approx(expected, abs=.04)
+    assert np.linalg.norm(direction) == pytest.approx(1)
+
+
+def test_corpse_arrow_rejects_red_dots_center_arrows_and_ambiguous_arrows():
+    frame = np.full((198, 198, 3), (36, 46, 22), np.uint8)
+    cv2.circle(frame, (42, 158), 6, (240, 25, 25), -1)
+    assert cvmod.minimap_corpse_bearing(frame) is None
+    icon = cvmod._corpse_arrow_templates()[0][1]
+    mask = icon[:, :, 3] > 180
+    h, w = mask.shape
+    frame[82:82+h, 82:82+w][mask] = icon[:, :, :3][mask]
+    assert cvmod.minimap_corpse_bearing(frame) is None
+    frame[140:140+h, 23:23+w][mask] = icon[:, :, :3][mask]
+    other = np.rot90(icon, 2).copy()
+    mask = other[:, :, 3] > 180
+    frame[23:23+h, 140:140+w][mask] = other[:, :, :3][mask]
+    assert cvmod.minimap_corpse_bearing(frame) is None
 
 
 def test_pumpkin_probes_include_screen_edges_and_exclude_hud():

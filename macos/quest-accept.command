@@ -36,7 +36,9 @@ def ready():
     return health.get("status") == "ok"
 
 try:
-    if not ready():
+    command = sys.argv[1:] or ["accept-quest"]
+    needs_model = not prepared and command[0] != "navigate-quest"
+    if needs_model and not ready():
         print("正在加载本地 StartLux 模型。", flush=True)
         log_file = (root / "data/startlux/server.log").open("a")
         env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
@@ -52,7 +54,10 @@ try:
             if server.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("模型服务启动失败，请查看 data/startlux/server.log")
             time.sleep(.5)
-    print("本地模型已就绪。任务结束后会自动关闭本次启动的主控和模型服务。", flush=True)
+    if needs_model:
+        print("本地模型已就绪。任务结束后会自动关闭本次启动的主控和模型服务。", flush=True)
+    else:
+        print("常规任务直接使用游戏状态。遇到地形歧义时按情况使用本地模型。", flush=True)
     app = str(root / "data/apps/WowAgent Controller.app")
     if prepared:
         result = root / "data/logs/quest-session.log"
@@ -61,7 +66,6 @@ try:
         if not result.is_file() or "任务退出状态 0\n" not in result.read_text().splitlines(keepends=True)[-1:]:
             raise SystemExit("任务已停止，请查看任务运行日志。")
     else:
-        command = sys.argv[1:] or ["accept-quest"]
         print("主控启动后会自动切回游戏。请保持已准备的任务色条可见。", flush=True)
         subprocess.run(["open", "-n", "-W", app, "--args", "--controller-once", *command], check=True)
 except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:

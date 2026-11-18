@@ -8,6 +8,57 @@ import pytest
 from bot.decision.startlux import LocalStartLux, QuestPlanner
 
 
+def test_lazy_service_reuses_existing_server_and_never_owns_it(monkeypatch):
+    client = LocalStartLux(autostart=True)
+    client.opener = SimpleNamespace(open=lambda request, **_: io.StringIO(json.dumps({
+        "model": "StartLux-Decision-test", "status": "ok"})) if isinstance(request, str) else response())
+    result = client.decide({}, {"pending": "接任务", "wait": "等待"})
+    assert result["recommendation"] == "pending" and client.server is None
+    client.close()
+
+
+def test_lazy_service_starts_only_when_requested_and_closes_owned_process(tmp_path, monkeypatch):
+    from bot.decision import startlux
+    executable = tmp_path / "startlux/.venv/bin/startlux-decide"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    monkeypatch.setattr(startlux, "DATA_DIR", tmp_path)
+    terminated, commands = [], []
+    server = SimpleNamespace(pid=123, poll=lambda: None, terminate=lambda: terminated.append(True),
+                             wait=lambda **_: 0)
+    monkeypatch.setattr(startlux.subprocess, "Popen", lambda command, **_: commands.append(command) or server)
+    client = LocalStartLux(autostart=True)
+    assert not commands
+    monkeypatch.setattr(client, "service_ready", lambda: client.server is not None)
+    client.ensure_service()
+    assert len(commands) == 1 and commands[0][-1] == "8090"
+    client.ensure_service()
+    assert len(commands) == 1
+    client.close()
+    assert terminated == [True] and client.server is None
+    with pytest.raises(ValueError, match="closed"):
+        client.ensure_service()
+
+
+def test_lazy_service_failure_is_bounded_to_one_launch_per_session(tmp_path, monkeypatch):
+    from bot.decision import startlux
+    executable = tmp_path / "startlux/.venv/bin/startlux-decide"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    monkeypatch.setattr(startlux, "DATA_DIR", tmp_path)
+    launches = []
+    server = SimpleNamespace(pid=123, poll=lambda: 1)
+    monkeypatch.setattr(startlux.subprocess, "Popen", lambda *_, **__: launches.append(True) or server)
+    client = LocalStartLux(autostart=True)
+    monkeypatch.setattr(client, "service_ready", lambda: False)
+    with pytest.raises(RuntimeError):
+        client.ensure_service()
+    with pytest.raises(ValueError):
+        client.ensure_service()
+    assert launches == [True]
+    client.close()
+
+
 def response(**updates):
     answer = {
         "choice": "pending", "confidence": .9, "none_probability": .01,

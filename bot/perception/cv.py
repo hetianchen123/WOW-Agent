@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
@@ -74,6 +76,29 @@ def absdiff_score(a_rgb: np.ndarray, b_rgb: np.ndarray) -> float:
     )
 
 
+def hostile_nameplate_points(frame_rgb: np.ndarray) -> tuple[tuple[int, int], ...]:
+    """Centers of red health-bar shapes in the world view, in capture pixels."""
+    if frame_rgb.size == 0:
+        return ()
+    height, width = frame_rgb.shape[:2]
+    x0, x1 = round(.10 * width), round(.78 * width)
+    y0, y1 = round(.13 * height), round(.61 * height)
+    hsv = cv2.cvtColor(frame_rgb[y0:y1, x0:x1], cv2.COLOR_RGB2HSV)
+    red = cv2.inRange(hsv, (0, 145, 85), (9, 255, 255))
+    red |= cv2.inRange(hsv, (174, 145, 85), (179, 255, 255))
+    red[round(.38 * height) - y0:, :round(.29 * width) - x0] = 0
+    kernel_width = max(3, round(width * .004)) | 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1))
+    closed = cv2.morphologyEx(red, cv2.MORPH_CLOSE, kernel)
+    _, _, stats, _ = cv2.connectedComponentsWithStats(closed)
+    points = []
+    for x, y, w, h, area in stats[1:]:
+        if (.020 * width <= w <= .145 * width and 3 <= h <= .025 * height
+                and 5 <= w / h <= 36 and area / (w * h) >= .68):
+            points.append((int(x0 + x + w / 2), int(y0 + y + h / 2)))
+    return tuple(sorted(points, key=lambda p: math.hypot(p[0] - width * .5, p[1] - height * .43)))
+
+
 def pumpkin_probe_points(
     frame_rgb: np.ndarray, excluded: Iterable[tuple[float, float, float, float]] = (),
 ) -> tuple[tuple[float, float], ...]:
@@ -135,6 +160,107 @@ def minimap_quest_dots(frame_rgb: np.ndarray) -> tuple[tuple[float, float], ...]
                 and .5 <= width / height <= 2 and dx * dx + dy * dy <= .80 ** 2):
             dots.append((dx, dy))
     return tuple(dots)
+
+
+@lru_cache(maxsize=1)
+def _corpse_minimap_template():
+    path = Path(__file__).with_name("assets") / "corpse_minimap.png"
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    return cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA) if image is not None else None
+
+
+def minimap_corpse_pin(frame_rgb: np.ndarray) -> tuple[float, float] | None:
+    """Return the tombstone offset in minimap-radius units for a unique match."""
+    if frame_rgb.size == 0:
+        return None
+    height, width = frame_rgb.shape[:2]
+    if min(height, width) < 70 or not .85 <= width / height <= 1.15:
+        return None
+    template = _corpse_minimap_template()
+    if template is None:
+        return None
+    th, tw = template.shape[:2]
+    scale = min(height, width) / 194
+    peaks = []
+    for size in sorted({(round(tw * scale * factor), round(th * scale * factor))
+                        for factor in (.75, .85, .925, 1, 1.075, 1.16, 1.26, 1.4)}):
+        w, h = size
+        icon = cv2.resize(template, size, interpolation=cv2.INTER_NEAREST)
+        errors = cv2.matchTemplate(frame_rgb, icon[:, :, :3], cv2.TM_SQDIFF_NORMED, mask=icon[:, :, 3])
+        ys, xs = np.ogrid[:errors.shape[0], :errors.shape[1]]
+        dx, dy = (xs + w / 2) / (width / 2) - 1, (ys + h / 2) / (height / 2) - 1
+        errors[~np.isfinite(errors) | (dx * dx + dy * dy > .86 ** 2)] = 1
+        for _ in range(2):
+            error, _, (x, y), _ = cv2.minMaxLoc(errors)
+            if error > .12:
+                break
+            peaks.append((error, float(dx[0, x]), float(dy[y, 0])))
+            errors[(dx - dx[0, x]) ** 2 + (dy - dy[y, 0]) ** 2 <= .13 ** 2] = 1
+    if not peaks:
+        return None
+    error, x, y = min(peaks)
+    if error > .085 or any(other - error < .035 and (dx - x) ** 2 + (dy - y) ** 2 > .13 ** 2
+                           for other, dx, dy in peaks):
+        return None
+    return x, y
+
+
+@lru_cache(maxsize=1)
+def _corpse_arrow_templates():
+    image = cv2.imread(str(Path(__file__).with_name("assets") / "corpse_arrow.png"), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        return ()
+    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+    canvas = np.zeros((34, 34, 4), np.uint8)
+    h, w = image.shape[:2]
+    canvas[(34-h)//2:(34-h)//2+h, (34-w)//2:(34-w)//2+w] = image
+    return tuple((math.radians(135 - angle), cv2.warpAffine(
+        canvas, cv2.getRotationMatrix2D((17, 17), angle, 1), (34, 34)))
+        for angle in range(0, 360, 15))
+
+
+def minimap_corpse_bearing(frame_rgb: np.ndarray) -> tuple[float, float] | None:
+    """Recognize the red edge arrow; return direction only, never a distance."""
+    if frame_rgb.size == 0:
+        return None
+    height, width = frame_rgb.shape[:2]
+    if min(height, width) < 70 or not .85 <= width / height <= 1.15:
+        return None
+    red, green, blue = (frame_rgb[:, :, i].astype(float) for i in range(3))
+    mask = np.uint8((red > 110) & (red > green * 1.5) & (red > blue * 1.5))
+    _, _, stats, centers = cv2.connectedComponentsWithStats(mask)
+    directions = []
+    for (_, _, w, h, area), (x, y) in zip(stats[1:], centers[1:]):
+        dx, dy = x / (width / 2) - 1, y / (height / 2) - 1
+        scale = min(height, width) / 198
+        if .72 <= math.hypot(dx, dy) <= .96 and 25*scale**2 <= area <= 300*scale**2 and min(w, h) >= 6*scale:
+            directions.append(math.atan2(dy, dx))
+    if not directions:
+        return None
+    peaks = []
+    for angle, template in _corpse_arrow_templates():
+        if not any(math.cos(angle - direction) >= .94 for direction in directions):
+            continue
+        for factor in (.85, 1., 1.15):
+            size = round(34 * min(height, width) / 198 * factor)
+            icon = cv2.resize(template, (size, size))
+            mask = np.uint8(icon[:, :, 3] > 180) * 255
+            errors = cv2.matchTemplate(frame_rgb, icon[:, :, :3], cv2.TM_SQDIFF_NORMED, mask=mask)
+            ys, xs = np.ogrid[:errors.shape[0], :errors.shape[1]]
+            dx, dy = (xs + size / 2) / (width / 2) - 1, (ys + size / 2) / (height / 2) - 1
+            radius = np.sqrt(dx * dx + dy * dy)
+            alignment = (dx * math.cos(angle) + dy * math.sin(angle)) / np.maximum(radius, .01)
+            errors[~np.isfinite(errors) | (radius < .72) | (radius > .96) | (alignment < .94)] = 1
+            error, _, (x, y), _ = cv2.minMaxLoc(errors)
+            if error < .10:
+                peaks.append((error, float(dx[0, x]), float(dy[y, 0])))
+    if not peaks:
+        return None
+    error, x, y = min(peaks)
+    if any(other - error < .025 and (dx-x)**2 + (dy-y)**2 > .18**2 for other, dx, dy in peaks):
+        return None
+    radius = math.hypot(x, y)
+    return x / radius, y / radius
 
 
 def save_snapshot(img_rgb: np.ndarray, tag: str, directory: Path = SCREENSHOT_DIR) -> Optional[Path]:

@@ -483,7 +483,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         elif quest_mode:
             from .decision.startlux import LocalStartLux, QuestPlanner
 
-            planner = QuestPlanner(LocalStartLux(args.startlux_port))
+            planner = QuestPlanner(LocalStartLux(args.startlux_port, autostart=args.module == "quest_navigate"))
             if args.module == "quest_accept":
                 runner = QuestAcceptModule(ctx, args.key, planner, quest_module_args[1])
             elif args.module == "quest_navigate":
@@ -513,10 +513,20 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "stopped:quest_mount_not_confirmed": "已尝试使用原生驭空坐骑，游戏尚未确认骑乘任务进度。请查看游戏内提示及任务运行日志。",
                 "stopped:quest_object_interaction_unconfirmed": "已点击确认的任务物品，但任务进度尚未增加。角色已停在当前物品附近，请查看游戏内距离或互动提示。",
                 "stopped:game_not_frontmost": "魔兽未保持前台，脚本已停止。点击游戏窗口后让游戏保持在前台。",
+                "stopped:input_session_stopped": "键鼠助手已结束会话。切回魔兽并重新从「WoW 键鼠」启动任务。",
                 "stopped:quest_navigation_not_prepared": "已找到主色条，但未读取到寻路色条。请在插件里点「一键准备自动任务」，等准备完成后再启动。",
                 "stopped:quest_navigation_channel_stale": "寻路色条停止更新。请保持游戏和色条可见，再准备并启动任务。",
+                "stopped:quest_recovery_corpse_route_unavailable": "已识别到灵魂状态，但未取得跑尸所需的坐标、朝向或步行键位。请查看 quest_recovery_route_wait 日志中的缺失项。",
+                "stopped:quest_recovery_corpse_position_unavailable": "未读到尸体坐标、原生导航距离，也未能从小地图核对墓碑或红色方向箭头；已停止移动，请查看小地图识别日志。",
+                "stopped:quest_recovery_corpse_distance_search_unconfirmed": "已尝试根据游戏的尸体追踪距离定位，但读数未能确认前进方向。",
+                "stopped:quest_recovery_confirmation_unacknowledged": "已点击复活确认按钮，但游戏未报告角色存活。",
+                "stopped:quest_pet_revive_binding_unverified": "宠物已死亡，但复活宠物的 F11 临时绑定未通过核对。",
+                "stopped:quest_pet_revive_unconfirmed": "已尝试复活宠物，游戏仍未报告宠物存活。",
+                "stopped:quest_pet_summon_unconfirmed": "已尝试恢复宠物，游戏仍未报告宠物存活。",
+                "stopped:quest_pet_dismount_unconfirmed": "已发送下马键，游戏仍报告角色骑乘，宠物恢复暂停。",
                 "stopped:quest_automatic_preparation_lost": "运行中失去了已经核对的任务键位或游戏设置。",
-                "stopped:quest_turn_in_npc_not_in_interact_range": "游戏没有识别到范围内的交付 NPC，请核对名字和位置。",
+                "stopped:quest_turn_in_npc_not_in_interact_range": "已到任务标记，游戏尚未识别出交付 NPC。请核对人物和位置。",
+                "stopped:quest_turn_in_npc_selection_unconfirmed": "已尝试选中交付 NPC，游戏未确认选中了正确的人物。",
                 "stopped:quest_pickup_npc_not_found": "已搜索任务起点附近，仍未确认可交互的接取 NPC。",
                 "stopped:quest_pickup_npc_selection_unconfirmed": "已发现接取 NPC 并尝试选中，但游戏未确认目标，未发出互动键。",
                 "stopped:quest_turn_in_npc_lost": "靠近时失去了已确认的交付 NPC，已停止移动。",
@@ -527,14 +537,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "stopped:quest_turn_in_outside_five_yards": "已尝试靠近，仍在交付 NPC 的 5 码范围外。",
                 "stopped:quest_reward_choice_required": "游戏要求选择奖励，请在任务对话中选择。",
                 "stopped:quest_objective_profile_required": "任务已在日志中，当前目标无法匹配已实现的动作。请查看游戏内目标后再继续。",
+                "stopped:quest_objective_dialogue_choice_required": "已打开任务 NPC 的对话，任务进度未变化。请查看并处理对话选项。",
+                "stopped:quest_objective_npc_not_found": "已搜索任务标记附近，仍未确认对话目标。请核对 NPC 是否处于同一楼层或任务位面。",
                 "stopped:quest_object_not_found": "已搜索任务标记附近，游戏没有返回可确认的任务物件。",
                 "stopped:quest_defense_preparation_unavailable": "遇袭后无法核对任务键位和色条，未发送战斗按键。",
                 "stopped:quest_defense_binding_or_telemetry_unavailable": "遇袭后未能确认落地状态、战斗色条或输出键，请查看任务日志。",
+                "stopped:quest_defense_landing_unconfirmed": "遇袭后仍未确认落地，未在空中执行下马。",
+                "stopped:quest_defense_dismount_binding_unverified": "遇袭时仍在骑乘，下马键未通过核对。",
+                "stopped:quest_defense_dismount_unconfirmed": "已发送下马键，游戏仍报告角色骑乘。",
+                "stopped:quest_defense_retreat_unconfirmed": "已尝试撤离，游戏仍报告角色在战斗中。",
+                "stopped:quest_patrol_blocking_route": "强敌仍在附近，当前没有确认可用的绕行点。",
                 "stopped:quest_defense_timeout": "自卫超时，仍未脱战。请查看任务运行日志。",
                 "stopped:quest_round_state_changed": "本轮任务的接取或可交付状态发生变化，请在游戏中核对任务日志。",
                 "stopped:quest_round_advance_timeout": "游戏未确认切换到本轮的下一项，请查看任务日志。",
+                "stopped:quest_suspend_ack_timeout": "游戏未确认本次挂起及后续任务，请查看任务日志。",
+                "stopped:quest_player_telemetry_unavailable": "角色状态、位置或朝向数据失联，已停止会话。",
                 "stopped:quest_round_unexpected_switch": "游戏中的追踪任务或阶段已改变，请重新准备附近任务。",
                 "stopped:quest_destination_unavailable": "游戏没有返回当前目标或交付点的可用坐标。",
+                "stopped:quest_route_blocked": "目前没有核对到可走的路线。请查看日志中的卡点坐标和地形探查结果。",
+                "stopped:quest_cross_map_route_required": "目标在另一张地图或楼层。需要确认实际入口或交通连接。",
                 "stopped:quest_offer_not_open": "需要从当前任务的接取对话开始。",
                 "stopped:quest_accept_not_confirmed": "已经尝试接取，但任务日志未确认该任务。",
                 "stopped:quest_followup_not_confirmed": "前一任务已交付，但插件没有确认切换到后续任务。",
@@ -545,11 +566,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 explanations.update({
                     f"stopped:{prefix}facing_feedback_unavailable": "游戏报告朝向错误，但未能核对转向键或角色朝向。",
                     f"stopped:{prefix}facing_turn_timeout": "转向后未在时限内确认角色朝向变化。",
-                    f"stopped:{prefix}facing_unconfirmed": "尝试多个朝向后，游戏仍报告朝向错误。",
+                    f"stopped:{prefix}facing_unconfirmed": "小幅转向并重试后，游戏仍报告朝向错误。",
+                    f"stopped:{prefix}no_cast_or_damage_receipt": "输出键未收到匹配的施法成功或目标掉血回执。",
                 })
             if outcome.status in explanations:
                 print(explanations[outcome.status])
-            return 0 if outcome.status == "completed" else 3
+            if outcome.status == "completed_with_pending":
+                print(f"本轮结束，挂起 {outcome.stats.get('quests_suspended', 0)} 项。任务 ID 和原因见 quest_round_summary。")
+            return 0 if outcome.status in {"completed", "completed_with_pending"} else 3
         return 0 if not outcome.status.startswith("stopped") else 3
     finally:
         ctx.input.release_all()

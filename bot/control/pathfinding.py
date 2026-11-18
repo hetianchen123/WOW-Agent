@@ -2,11 +2,14 @@
 import heapq
 import math
 
+KNOWN_PASSAGE_COST = .7
+
 
 class GridRouter:
     def __init__(self, width: float, height: float, cell_size: float = 6):
         self.width, self.height, self.cell_size = width, height, cell_size
         self.blocked: set[tuple[int, int]] = set()
+        self.passages: set[frozenset[tuple[int, int]]] = set()
 
     def metric(self, position):
         return position[0] * self.width, position[1] * self.height
@@ -27,12 +30,26 @@ class GridRouter:
             self.blocked.add(self.cell(((x + (tx - x) / length * self.cell_size) / self.width,
                                         (y + (ty - y) / length * self.cell_size) / self.height)))
 
+    def remember_passage(self, trace):
+        """Record adjacent cells crossed during a confirmed local detour."""
+        cells = [self.cell(point) for point in trace]
+        for first, second in zip(cells, cells[1:]):
+            if first != second and max(abs(first[0] - second[0]), abs(first[1] - second[1])) == 1:
+                self.passages.add(frozenset((first, second)))
+
     def route(self, position, destination):
         if not self.blocked:
             return [destination]
         start, goal = self.cell(position), self.cell(destination)
         max_x, max_y = math.floor(self.width / self.cell_size), math.floor(self.height / self.cell_size)
-        frontier = [(math.dist(start, goal), 0.0, start)]
+        # A shortest route can use each discounted edge at most once.
+        max_discount = (1 - KNOWN_PASSAGE_COST) * math.sqrt(2) * len(self.passages)
+
+        def estimate(cell):
+            distance = math.dist(cell, goal)
+            return max(distance * KNOWN_PASSAGE_COST, distance - max_discount)
+
+        frontier = [(estimate(start), 0.0, start)]
         costs, previous = {start: 0.0}, {}
         visited = 0
         while frontier and visited < 20000:
@@ -55,8 +72,9 @@ class GridRouter:
                     continue
                 if dx and dy and ((x + dx, y) in self.blocked or (x, y + dy) in self.blocked):
                     continue
-                candidate = cost + math.hypot(dx, dy)
+                weight = KNOWN_PASSAGE_COST if frozenset((current, neighbor)) in self.passages else 1.0
+                candidate = cost + math.hypot(dx, dy) * weight
                 if candidate < costs.get(neighbor, math.inf):
                     costs[neighbor], previous[neighbor] = candidate, current
-                    heapq.heappush(frontier, (candidate + math.dist(neighbor, goal), candidate, neighbor))
+                    heapq.heappush(frontier, (candidate + estimate(neighbor), candidate, neighbor))
         return []

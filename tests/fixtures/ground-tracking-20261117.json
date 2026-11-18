@@ -1,0 +1,87 @@
+{
+  "source_run": "20261117T080311-61c26cea",
+  "frames": [
+    {
+      "frame_id": "8673fdc5d3e34879988b64d5c5546518",
+      "image_sha256": "d8374d7cbf384baa1e0bd83ea1610608765d4c2ded073ce82cd3e8a053750e46",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24589657392175096,
+        0.3667834918818396
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.3581388159754204,
+      "camera_signature": [
+        4,
+        32.0,
+        1
+      ],
+      "captured_at": 1367292.945865354
+    },
+    {
+      "frame_id": "c2d96987af364ccaad8c7c273ffb6337",
+      "image_sha256": "676653c4ba8787d14b59c7475c7822265000e21c5ef76606626e6059f7ba0e3c",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24589657392175096,
+        0.3667834918818396
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.5874751545889523,
+      "camera_signature": [
+        4,
+        32.0,
+        1
+      ],
+      "captured_at": 1367306.453346416
+    },
+    {
+      "frame_id": "8913f4c052b9469ca57478f5a6d9b54e",
+      "image_sha256": "8d2864a134e917ffb25873b4f1c30cbe3c0f6f99c83e385963a085d10f6b786d",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.24589657392175096,
+        0.3667834918818396
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 3.5874751545889523,
+      "camera_signature": [
+        4,
+        32.0,
+        1
+      ],
+      "captured_at": 1367313.233544604
+    }
+  ],
+  "same_rotation_in_last_two": true
+}

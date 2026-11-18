@@ -66,6 +66,11 @@ class ScreenCapture:
         self._grab_count = 0
         self._t0 = 0.0
 
+    def close(self) -> None:
+        if self._mss is not None:
+            self._mss.close()
+            self._mss = None
+
     def _ensure(self):
         if self._mss is None:
             import mss  # deferred: keeps import cheap for tests

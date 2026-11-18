@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import asdict
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -11,7 +13,8 @@ from ..control.estop import EStop
 from ..control.input_base import InputBase
 from ..core.config import BotConfig
 from ..core.events import EventBus
-from ..core.paths import SCREENSHOT_DIR
+from ..core.paths import SCREENSHOT_DIR, DATA_DIR
+from ..data.evidence import RunEvidence, build_manifest
 from ..data.db import Database
 from ..ops.notify import Notifier
 from ..perception.audio import AudioMonitor
@@ -51,6 +54,24 @@ class ModuleContext:
         self.stats: Dict[str, float] = {}
         self.gold_last_logged = 0.0
         self._fastev_cursor = 0
+        self.evidence = None
+        self.evidence_state = None
+        self.evidence_failed = False
+
+    def start_evidence(self, module: str) -> None:
+        if self.evidence is not None or not module.startswith("quest"):
+            return
+        installed = Path("/Volumes/Mac SSD1/Applications/World of Warcraft/_retail_/Interface/AddOns/WowAgent")
+        try:
+            manifest = build_manifest(installed=installed)
+            manifest.update(module=module, input_backend=self.input.name,
+                            configuration={name: asdict(getattr(self.cfg, name))
+                                           for name in ("navigation", "capture", "channel", "route_planner")})
+            self.evidence = RunEvidence(DATA_DIR / "runs", manifest)
+            self.log_event("run_evidence_started", {"directory": str(self.evidence.path)})
+        except (OSError, ValueError, TypeError) as exc:
+            self.evidence_failed = True
+            self.log.warning("run evidence unavailable: %s", exc)
 
     # ------------------------------------------------------------- per tick
     def begin_tick(self) -> None:
@@ -108,6 +129,12 @@ class ModuleContext:
 
     # ---------------------------------------------------------------- utils
     def log_event(self, kind: str, data: Optional[dict] = None) -> None:
+        if self.evidence is not None and not self.evidence_failed:
+            try:
+                data = self.evidence.record(kind, data, self.evidence_state)
+            except (OSError, ValueError, TypeError) as exc:
+                self.evidence_failed = True
+                self.log.warning("run evidence write failed: %s", exc)
         self.log.info("%s %s", kind, data or "")
         self.db.log_event(kind, data)
 

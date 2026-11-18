@@ -41,6 +41,14 @@ class MockInput(InputBase):
     def scroll(self, dy: int) -> None:
         self._record("scroll", dy)
 
+    def click_ui(self) -> None:
+        self._record("ui_click")
+        self.click()
+
+    def click_world_object(self) -> None:
+        self._record("world_click")
+        self.right_click()
+
     # ---------------------------------------------------------------- helpers
     def count(self, kind: str, *args) -> int:
         return sum(1 for _, k, a in self.actions if k == kind and (not args or a[: len(args)] == args))

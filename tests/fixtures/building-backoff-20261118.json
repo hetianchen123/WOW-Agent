@@ -1,0 +1,113 @@
+{
+  "description": "Saved local model output on an actual WoW screenshot; contains no subsequent motion or calibrated route.",
+  "cases": {
+    "current-crop": {
+      "source": "data/terrain/building-backoff-20261118/current-crop/scene.json",
+      "source_sha256": "d32b644a8c4be4ead10cae8ac47528d1edf13341a92703e8b8b0f5e86f8af5bb",
+      "image_sha256": "321f5b6c8490e7b73a5f85eeb783ba439e4e2ebcaae8c4fc27ba9250fac57fc2",
+      "scene": {
+        "schema": 1,
+        "surface": "unknown",
+        "doorways": [],
+        "layout": {
+          "schema": 1,
+          "coordinate_space": "current_image",
+          "size": [
+            1012,
+            586
+          ],
+          "hints": [],
+          "floor_regions": [],
+          "exterior_regions": [],
+          "portals": [],
+          "connectors": [],
+          "level_id": null,
+          "room_id": null,
+          "world_coordinates": null,
+          "executable": false
+        },
+        "executable": false,
+        "ground_measurement": {
+          "ground_pixels": 0,
+          "feature_threshold": 5,
+          "high_contrast_features": 0,
+          "texture_features": 0,
+          "minimum_features": 40,
+          "look_hint": null,
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        }
+      }
+    },
+    "current-overview": {
+      "source": "data/terrain/building-backoff-20261118/current-overview/scene.json",
+      "source_sha256": "5acc64ace6fb7a52d7cb958e9236ab71e9537f2b034a5bed66b17252962ea896",
+      "image_sha256": "fa2c693762afe18a93619d70f1299445bc21fd5f68106ff567bb8576b74383c1",
+      "scene": {
+        "schema": 1,
+        "surface": "unknown",
+        "doorways": [],
+        "layout": {
+          "schema": 1,
+          "coordinate_space": "current_image",
+          "size": [
+            1688,
+            977
+          ],
+          "hints": [
+            "interior_floor",
+            "enclosed_outdoor_candidate"
+          ],
+          "floor_regions": [
+            {
+              "box": [
+                1215,
+                772,
+                1302,
+                894
+              ],
+              "pixels": 7568
+            },
+            {
+              "box": [
+                1391,
+                819,
+                1434,
+                838
+              ],
+              "pixels": 476
+            }
+          ],
+          "exterior_regions": [
+            {
+              "box": [
+                1215,
+                694,
+                1228,
+                706
+              ],
+              "pixels": 112
+            }
+          ],
+          "portals": [],
+          "connectors": [],
+          "level_id": null,
+          "room_id": null,
+          "world_coordinates": null,
+          "executable": false
+        },
+        "executable": false,
+        "ground_measurement": {
+          "ground_pixels": 0,
+          "feature_threshold": 5,
+          "high_contrast_features": 0,
+          "texture_features": 0,
+          "minimum_features": 40,
+          "look_hint": null,
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        }
+      }
+    }
+  }
+}

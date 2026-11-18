@@ -1,0 +1,471 @@
+{
+  "run_id": "20261118T043707-c0363098",
+  "frames": [
+    {
+      "scene": {
+        "frame_id": "afa53823754e48fa924af17e2e9165d7",
+        "image_sha256": "0f20a470dec4117a78a31dc1f3d4b98832a1112dadab255091c47bff37f755af",
+        "schema": 1,
+        "executable": false,
+        "surface": "unknown",
+        "doorways": [],
+        "ground_measurement": {
+          "ground_pixels": 31801,
+          "feature_threshold": 12,
+          "high_contrast_features": 99,
+          "texture_features": 99,
+          "minimum_features": 40,
+          "look_hint": "right",
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        },
+        "visual_ui_hidden": 1,
+        "layout": {
+          "schema": 1,
+          "size": [
+            1012,
+            586
+          ],
+          "coordinate_space": "current_image",
+          "floor_regions": [
+            {
+              "box": [
+                737,
+                490,
+                861,
+                550
+              ],
+              "pixels": 1245
+            }
+          ],
+          "exterior_regions": [
+            {
+              "box": [
+                535,
+                416,
+                961,
+                586
+              ],
+              "pixels": 25241
+            },
+            {
+              "box": [
+                704,
+                467,
+                953,
+                586
+              ],
+              "pixels": 18138
+            },
+            {
+              "box": [
+                216,
+                519,
+                364,
+                586
+              ],
+              "pixels": 7044
+            },
+            {
+              "box": [
+                766,
+                377,
+                927,
+                425
+              ],
+              "pixels": 5466
+            },
+            {
+              "box": [
+                640,
+                447,
+                709,
+                470
+              ],
+              "pixels": 518
+            },
+            {
+              "box": [
+                580,
+                462,
+                614,
+                485
+              ],
+              "pixels": 432
+            },
+            {
+              "box": [
+                939,
+                368,
+                961,
+                396
+              ],
+              "pixels": 300
+            },
+            {
+              "box": [
+                826,
+                493,
+                855,
+                506
+              ],
+              "pixels": 73
+            },
+            {
+              "box": [
+                603,
+                558,
+                615,
+                565
+              ],
+              "pixels": 59
+            }
+          ]
+        }
+      },
+      "nav": {
+        "quest_id": 90896,
+        "map_id": 2451,
+        "destination_map": 2451,
+        "destination": [
+          0.28929928712776865,
+          0.3072054931693012
+        ],
+        "position": [
+          0.28079536513840214,
+          0.32080871659156474
+        ],
+        "world_size": [
+          3477.1,
+          2318.8
+        ],
+        "height": 0.0,
+        "phase": 2,
+        "flags": 6915,
+        "sequence": 98,
+        "task": 33,
+        "objective_index": 1,
+        "objective_target": 0,
+        "camera": {
+          "zoom": 38.5,
+          "view": 2,
+          "scene": 1,
+          "applied": 1,
+          "request": 1,
+          "result": 2,
+          "paused": false,
+          "calibrated": false
+        },
+        "camera_epoch": 1,
+        "overhead_camera_available": true,
+        "camera_restore_available": true,
+        "calibration_orbit_available": true,
+        "strafe_verified": true,
+        "visual_ui_hidden": 1,
+        "recovery": {
+          "life": 1,
+          "corpse": null,
+          "button": null,
+          "ui_aspect": 0.0,
+          "dialog": false,
+          "hovered": false,
+          "pet": 2,
+          "pet_expected": true,
+          "follow": true,
+          "summon": true,
+          "revive": true,
+          "buff_missing": false,
+          "buff_unverified": false,
+          "walk_verified": null,
+          "facing": null,
+          "corpse_source": 0,
+          "corpse_distance": null,
+          "pet_health": null,
+          "mend_verified": true,
+          "mend_active": false,
+          "mend_unusable": false,
+          "mend_epoch": 0,
+          "patrol_id": 0,
+          "patrol_danger": 0,
+          "attacker_count": 0,
+          "attacker_cursor": null,
+          "attacker_hovered": false,
+          "attacker_scan_supported": false
+        }
+      },
+      "heading": 4.979823971443703,
+      "latency_s": 16.766
+    },
+    {
+      "scene": {
+        "frame_id": "0a74c0a187fd420d935f752ea1305009",
+        "image_sha256": "7fda2e40bfb4da3962250098c121e15962dce03393243a403ea83fa5d23c9d29",
+        "schema": 1,
+        "executable": false,
+        "surface": "unknown",
+        "doorways": [
+          {
+            "box": [
+              90.7133560180664,
+              318.5375061035156,
+              292.4630126953125,
+              528.205078125
+            ],
+            "threshold_box": [
+              91,
+              522,
+              292,
+              566
+            ],
+            "score": 0.4773147404193878,
+            "connected_ground_fraction": 0.0,
+            "threshold_observed": false,
+            "passage_verified": false,
+            "surround_structure": [
+              1.0,
+              0.0430622009569378,
+              0.647488038277512
+            ],
+            "opening_fraction": 0.23466400057130615
+          },
+          {
+            "box": [
+              2.6981844902038574,
+              241.75477600097656,
+              389.0405578613281,
+              580.8728637695312
+            ],
+            "threshold_box": [
+              3,
+              575,
+              389,
+              586
+            ],
+            "score": 0.37318551540374756,
+            "connected_ground_fraction": 0.044747998115873766,
+            "threshold_observed": false,
+            "passage_verified": false,
+            "surround_structure": [
+              0.9032651687284355,
+              0.23402163225172073,
+              0.46078994751561125
+            ],
+            "opening_fraction": 0.08247359652742751
+          }
+        ],
+        "ground_measurement": {
+          "ground_pixels": 67500,
+          "feature_threshold": 12,
+          "high_contrast_features": 259,
+          "texture_features": 259,
+          "minimum_features": 40,
+          "look_hint": "right",
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        },
+        "visual_ui_hidden": 1,
+        "layout": {
+          "schema": 1,
+          "size": [
+            1012,
+            586
+          ],
+          "coordinate_space": "current_image",
+          "floor_regions": [
+            {
+              "box": [
+                162,
+                431,
+                273,
+                519
+              ],
+              "pixels": 6892
+            },
+            {
+              "box": [
+                209,
+                571,
+                236,
+                586
+              ],
+              "pixels": 252
+            },
+            {
+              "box": [
+                242,
+                498,
+                253,
+                505
+              ],
+              "pixels": 28
+            }
+          ],
+          "exterior_regions": [
+            {
+              "box": [
+                521,
+                297,
+                961,
+                586
+              ],
+              "pixels": 70138
+            },
+            {
+              "box": [
+                764,
+                168,
+                1012,
+                338
+              ],
+              "pixels": 16140
+            },
+            {
+              "box": [
+                957,
+                120,
+                1012,
+                170
+              ],
+              "pixels": 1623
+            },
+            {
+              "box": [
+                691,
+                348,
+                741,
+                396
+              ],
+              "pixels": 1584
+            },
+            {
+              "box": [
+                563,
+                300,
+                617,
+                335
+              ],
+              "pixels": 1401
+            },
+            {
+              "box": [
+                555,
+                439,
+                633,
+                468
+              ],
+              "pixels": 1399
+            },
+            {
+              "box": [
+                912,
+                477,
+                961,
+                514
+              ],
+              "pixels": 1136
+            },
+            {
+              "box": [
+                468,
+                399,
+                505,
+                422
+              ],
+              "pixels": 584
+            },
+            {
+              "box": [
+                910,
+                517,
+                934,
+                539
+              ],
+              "pixels": 365
+            },
+            {
+              "box": [
+                750,
+                348,
+                758,
+                352
+              ],
+              "pixels": 20
+            }
+          ]
+        }
+      },
+      "nav": {
+        "quest_id": 90896,
+        "map_id": 2451,
+        "destination_map": 2451,
+        "destination": [
+          0.28929928712776865,
+          0.3072054931693012
+        ],
+        "position": [
+          0.28079536513840214,
+          0.32080871659156474
+        ],
+        "world_size": [
+          3477.1,
+          2318.8
+        ],
+        "height": 0.0,
+        "phase": 2,
+        "flags": 6915,
+        "sequence": 79,
+        "task": 33,
+        "objective_index": 1,
+        "objective_target": 0,
+        "camera": {
+          "zoom": 32.0,
+          "view": 4,
+          "scene": 1,
+          "applied": 14,
+          "request": 2,
+          "result": 2,
+          "paused": false,
+          "calibrated": false
+        },
+        "camera_epoch": 0,
+        "overhead_camera_available": true,
+        "camera_restore_available": true,
+        "calibration_orbit_available": true,
+        "strafe_verified": true,
+        "visual_ui_hidden": 1,
+        "recovery": {
+          "life": 1,
+          "corpse": null,
+          "button": null,
+          "ui_aspect": 0.0,
+          "dialog": false,
+          "hovered": false,
+          "pet": 2,
+          "pet_expected": true,
+          "follow": true,
+          "summon": true,
+          "revive": true,
+          "buff_missing": false,
+          "buff_unverified": false,
+          "walk_verified": null,
+          "facing": null,
+          "corpse_source": 0,
+          "corpse_distance": null,
+          "pet_health": null,
+          "mend_verified": true,
+          "mend_active": false,
+          "mend_unusable": false,
+          "mend_epoch": 0,
+          "patrol_id": 0,
+          "patrol_danger": 0,
+          "attacker_count": 0,
+          "attacker_cursor": null,
+          "attacker_hovered": false,
+          "attacker_scan_supported": false
+        }
+      },
+      "heading": 4.979823971443703,
+      "latency_s": 9.642
+    }
+  ]
+}

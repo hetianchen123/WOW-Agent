@@ -19,6 +19,10 @@ def has_helper_socket() -> bool:
     return in_controller_app() and os.environ.get("WOWAGENT_INPUT_SOCKET") == "1"
 
 
+class HelperSessionStopped(OSError):
+    """The input helper has already disarmed and released its held keys."""
+
+
 class HelperInput(InputBase):
     name = "helper"
 
@@ -62,7 +66,10 @@ class HelperInput(InputBase):
                 self._failed = True
                 raise
             if reply.get("ok") is not True:
-                raise OSError(str(reply.get("error", "键鼠执行器拒绝操作")))
+                message = str(reply.get("error", "键鼠执行器拒绝操作"))
+                if message in {"键鼠会话已停止", "魔兽窗口不在前台"}:
+                    raise HelperSessionStopped(message)
+                raise OSError(message)
             return reply
 
     def interrupted(self) -> bool:

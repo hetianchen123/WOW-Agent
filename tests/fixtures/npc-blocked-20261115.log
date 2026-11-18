@@ -1,0 +1,6 @@
+2026-11-15 14:25:53,270 INFO    module: quest_navigation_start {'id': 90895, 'map': 2451, 'controller': '0.1.0', 'protocol': 15, 'phase': 'READY', 'mode': 'prepared'}
+2026-11-15 14:26:32,936 INFO    module: quest_npc_visual_result {'id': 90895, 'result': 'no_passage', 'position': (0.2472841713754381, 0.36962449037980116)}
+2026-11-15 14:26:33,152 INFO    module: quest_suspended {'id': 90895, 'phase': 'READY', 'reason': 'quest_npc_route_unconfirmed'}
+2026-11-15 14:27:16,917 INFO    module: quest_npc_visual_result {'id': 90893, 'result': 'no_passage', 'position': (0.24719357222897742, 0.3694490141382352)}
+2026-11-15 14:27:17,191 INFO    module: quest_suspended {'id': 90893, 'phase': 'READY', 'reason': 'quest_npc_route_unconfirmed'}
+2026-11-15 14:27:23,432 INFO    module: module_end {'module': 'quest_navigate', 'status': 'completed_with_pending', 'stats': {'quests_suspended': 2, 'quest_rounds_done': 1, 'duration_s': 90.4}}

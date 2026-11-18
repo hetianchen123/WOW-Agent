@@ -1,0 +1,429 @@
+{
+  "source": "/Volumes/Mac SSD1/projects/wow-agnet/data/terrain/segmented-5983fa3a3f52450696c274191a1785b6/image.png",
+  "source_sha256": "d1ade6babe4449429395ae3802e308e5d759c2bd089674658e3f5000854b5523",
+  "names": {
+    "0": "wall",
+    "1": "building",
+    "2": "sky",
+    "3": "floor",
+    "4": "tree",
+    "5": "ceiling",
+    "6": "road",
+    "7": "bed ",
+    "8": "windowpane",
+    "9": "grass",
+    "10": "cabinet",
+    "11": "sidewalk",
+    "12": "person",
+    "13": "earth",
+    "14": "door",
+    "15": "table",
+    "16": "mountain",
+    "17": "plant",
+    "18": "curtain",
+    "19": "chair",
+    "20": "car",
+    "21": "water",
+    "22": "painting",
+    "23": "sofa",
+    "24": "shelf",
+    "25": "house",
+    "26": "sea",
+    "27": "mirror",
+    "28": "rug",
+    "29": "field",
+    "30": "armchair",
+    "31": "seat",
+    "32": "fence",
+    "33": "desk",
+    "34": "rock",
+    "35": "wardrobe",
+    "36": "lamp",
+    "37": "bathtub",
+    "38": "railing",
+    "39": "cushion",
+    "40": "base",
+    "41": "box",
+    "42": "column",
+    "43": "signboard",
+    "44": "chest of drawers",
+    "45": "counter",
+    "46": "sand",
+    "47": "sink",
+    "48": "skyscraper",
+    "49": "fireplace",
+    "50": "refrigerator",
+    "51": "grandstand",
+    "52": "path",
+    "53": "stairs",
+    "54": "runway",
+    "55": "case",
+    "56": "pool table",
+    "57": "pillow",
+    "58": "screen door",
+    "59": "stairway",
+    "60": "river",
+    "61": "bridge",
+    "62": "bookcase",
+    "63": "blind",
+    "64": "coffee table",
+    "65": "toilet",
+    "66": "flower",
+    "67": "book",
+    "68": "hill",
+    "69": "bench",
+    "70": "countertop",
+    "71": "stove",
+    "72": "palm",
+    "73": "kitchen island",
+    "74": "computer",
+    "75": "swivel chair",
+    "76": "boat",
+    "77": "bar",
+    "78": "arcade machine",
+    "79": "hovel",
+    "80": "bus",
+    "81": "towel",
+    "82": "light",
+    "83": "truck",
+    "84": "tower",
+    "85": "chandelier",
+    "86": "awning",
+    "87": "streetlight",
+    "88": "booth",
+    "89": "television receiver",
+    "90": "airplane",
+    "91": "dirt track",
+    "92": "apparel",
+    "93": "pole",
+    "94": "land",
+    "95": "bannister",
+    "96": "escalator",
+    "97": "ottoman",
+    "98": "bottle",
+    "99": "buffet",
+    "100": "poster",
+    "101": "stage",
+    "102": "van",
+    "103": "ship",
+    "104": "fountain",
+    "105": "conveyer belt",
+    "106": "canopy",
+    "107": "washer",
+    "108": "plaything",
+    "109": "swimming pool",
+    "110": "stool",
+    "111": "barrel",
+    "112": "basket",
+    "113": "waterfall",
+    "114": "tent",
+    "115": "bag",
+    "116": "minibike",
+    "117": "cradle",
+    "118": "oven",
+    "119": "ball",
+    "120": "food",
+    "121": "step",
+    "122": "tank",
+    "123": "trade name",
+    "124": "microwave",
+    "125": "pot",
+    "126": "animal",
+    "127": "bicycle",
+    "128": "lake",
+    "129": "dishwasher",
+    "130": "screen",
+    "131": "blanket",
+    "132": "sculpture",
+    "133": "hood",
+    "134": "sconce",
+    "135": "vase",
+    "136": "traffic light",
+    "137": "tray",
+    "138": "ashcan",
+    "139": "fan",
+    "140": "pier",
+    "141": "crt screen",
+    "142": "plate",
+    "143": "monitor",
+    "144": "bulletin board",
+    "145": "shower",
+    "146": "radiator",
+    "147": "glass",
+    "148": "clock",
+    "149": "flag"
+  },
+  "instances": [
+    {
+      "box": [
+        216.8741455078125,
+        286.43218994140625,
+        318.7616882324219,
+        450.9175720214844
+      ],
+      "label": "stairs",
+      "detection_score": 0.6431427597999573,
+      "mask_score": 0.9078453183174133,
+      "candidate_scores": [
+        0.8923628330230713,
+        0.8901786208152771,
+        0.9078453183174133
+      ],
+      "selected": 2
+    },
+    {
+      "box": [
+        123.73202514648438,
+        218.1634979248047,
+        381.58929443359375,
+        462.3711242675781
+      ],
+      "label": "open doorway entrance",
+      "detection_score": 0.41478508710861206,
+      "mask_score": 0.856647789478302,
+      "candidate_scores": [
+        0.8521066904067993,
+        0.8217129111289978,
+        0.856647789478302
+      ],
+      "selected": 2
+    },
+    {
+      "box": [
+        4.952203750610352,
+        4.999098777770996,
+        1006.2327880859375,
+        580.7549438476562
+      ],
+      "label": "building",
+      "detection_score": 0.4147506356239319,
+      "mask_score": 0.6228337287902832,
+      "candidate_scores": [
+        0.1520829051733017,
+        0.33124276995658875,
+        0.6228337287902832
+      ],
+      "selected": 2
+    },
+    {
+      "box": [
+        2.3820629119873047,
+        376.41357421875,
+        929.2151489257812,
+        583.89404296875
+      ],
+      "label": "road",
+      "detection_score": 0.3232073187828064,
+      "mask_score": 0.6807732582092285,
+      "candidate_scores": [
+        0.20874212682247162,
+        0.6403098106384277,
+        0.6807732582092285
+      ],
+      "selected": 2
+    },
+    {
+      "box": [
+        182.08995056152344,
+        265.9956970214844,
+        327.0501403808594,
+        458.7386169433594
+      ],
+      "label": "open doorway entrance",
+      "detection_score": 0.314670205116272,
+      "mask_score": 0.9064140319824219,
+      "candidate_scores": [
+        0.4737359881401062,
+        0.9064140319824219,
+        0.8746142387390137
+      ],
+      "selected": 1
+    },
+    {
+      "box": [
+        93.34546661376953,
+        191.26443481445312,
+        422.8619384765625,
+        494.8399353027344
+      ],
+      "label": "open doorway",
+      "detection_score": 0.26348137855529785,
+      "mask_score": 0.8357837200164795,
+      "candidate_scores": [
+        0.8357837200164795,
+        0.4339264929294586,
+        0.8167914152145386
+      ],
+      "selected": 0
+    },
+    {
+      "box": [
+        525.4617919921875,
+        388.97198486328125,
+        788.910888671875,
+        508.3558044433594
+      ],
+      "label": "grass",
+      "detection_score": 0.2608228623867035,
+      "mask_score": 0.9307196736335754,
+      "candidate_scores": [
+        0.8184813261032104,
+        0.8503588438034058,
+        0.9307196736335754
+      ],
+      "selected": 2
+    },
+    {
+      "box": [
+        484.9203796386719,
+        375.2492370605469,
+        929.5819091796875,
+        582.678955078125
+      ],
+      "label": "grass",
+      "detection_score": 0.25114479660987854,
+      "mask_score": 0.7703311443328857,
+      "candidate_scores": [
+        0.11195538938045502,
+        0.704056978225708,
+        0.7703311443328857
+      ],
+      "selected": 2
+    }
+  ],
+  "camera_view": 2,
+  "scene": {
+    "schema": 1,
+    "surface": "unknown",
+    "support": {
+      "exterior": 0.1272114307454926,
+      "floor": 0.028397201496480735,
+      "structure": 0.07997083130772971,
+      "water": 0.0
+    },
+    "surface_evidence": {
+      "schema": 1,
+      "camera_view": 2,
+      "visible_surface_fraction": 0.23557946354970302,
+      "exterior_share_of_visible_surface": 0.5399937194383384,
+      "connected_patch_fraction": 0.12330113504259052,
+      "nearby_patch_fraction": 0.12994090106685088,
+      "nearby_structure_fraction": 0.0,
+      "nearby_water_fraction": 0.0,
+      "basis": "unconfirmed",
+      "occlusion_requirements": {
+        "overhead": false,
+        "visible_ground": false,
+        "surface_agreement": false,
+        "connected_patch": true,
+        "nearby_patch": false,
+        "no_surface_conflict": true
+      }
+    },
+    "doorways": [
+      {
+        "box": [
+          123.73202514648438,
+          218.1634979248047,
+          381.58929443359375,
+          462.3711242675781
+        ],
+        "threshold_box": [
+          124,
+          456,
+          382,
+          506
+        ],
+        "score": 0.41478508710861206,
+        "connected_ground_fraction": 0.03131782945736434,
+        "threshold_observed": false,
+        "passage_verified": false,
+        "surround_structure": [
+          0.9787218157383903,
+          0.3422131147540984,
+          0.5431904161412359
+        ],
+        "opening_fraction": 0.1391536408692337
+      },
+      {
+        "box": [
+          182.08995056152344,
+          265.9956970214844,
+          327.0501403808594,
+          458.7386169433594
+        ],
+        "threshold_box": [
+          182,
+          453,
+          327,
+          493
+        ],
+        "score": 0.314670205116272,
+        "connected_ground_fraction": 0.0,
+        "threshold_observed": false,
+        "passage_verified": false,
+        "surround_structure": [
+          0.45286223883132326,
+          0.1302483473289262,
+          0.27514740039306773
+        ],
+        "opening_fraction": 0.3039842772914061
+      }
+    ],
+    "rejected_doorways": [],
+    "look_hint": "left",
+    "building_visible": true,
+    "executable": false,
+    "world_coordinates": null,
+    "entrance_verified": false
+  },
+  "request": {
+    "automatic": true,
+    "session_id": "bb2cc06edfa24354a4f115286386bba5",
+    "models": "/Volumes/Mac SSD1/projects/wow-agnet/data/segmentation/models.json",
+    "checkpoint": "/Volumes/Mac SSD1/projects/wow-agnet/data/segmentation/sam2.1_hiera_large.pt",
+    "device": "cpu",
+    "quest_id": 90896,
+    "phase": "ACTIVE",
+    "objective_index": 1,
+    "convention": "ccw_west",
+    "blocked": [],
+    "visited": [],
+    "motion_history": [],
+    "strafe_verified": true,
+    "destination": [
+      0.28929928712776865,
+      0.3072054931693012
+    ],
+    "goal_mode": "building_entry",
+    "calibration_cache": "/Volumes/Mac SSD1/projects/wow-agnet/data/calibration/automatic-local.npz",
+    "frame": {
+      "frame_id": "5983fa3a3f52450696c274191a1785b6",
+      "image_sha256": "d1ade6babe4449429395ae3802e308e5d759c2bd089674658e3f5000854b5523",
+      "size": [
+        1012,
+        586
+      ],
+      "map_id": 2451,
+      "floor_id": "automatic-local-plane",
+      "world_size": [
+        3477.1,
+        2318.8
+      ],
+      "player_position": [
+        0.28079536513840214,
+        0.32080871659156474
+      ],
+      "player_feet": null,
+      "height": 0.0,
+      "heading": 5.44023209977134,
+      "camera_signature": [
+        2,
+        38.5,
+        1
+      ],
+      "captured_at": 1385625.7888245624
+    }
+  },
+  "scope": "Real saved image and local model replay with conservative HUD exclusion; no new game inputs or metric route validation. Semantic confidence stored float16."
+}

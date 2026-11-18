@@ -1,0 +1,496 @@
+{
+  "run": "20261118T061623-4659a024",
+  "native": {
+    "quest_id": 90896,
+    "map_id": 2451,
+    "destination_map": 2451,
+    "destination": [
+      0.28929928712776865,
+      0.3072054931693012
+    ],
+    "position": [
+      0.27996948239277114,
+      0.3218920916481892
+    ],
+    "world_size": [
+      3477.1,
+      2318.8
+    ],
+    "height": 0.0,
+    "phase": 2,
+    "flags": 6915,
+    "sequence": 83,
+    "flight_mount_active": false,
+    "interact_verified": true,
+    "descent_key": "x",
+    "sky_pitch_key": "0",
+    "sky_dismount_key": "z",
+    "sky_ascent_key": null,
+    "sky_halt_key": null,
+    "task": 33,
+    "npc_range_supported": true,
+    "mount_button": null,
+    "mount_button_key": null,
+    "objective_action": 1,
+    "objective_target": 0,
+    "objective_cursor": null,
+    "round_stage": 2,
+    "round_advance": false,
+    "round_blocked": false,
+    "round_immediate": false,
+    "objective_pin": false,
+    "minimap": null,
+    "corpse_lootable": null,
+    "fetch_ready": true,
+    "precise_object": false,
+    "apr_waypoint": false,
+    "strafe_verified": true,
+    "last_target_verified": true,
+    "recovery": {
+      "life": 1,
+      "corpse": null,
+      "button": null,
+      "ui_aspect": 0.0,
+      "dialog": false,
+      "hovered": false,
+      "pet": 2,
+      "pet_expected": true,
+      "follow": true,
+      "summon": true,
+      "revive": true,
+      "buff_missing": false,
+      "buff_unverified": false,
+      "walk_verified": null,
+      "facing": null,
+      "corpse_source": 0,
+      "corpse_distance": null,
+      "pet_health": null,
+      "mend_verified": true,
+      "mend_active": false,
+      "mend_unusable": false,
+      "mend_epoch": 0,
+      "patrol_id": 0,
+      "patrol_danger": 0,
+      "attacker_count": 0,
+      "attacker_cursor": null,
+      "attacker_hovered": false,
+      "attacker_scan_supported": false
+    },
+    "loot_epoch": 0,
+    "sweep_ready": true,
+    "search_area": null,
+    "sky_flight": null,
+    "camera_restore_available": true,
+    "camera_zoom_close": false,
+    "camera_epoch": 0,
+    "objective_index": 1,
+    "objectives_finished": false,
+    "objective_progress": [
+      0,
+      1
+    ],
+    "objective_resource": false,
+    "suspend_ready": true,
+    "suspend_epoch": 7,
+    "current_suspended": false,
+    "protocol_version": 15,
+    "camera": {
+      "zoom": 38.5,
+      "view": 2,
+      "scene": 1,
+      "applied": 1,
+      "request": 0,
+      "result": 2,
+      "paused": false,
+      "calibrated": false
+    },
+    "addon_build": 274,
+    "probe_camera_available": true,
+    "overhead_camera_available": true,
+    "calibration_orbit_available": true,
+    "calibration_orbit_active": false,
+    "round_pending_count": 0,
+    "extension_schema": 6,
+    "visual_ui_hidden": 1
+  },
+  "frames": [
+    {
+      "scene": {
+        "schema": 1,
+        "frame_id": "3ad0ffe4e0194654ae42be0ba3abce32",
+        "image_sha256": "f2db057095a8a95cd8f75b9722ca46a49591151eab6a2c90d93d55de056c6d85",
+        "surface": "unknown",
+        "executable": false,
+        "building_visible": true,
+        "doorways": [],
+        "ground_measurement": {
+          "ground_pixels": 33257,
+          "feature_threshold": 12,
+          "high_contrast_features": 42,
+          "texture_features": 42,
+          "minimum_features": 40,
+          "look_hint": "right",
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        },
+        "layout": {
+          "schema": 1,
+          "coordinate_space": "current_image",
+          "size": [
+            1012,
+            586
+          ],
+          "exterior_regions": [
+            {
+              "box": [
+                532,
+                503,
+                961,
+                586
+              ],
+              "pixels": 23777
+            },
+            {
+              "box": [
+                936,
+                582,
+                945,
+                586
+              ],
+              "pixels": 33
+            }
+          ],
+          "floor_regions": [
+            {
+              "box": [
+                476,
+                356,
+                961,
+                511
+              ],
+              "pixels": 25930
+            },
+            {
+              "box": [
+                383,
+                503,
+                502,
+                586
+              ],
+              "pixels": 3239
+            },
+            {
+              "box": [
+                162,
+                557,
+                276,
+                586
+              ],
+              "pixels": 2471
+            },
+            {
+              "box": [
+                347,
+                568,
+                359,
+                577
+              ],
+              "pixels": 86
+            },
+            {
+              "box": [
+                776,
+                504,
+                789,
+                510
+              ],
+              "pixels": 52
+            },
+            {
+              "box": [
+                326,
+                560,
+                339,
+                564
+              ],
+              "pixels": 30
+            }
+          ]
+        }
+      },
+      "camera": {
+        "zoom": 38.5,
+        "view": 2,
+        "scene": 1,
+        "applied": 1,
+        "request": 0,
+        "result": 2,
+        "paused": false,
+        "calibrated": false
+      },
+      "heading": 5.680688085943188,
+      "latency_s": 12.203
+    },
+    {
+      "scene": {
+        "schema": 1,
+        "frame_id": "7fd14b3775754533ad88146173d302af",
+        "image_sha256": "4188956425b13b1e07c9d04ffdb0c1e5d86655cd18d286001231e01b2155cf97",
+        "surface": "unknown",
+        "executable": false,
+        "building_visible": true,
+        "doorways": [],
+        "ground_measurement": {
+          "ground_pixels": 16604,
+          "feature_threshold": 12,
+          "high_contrast_features": 56,
+          "texture_features": 56,
+          "minimum_features": 40,
+          "look_hint": "center",
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        },
+        "layout": {
+          "schema": 1,
+          "coordinate_space": "current_image",
+          "size": [
+            1012,
+            586
+          ],
+          "exterior_regions": [
+            {
+              "box": [
+                515,
+                311,
+                793,
+                391
+              ],
+              "pixels": 11554
+            },
+            {
+              "box": [
+                471,
+                366,
+                604,
+                548
+              ],
+              "pixels": 11066
+            },
+            {
+              "box": [
+                162,
+                500,
+                269,
+                586
+              ],
+              "pixels": 6431
+            },
+            {
+              "box": [
+                702,
+                457,
+                768,
+                525
+              ],
+              "pixels": 3306
+            },
+            {
+              "box": [
+                0,
+                234,
+                63,
+                291
+              ],
+              "pixels": 2566
+            },
+            {
+              "box": [
+                642,
+                480,
+                660,
+                509
+              ],
+              "pixels": 371
+            },
+            {
+              "box": [
+                620,
+                510,
+                622,
+                519
+              ],
+              "pixels": 17
+            }
+          ],
+          "floor_regions": [
+            {
+              "box": [
+                162,
+                429,
+                506,
+                586
+              ],
+              "pixels": 17270
+            },
+            {
+              "box": [
+                256,
+                294,
+                310,
+                339
+              ],
+              "pixels": 1634
+            },
+            {
+              "box": [
+                264,
+                550,
+                328,
+                586
+              ],
+              "pixels": 1207
+            }
+          ]
+        }
+      },
+      "camera": {
+        "zoom": 32.0,
+        "view": 4,
+        "scene": 1,
+        "applied": 14,
+        "request": 1,
+        "result": 2,
+        "paused": false,
+        "calibrated": false
+      },
+      "heading": 5.680688085943188,
+      "latency_s": 9.046
+    },
+    {
+      "scene": {
+        "schema": 1,
+        "frame_id": "a2946817cd4745b8aed8024c4dd48ecf",
+        "image_sha256": "b8b26de17329c33220f5bc30a811c68812eb66dc565bdd1916448170b602887f",
+        "surface": "unknown",
+        "executable": false,
+        "building_visible": true,
+        "doorways": [],
+        "ground_measurement": {
+          "ground_pixels": 9853,
+          "feature_threshold": 5,
+          "high_contrast_features": 22,
+          "texture_features": 154,
+          "minimum_features": 40,
+          "look_hint": "center",
+          "look_basis": "near_ground_patch",
+          "translation_authorized": false
+        },
+        "layout": {
+          "schema": 1,
+          "coordinate_space": "current_image",
+          "size": [
+            1012,
+            586
+          ],
+          "exterior_regions": [
+            {
+              "box": [
+                469,
+                368,
+                591,
+                546
+              ],
+              "pixels": 10032
+            },
+            {
+              "box": [
+                514,
+                333,
+                718,
+                392
+              ],
+              "pixels": 6932
+            },
+            {
+              "box": [
+                162,
+                501,
+                269,
+                586
+              ],
+              "pixels": 5125
+            },
+            {
+              "box": [
+                709,
+                460,
+                766,
+                522
+              ],
+              "pixels": 2571
+            },
+            {
+              "box": [
+                0,
+                236,
+                65,
+                290
+              ],
+              "pixels": 2403
+            },
+            {
+              "box": [
+                724,
+                311,
+                793,
+                355
+              ],
+              "pixels": 2308
+            },
+            {
+              "box": [
+                647,
+                489,
+                655,
+                504
+              ],
+              "pixels": 83
+            }
+          ],
+          "floor_regions": [
+            {
+              "box": [
+                162,
+                419,
+                511,
+                586
+              ],
+              "pixels": 17676
+            },
+            {
+              "box": [
+                255,
+                291,
+                311,
+                348
+              ],
+              "pixels": 2372
+            }
+          ]
+        }
+      },
+      "camera": {
+        "zoom": 32.0,
+        "view": 4,
+        "scene": 1,
+        "applied": 14,
+        "request": 1,
+        "result": 2,
+        "paused": false,
+        "calibrated": false
+      },
+      "heading": 5.680688085943188,
+      "latency_s": 8.956
+    }
+  ]
+}

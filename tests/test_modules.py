@@ -1,8 +1,40 @@
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from bot.control.input_helper import HelperSessionStopped
 from bot.core.statemachine import Machine, State
+from bot.modules.base import Module
+
+
+def test_helper_disarm_between_focus_check_and_key_release_is_a_clean_stop():
+    events, releases = [], []
+
+    class ReleaseKey(State):
+        name = "ReleaseKey"
+
+        def tick(self, ctx):
+            raise HelperSessionStopped("键鼠会话已停止")
+
+    class TravelModule(Module):
+        initial_state = "ReleaseKey"
+
+        def build_states(self):
+            self.machine.add(ReleaseKey())
+
+    ctx = SimpleNamespace(
+        input=SimpleNamespace(release_all=lambda: releases.append(True)),
+        estop=SimpleNamespace(check=lambda: False),
+        log_event=lambda name, data: events.append((name, data)),
+        begin_tick=lambda: None,
+        pump_channel=lambda: None,
+        stats={},
+    )
+    outcome = TravelModule(ctx).run(1)
+    assert outcome.status == "stopped:input_session_stopped"
+    assert releases == [True]
+    assert [name for name, _ in events] == ["module_start", "input_session_stopped", "module_end"]
 
 
 class Counting(State):

@@ -7,6 +7,7 @@ import numpy as np
 from . import channel_spec as spec
 
 QUEST_ROWS = 5
+RESOURCE_PROGRESS_MAX = 1000  # Tenths of a percent
 
 
 class QuestKind(IntEnum):
@@ -44,6 +45,7 @@ class Objective(IntEnum):
     NONE = 1
     COUNTED = 2
     NON_COUNTED = 3
+    RESOURCE = 4  # Extended wire code 3, with a nonzero scale
 
 
 @dataclass(frozen=True)
@@ -76,9 +78,15 @@ def decode_quest(img: np.ndarray) -> QuestSample | None:
         values.append(frame[1])
     quest_id, info, progress, map_id, dialogue_id = values
     try:
+        objective = Objective((info >> 10) & 3)
+        done, required = divmod(progress, 1024)
+        if objective == Objective.NON_COUNTED and required == RESOURCE_PROGRESS_MAX:
+            if done > required:
+                return None
+            objective = Objective.RESOURCE
         return QuestSample(
             quest_id, QuestKind(info & 0xF), QuestState((info >> 4) & 7),
-            Objective((info >> 10) & 3), divmod(progress, 1024), map_id,
+            objective, (done, required), map_id,
             dialogue_id, Dialogue((info >> 7) & 7), (info >> 12) & 127,
             bool(info & (1 << 19)),
         )

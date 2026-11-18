@@ -1,0 +1,86 @@
+[
+  {
+    "image": "right.png",
+    "size": [
+      1012,
+      586
+    ],
+    "avatar": {
+      "kind": "humanoid",
+      "box": [
+        440,
+        560,
+        580,
+        740
+      ],
+      "feet": [
+        480,
+        710
+      ],
+      "evidence": "Wearing red and gold armor, partially obscured by foliage. Standing on grass."
+    },
+    "route": {
+      "origin": [
+        495.217,
+        764.249
+      ],
+      "front": "blocked",
+      "left": "blocked",
+      "right": "blocked",
+      "next_view": "scan",
+      "feature": "unknown",
+      "landmark": null,
+      "obstacle": [
+        [
+          485.652,
+          704.096,
+          519.13,
+          776.28
+        ]
+      ],
+      "bypass": null,
+      "evidence": "Avatar stands on grass. Directly in front is a low, solid wooden fence. Left and right are also blocked by the fence and nearby bushes. No clear open path."
+    }
+  },
+  {
+    "image": "left.png",
+    "size": [
+      1012,
+      586
+    ],
+    "avatar": {
+      "kind": "humanoid",
+      "box": [
+        440,
+        580,
+        580,
+        720
+      ],
+      "feet": [
+        480,
+        700
+      ],
+      "evidence": "Wearing red and black armor, partially obscured by foliage and a torch. Standing upright."
+    },
+    "route": {
+      "origin": [
+        495.217,
+        760.239
+      ],
+      "front": "blocked",
+      "left": "blocked",
+      "right": "blocked",
+      "next_view": "scan",
+      "feature": "unknown",
+      "landmark": null,
+      "obstacle": [
+        485.652,
+        712.116,
+        519.13,
+        768.259
+      ],
+      "bypass": null,
+      "evidence": "Avatar's feet are on grass, but immediate steps in front, left, and right are blocked by a low wooden fence, logs, and foliage. No clear bypass is visible."
+    }
+  }
+]

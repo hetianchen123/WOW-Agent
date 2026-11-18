@@ -37,6 +37,37 @@ def test_fight_requires_fresh_telemetry_and_observes_death():
     assert fight.presses == 1
 
 
+@pytest.mark.parametrize("receipts, expected, presses", [
+    (False, "no_cast_or_damage_receipt", 3),
+    (True, "no_progress", 12),
+])
+def test_restricted_health_keeps_cast_receipt_separate_from_damage(receipts, expected, presses):
+    fight = Fight(244669, approach=True)
+    sample = CombatSample(3, 1, 1, 70783, 253, 80, 87, 244669, False, True, False, 1, 8, 1,
+                          in_range=True, target_health=None, cast_epoch=127)
+    assert fight.step(0, sample) == ("waiting", None)
+    sent = 0
+    for index in range(1, 17):
+        epoch = (127 + sent) % 128 if receipts else 127
+        status, key = fight.step(index, replace(sample, cast_epoch=epoch, sequence=index + 1))
+        if key:
+            assert (status, key) == ("action", "1")
+            sent += 1
+        elif status == expected:
+            break
+    assert status == expected and sent == presses
+
+
+def test_melee_closes_only_while_out_of_range():
+    fight = Fight(244669, approach=True)
+    sample = CombatSample(3, 1, 1, 70783, 255, 80, 87, 244669, False, True, False, 1, 8, 1,
+                          in_range=False, cast_epoch=0)
+    assert fight.step(0, sample) == ("waiting", None)
+    assert fight.step(.3, replace(sample, sequence=2)) == ("approach", "w")
+    assert fight.step(.6, replace(sample, sequence=3, in_range=True)) == ("action", "1")
+    assert fight.step(.9, replace(sample, sequence=4, state_epoch=9)) == ("target_or_arm_changed", None)
+
+
 def test_facing_recovery_turns_on_new_error_and_retries_same_target():
     fight = Fight(12345)
     sample = CombatSample(8, 1, 1, 70783, 63, 80, 87, 12345, False, True, False, 5, 8, 1,
@@ -46,12 +77,11 @@ def test_facing_recovery_turns_on_new_error_and_retries_same_target():
     error = replace(sample, sequence=3, facing_error=1)
     assert fight.step(.4, error) == ("turn", "left")
     assert fight.step(.5, error) == ("waiting", None)
-    assert fight.step(.7, replace(error, sequence=4, facing=math.pi / 2)) == ("waiting", None)
-    assert fight.step(.9, replace(error, sequence=5, facing=math.pi / 2)) == ("turn", "left")
-    assert fight.step(1.2, replace(error, sequence=6, facing=math.pi)) == ("waiting", None)
-    assert fight.step(1.5, replace(error, sequence=7, facing=math.pi)) == ("action", "5")
-    assert fight.step(1.7, replace(error, sequence=8, facing_error=2, facing=math.pi)) == ("turn", "right")
-    assert fight.step(1.9, replace(error, sequence=9, target_id=23456)) == ("target_missing_or_changed", None)
+    turned = replace(error, facing=math.radians(24))
+    assert fight.step(.7, replace(turned, sequence=4)) == ("waiting", None)
+    assert fight.step(1.1, replace(turned, sequence=5)) == ("action", "5")
+    assert fight.step(1.7, replace(turned, sequence=6, facing_error=2)) == ("facing_unconfirmed", None)
+    assert fight.step(1.9, replace(turned, sequence=7, state_epoch=9)) == ("target_or_arm_changed", None)
     assert fight.presses == 2
 
 
@@ -77,7 +107,7 @@ def test_hunt_sweeps_before_retabbing_and_locks_target_until_in_range():
     target = replace(sector, sequence=6, target_id=12345, in_range=False)
     assert hunt.step(1.7, target, 0, False) == ("waiting", None)
     assert hunt.step(1.9, replace(target, sequence=7), 0, False) == ("approach", "w")
-    assert hunt.step(2.3, replace(target, sequence=8), 0, False) == ("approach", "w")
+    assert hunt.step(2.3, replace(target, sequence=8), 0, False) == ("waiting", None)
     assert hunt.fight.presses == 0
     assert hunt.step(2.6, replace(target, sequence=9, in_range=True), 0, False) == ("action", "5")
 

@@ -1,8 +1,10 @@
+import json
 import math
 from types import SimpleNamespace
 
 from bot import terrain_cli
 from bot.decision.terrain import decide_multiview, decide_terrain
+from experiments.qwen3_vl.run import parse_observation
 
 
 class RecordingClient:
@@ -53,8 +55,40 @@ def test_multiview_excludes_obstacles_and_previous_no_progress_headings():
     views = {"front": {"front": "blocked"}, "left": {"front": "open"},
              "right": {"front": "open"}, "back": {"front": "unknown"}}
     assert decide_multiview(client, views, frozenset({"left"}))["recommendation"] == "right"
-    assert set(client.criteria) == {"stop", "right"}
+    assert not hasattr(client, "criteria")
     assert decide_multiview(client, views, frozenset({"left", "right"}))["recommendation"] == "stop"
+
+
+def test_multiview_reports_startlux_failure_and_keeps_fallback_explicit():
+    def unavailable(*_, **__):
+        raise OSError("connection refused")
+
+    result = decide_multiview(SimpleNamespace(decide=unavailable),
+        {"left": {"front": "open"}, "right": {"front": "open"}},
+        remaining_after_probe={"left": 20, "right": 10})
+    assert result["source"] == "rules" and result["recommendation"] == "right"
+    assert result["startlux_status"] == "unavailable" and result["startlux_error"] == "connection refused"
+
+
+def test_multiview_keeps_startlux_confidence_and_does_not_override_abstention():
+    client = SimpleNamespace(decide=lambda *_, **__: {
+        "recommendation": None, "reason": "low_confidence", "confidence": .4, "model": "StartLux-Decision-test"})
+    result = decide_multiview(client, {"left": {"front": "open"}, "wide_right": {"front": "open"}})
+    assert result["source"] == "startlux" and result["confidence"] == .4
+    assert result["recommendation"] is None and result["candidates"] == ["stop", "left", "wide_right"]
+
+
+def test_qwen_terrain_labels_from_current_rock_scene_are_normalized():
+    observation = {"front": "unknown", "left": "open_ground", "right": "open_ground",
+                   "next_view": "left", "feature": "drop", "evidence": "A slope rises to the rock ahead."}
+    decoded = parse_observation(json.dumps(observation))
+    assert [decoded[key] for key in ("front", "left", "right")] == ["unknown", "open", "open"]
+    observation["front"] = "open_ground"
+    observation["landmark"] = [480, 650]
+    decoded = parse_observation(json.dumps(observation))
+    assert decoded["front"] == "unknown" and "landmark" not in decoded
+    observation["feature"] = "ramp"
+    assert parse_observation(json.dumps(observation))["landmark"] == [480, 650]
 
 
 def test_multiview_checks_selected_heading_again_before_any_step(monkeypatch):

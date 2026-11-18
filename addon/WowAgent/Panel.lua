@@ -339,7 +339,7 @@ local function BuildPanel()
         page:SetPoint("TOPLEFT", 20, -66)
         page:SetPoint("BOTTOMRIGHT", -20, 142)
         tabs[index] = page
-        Button(frame, title, 20 + (index - 1) * 123, 31, 112, function()
+        Button(frame, title, 20 + (index - 1) * 102, 31, 98, function()
             for i, tab in ipairs(tabs) do tab:SetShown(i == index) end
         end)
         page:SetShown(index == 1)
@@ -442,6 +442,9 @@ local function BuildPanel()
     end)
     Label(quests, "先打开 NPC 任务对话，准备按钮会将该任务的操作宏放到数字键 9。", 0, 241, 590)
     Label(quests, "然后启动本地接任务测试。StartLux 决策，脚本按键，任务日志确认成功。", 0, 278, 590)
+    Button(quests, "地图主路标注", 0, 320, 140, function()
+        if WowAgent.ToggleRoadMap then frame:Hide(); WowAgent.ToggleRoadMap() end
+    end)
 
     local layout = NewTab(3, "动作栏布局")
     Label(layout, "范围", 0, 8)
@@ -651,6 +654,56 @@ local function BuildPanel()
     Label(navigation, "地面坐骑", 0, 119)
     local ground = NamedSelect(navigation, "navGround", 104, 114, 300, function() return TravelMounts("ground") end,
         function() return 0 end)
+    if WowAgent.SaveQuestCamera then
+        local camera = Button(navigation, "将当前视角存到 5", 416, 114, 150, WowAgent.SaveQuestCamera)
+        camera:SetScript("OnEnter", function(button)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(button, "ANCHOR_TOP")
+            GameTooltip:SetText("先从角色后方调到约 20° 俯视")
+            GameTooltip:AddLine("点击将当前镜头保存到游戏的视角 5。", 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        camera:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    end
+    if WowAgent.RestoreQuestCamera then
+        Button(navigation, "恢复任务视角", 416, 326, 150, function()
+            if not WowAgent.RestoreQuestCamera() then
+                WowAgent.Report("WowAgent：镜头暂未恢复。" .. WowAgent.QuestCamera.status())
+            end
+        end)
+    end
+    if WowAgent.SaveOverheadQuestCamera then
+        local overhead = Button(navigation, "保存俯视到 4", 416, 80, 150, WowAgent.SaveOverheadQuestCamera)
+        overhead:SetScript("OnEnter", function(button)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(button, "ANCHOR_TOP")
+            GameTooltip:SetText("先调整为能看清障碍两端的俯视镜头")
+            GameTooltip:AddLine("点击会覆盖游戏视角 4；常用任务视角 5 保留。", 1, 1, 1)
+            GameTooltip:AddLine("卡点观察使用 F6，结束后 F8 恢复任务视角。", 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        overhead:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    end
+    if WowAgent.NudgeQuestCamera then
+        for i, item in ipairs({{"减小俯角", false}, {"增大俯角", true}}) do
+            local down = item[2]
+            Button(navigation, item[1], (i - 1) * 110, 326, 100, function()
+                if not WowAgent.NudgeQuestCamera(down) then
+                    WowAgent.Report("WowAgent：请停在地面并脱战后调整镜头。")
+                end
+            end)
+        end
+    end
+    if WowAgent.ToggleQuestCamera then
+        local toggle = Button(navigation, "暂停/恢复自动镜头", 222, 326, 184, WowAgent.ToggleQuestCamera)
+        toggle:SetScript("OnEnter", function(button)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(button, "ANCHOR_TOP")
+            GameTooltip:SetText(WowAgent.QuestCamera.status())
+            GameTooltip:Show()
+        end)
+        toggle:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
+    end
     Label(navigation, "任务键位", 0, 209)
     local navBindings = NamedSelect(navigation, "navBindings", 104, 204, 300, function()
         return {Choice(0, "沿用游戏键位"), Choice(1, "准备时启用临时任务键位")}
@@ -697,12 +750,16 @@ local function BuildPanel()
             local open = WowAgent.OpenQuestOfferID and WowAgent.OpenQuestOfferID()
             local resume = WowAgent.GetQuestRoundResumeID and WowAgent.GetQuestRoundResumeID()
             local quest = open and tostring(open) or resume and tostring(resume) or navQuest()
+            local nearby
             if not (tonumber(quest) and C_QuestLog.IsOnQuest(tonumber(quest)))
                 and not (open and tonumber(quest) == open) then
-                local active = WowAgent.GetActiveSupportedQuestID()
-                if active then quest = tostring(active) end
+                if not tonumber(quest) or C_QuestLog.IsQuestFlaggedCompleted(tonumber(quest)) then
+                    nearby = WowAgent.GetNearbyQuestID and WowAgent.GetNearbyQuestID()
+                end
+                local nextQuest = nearby or WowAgent.GetActiveSupportedQuestID()
+                if nextQuest then quest = tostring(nextQuest) end
             end
-            local useSavedOptions = profile and (profile.navNPCQuest == quest
+            local useSavedOptions = profile and not nearby and (profile.navNPCQuest == quest
                 or (not profile.navNPCQuest and not open))
             if useSavedOptions and quest and Text(npc) ~= "" then
                 profile.navQuest, profile.navNPCQuest = quest, quest
@@ -737,11 +794,49 @@ local function BuildPanel()
         return {Choice(0, "只绑定任务道具"), Choice(1, "自动使用无目标道具")}
     end, function() return 0 end)
     Label(navigation, "W/S/方向键/空格移动 · Tab 选敌 · K 选 NPC · F 互动和拾取 · J 任务道具", 0, 277, 595)
-    Label(navigation, "1 输出 · 5–8 坐骑 · 9 对话。准备成功后从「WoW 键鼠」授权并运行。", 0, 303, 595)
+    Label(navigation, "1 输出 · 5–8 坐骑 · 9 对话 · L 拾回 · O 继续拾回。准备后从键鼠菜单启动。", 0, 303, 595)
+
+    local visual = NewTab(6, "视觉界面")
+    Label(visual, "临时收起遮挡画面的 UI，动作栏快捷键保持可用。", 0, 7, 590)
+    local visualChecks = {}
+    for i, item in ipairs({{"bars", "动作栏、宠物栏与经验条"}, {"tracker", "任务追踪"},
+                          {"chat", "聊天框"}, {"portraits", "角色、目标与宠物头像"}}) do
+        local key, title = item[1], item[2]
+        local check = CreateFrame("CheckButton", nil, visual, "UICheckButtonTemplate")
+        check:SetSize(26, 26)
+        check:SetPoint("TOPLEFT", 0, -(35 + (i - 1) * 34))
+        Label(visual, title, 32, 41 + (i - 1) * 34, 500)
+        check:SetScript("OnClick", function(button)
+            if WowAgent.VisualUI then WowAgent.VisualUI.SetOption(key, button:GetChecked() == true) end
+        end)
+        visualChecks[key] = check
+    end
+    local visualStatus = Label(visual, "", 0, 185, 590)
+    local function RefreshVisual()
+        local ui = WowAgent.VisualUI
+        if not ui then visualStatus:SetText("视觉界面模块尚未加载。"); return end
+        local options, status = ui.GetOptions(), ui.Status()
+        for key, check in pairs(visualChecks) do check:SetChecked(options[key]) end
+        visualStatus:SetText(status.pendingRestore and "等待脱战后恢复 UI。"
+            or status.active and "已临时隐藏所选 UI；可随时点击下方恢复。" or "UI 显示正常。")
+    end
+    Button(visual, "隐藏所选 UI", 0, 220, 160, function()
+        if WowAgent.VisualUI and WowAgent.VisualUI.Apply() then frame:Hide() end
+        RefreshVisual()
+    end)
+    Button(visual, "恢复 UI", 175, 220, 160, function()
+        if WowAgent.VisualUI then WowAgent.VisualUI.Restore() end
+        RefreshVisual()
+    end)
+    Label(visual, "脱战时切换；关闭寻路色条、重新载入或进入世界时恢复。", 0, 267, 590)
+    Label(visual, "保留小地图、任务对话、复活弹窗、色条和 WowAgent 入口。", 0, 293, 590)
+    Label(visual, "恢复命令：/wagent ui restore", 0, 319, 590)
+    visual:SetScript("OnShow", RefreshVisual)
 
     local function RefreshSelections()
         for _, refresh in ipairs(selectors) do refresh() end
         if talents:IsShown() then refreshTalents() end
+        if visual:IsShown() then RefreshVisual() end
     end
     frame:SetScript("OnShow", function()
         profile, loading = Profile(), true
