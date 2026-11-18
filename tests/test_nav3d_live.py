@@ -271,3 +271,23 @@ def test_manual_entry_executes_nav3d_intent_through_existing_executor(tmp_path,m
     tick(QuestState.READY)
     assert run.execution_started and ctx.input.count('key_down')==1
     assert not ctx.input._held_keys and run.OUTCOME is None
+
+
+@pytest.mark.parametrize('heading',[0,math.pi/2,math.pi,3*math.pi/2])
+def test_actual_coordinator_commands_obey_precise_executor_contract(live_mesh,tmp_path,monkeypatch,heading):
+    from bot.control.input_mock import MockInput
+    from bot.control import input_base
+    m,start,goal=live_mesh;s,n=samples(start,goal)
+    rt=Nav3DCoordinator(Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),
+        supervised_trial_mesh_id=m.mesh_id),now=0)
+    command=rt.step(0,replace(s,heading=heading),n)
+    assert command.tap and command.precise and command.outcome is None
+    sleeps=[]
+    monkeypatch.setattr(input_base.time,'sleep',sleeps.append)
+    # Mock only the OS injection; retain InputBase.tap_precise's real validation
+    # and release logic, exactly as inherited by HelperInput.
+    executor=MockInput()
+    executor.tap_precise(command.tap,command.hold_s)
+    assert sleeps==[command.hold_s]
+    assert executor.count('key_down',command.tap)==executor.count('key_up',command.tap)==1
+    assert not executor._held_keys

@@ -119,7 +119,9 @@ class WorldRouteFollower:
                 return TravelCommand()
             self.last_turn, self.last_direction = now, direction
             self.progress_at = now
-            return TravelCommand(tap=direction, hold_s=min(.16,max(.03,abs(error)/math.radians(240))), precise=True)
+            # InputBase.tap_precise accepts movement pulses up to 120 ms.
+            # Larger turns use successive pulses with fresh heading feedback.
+            return TravelCommand(tap=direction, hold_s=min(.12,max(.03,abs(error)/math.radians(240))), precise=True)
         if now-self.last_turn < .45:
             return TravelCommand()
         self.commanded_motion = True

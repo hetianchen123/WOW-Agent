@@ -257,7 +257,7 @@ def test_follower_stuck_feedback_is_bounded(meshes):
 
 def test_follower_turns_have_feedback_and_rhythm(meshes):
     f,p,kwargs=follower_and_pose(meshes);p=replace(p,heading=0)
-    first=f.step(0,p,**kwargs);assert first.tap=="right" and first.hold_s<=.16
+    first=f.step(0,p,**kwargs);assert first.tap=="right" and first.hold_s<=.12
     assert f.step(.1,replace(p,sequence=2,captured_at=.1),**kwargs).tap is None
     assert f.step(.5,replace(p,sequence=3,captured_at=.5),**kwargs).tap=="right"
 
