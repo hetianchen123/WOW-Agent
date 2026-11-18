@@ -61,6 +61,7 @@ dofile("addon/WowAgent/RetailQuestData.lua")
 dofile("addon/WowAgent/APRQuestData.lua")
 dofile("addon/WowAgent/Recovery.lua")
 dofile("addon/WowAgent/QuestCamera.lua")
+dofile("addon/WowAgent/QuestEncounter.lua")
 dofile("addon/WowAgent/Quest.lua")
 local function event(name) frames[1].scripts.OnEvent(nil, name) end
 event("GOSSIP_SHOW")
@@ -804,6 +805,42 @@ UnitDistanceSquared = nil
 WowAgent.StopQuestNavigation()
 questState[90887] = 2
 
+-- Real preparation publishes the exact selector and its target receipts together.
+do
+    local old96, oldName, oldAttack = questState[90896], npc, UnitCanAttack
+    local objectives, oldWrite, oldSelected, oldSoft = C_QuestLog.GetQuestObjectives, WowAgent.WriteNav3D, selected, soft
+    local encounterFlags
+    WowAgent.WriteNav3D = function(_, id, _, _, _, _, _, _, flags)
+        if id == 90896 then encounterFlags = flags end
+    end
+    C_QuestLog.GetQuestObjectives = function()
+        return {{type = "monster", text = "消灭罗格洛克", numFulfilled = 0, numRequired = 1}}
+    end
+    questState[90896], npc = 2, "装甲顺劈者"
+    selected, soft = "Creature-0-0-0-0-123-01", nil
+    UnitCanAttack = function() return true end
+    event("QUEST_FINISHED")
+    WowAgent.PrepareQuestNavigation(90896, 0, 0, true, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    assert(selector.attributes.macrotext == "/targetexact 罗格洛克")
+    assert(encounterFlags == 2176) -- profile + verified K; wrong target cannot become objective ID
+    assert(values[2] == 0)
+    npc = "罗格洛克"
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(encounterFlags == 3968 and values[2] == 123)
+    combat = true
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(selector.attributes.macrotext == "/targetexact 罗格洛克" and encounterFlags == 3968)
+    overrides.K = "TARGETNEARESTENEMY"
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(encounterFlags == 3840) -- combat lockdown must not silently repair an unverified key
+    combat = false
+    WowAgent.StopQuestNavigation()
+    questState[90896], npc, UnitCanAttack = old96, oldName, oldAttack
+    C_QuestLog.GetQuestObjectives, WowAgent.WriteNav3D = objectives, oldWrite
+    selected, soft = oldSelected, oldSoft
+end
+
 -- Replay the farm hand-off with an empty map offer list and closed gossip.
 -- The last reward is at Thrall, but the next offer must be checked at Jaina.
 do
@@ -1252,7 +1289,7 @@ assert(status == 3 + 20 + 256 + 512 and corpse == 460 * 1024 + 512)
 
 -- Runtime build extension is separate from the v15 core and follows nav sequence.
 assert(math.floor((rowValues[-288] % 524288) / 512) == math.floor(357888 / 512))
-assert(rowValues[-272] % 4096 == 275)
+assert(rowValues[-272] % 4096 == 276)
 assert(math.floor(rowValues[-272] / 4096) % 128 == math.floor(rowValues[-256] / 8192))
 -- Independently versioned visibility row; old v15/schema 6 remain unchanged.
 assert(math.floor(rowValues[-304] / 16384) == 45)

@@ -18,8 +18,9 @@ TURN_SETTLE = .50
 
 
 class Fight:
-    def __init__(self, target_id: int, *, approach=False, defense=False):
+    def __init__(self, target_id: int, *, approach=False, defense=False, immediate=False):
         self.target_id = target_id
+        self.immediate = immediate
         self.identity = None
         self.state_epoch = None
         self.key = None
@@ -77,7 +78,8 @@ class Fight:
             self.last_facing_error = sample.facing_error
             self.last_health, self.cast_epoch = sample.target_health, sample.cast_epoch
             self.receipt_at = now if sample.cast_epoch is not None else None
-            return "waiting", None
+            if not self.immediate:
+                return "waiting", None
         if self.receipt_at is not None and sample.cast_epoch is None:
             return ("telemetry_stale" if now - self.receipt_at > .75 else "waiting"), None
         if sample.cast_epoch is not None:

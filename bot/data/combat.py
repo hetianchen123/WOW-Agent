@@ -70,6 +70,11 @@ CREATE TABLE rotation_reference(
 
 
 def client_edition(build: int) -> str | None:
+    # Edition identity observed in local live telemetry, not a claim that the
+    # exact-build catalogue below has been reimported. Inputs still require the
+    # current client's action binding/range/receipt verification.
+    if build == 70961:
+        return "retail"
     return next((key for key, (_, full) in EDITIONS.items()
                  if int(full.rsplit(".", 1)[1]) == build), None)
 

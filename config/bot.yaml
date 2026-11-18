@@ -87,3 +87,4 @@ nav3d:
   supervised_trial_mesh_id: "2141aec34ec36431d1b35d6400609b2d13ecd976063d77fe4f4ded5ed9d27436"
   budget_s: 120
   max_replans: 3
+  encounter_wait_s: 300

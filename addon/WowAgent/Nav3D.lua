@@ -20,7 +20,7 @@ local function Pair(out, v)
     out[#out + 1] = v % 4096
     out[#out + 1] = math.floor(v / 4096) % 4096
 end
-function WowAgent.WriteNav3D(seq, quest, phase, uiMap, targetMap, gx, gy, travelFlags)
+function WowAgent.WriteNav3D(seq, quest, phase, uiMap, targetMap, gx, gy, travelFlags, encounterFlags)
     local nx, ny, z, world
     if UnitPosition then nx, ny, z, world = UnitPosition("player") end
     nx, ny, z, world = Number(nx, 83886), Number(ny, 83886), Number(z, 83886), Number(world, 16777216)
@@ -46,7 +46,7 @@ function WowAgent.WriteNav3D(seq, quest, phase, uiMap, targetMap, gx, gy, travel
     if bit.band(travelFlags, 4096) ~= 0 then flags = flags + 32 end
     if bit.band(travelFlags, 64) ~= 0 then flags = flags + 64 end
     local _, build = GetBuildInfo()
-    local values = { 3329, flags }
+    local values = { 3329, flags + (encounterFlags or 0) }
     Pair(values, world or 0); Pair(values, tonumber(build) or 0); Pair(values, uiMap or 0)
     Pair(values, Signed(ny and -ny or 0)); Pair(values, Signed(nx or 0)); Pair(values, Signed(z or 0))
     values[#values + 1] = heading and math.floor((heading % (2 * math.pi)) / (2 * math.pi) * 4096) or 0

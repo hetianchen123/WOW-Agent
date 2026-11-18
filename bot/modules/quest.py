@@ -656,10 +656,22 @@ class RunQuests(State):
             if not hasattr(self, "nav3d_coordinator"):
                 self.nav3d_coordinator = Nav3DCoordinator(ctx.cfg.nav3d, now=now, log_event=ctx.log_event,
                     resume_runs=DATA_DIR/'runs')
-            command = self.nav3d_coordinator.step(now, getattr(self, "nav3d_sample", None), navigation,
-                goal_override=self.object_target or self.search_waypoint,
-                target_receipt=building_target_receipt(navigation,self.observation,now) if navigation else None,
-                travel_only=self.travel_only)
+            command = None
+            if (ctx.cfg.nav3d.mode == 'nav3d' and not self.travel_only
+                    and (getattr(self, 'nav3d_encounter', None) is not None
+                         or navigation is not None and navigation.quest_id == 90896)):
+                from ..nav3d.encounter import RespawnEncounter
+                if not hasattr(self, 'nav3d_encounter'):
+                    self.nav3d_encounter = RespawnEncounter(self.nav3d_coordinator.mesh.mesh_id,
+                                                          wait_budget_s=ctx.cfg.nav3d.encounter_wait_s,
+                                                          log_event=ctx.log_event)
+                command = self.nav3d_encounter.step(now, getattr(self, 'nav3d_sample', None),
+                                                    navigation, self.observation)
+            if command is None:
+                command = self.nav3d_coordinator.step(now, getattr(self, "nav3d_sample", None), navigation,
+                    goal_override=self.object_target or self.search_waypoint,
+                    target_receipt=building_target_receipt(navigation,self.observation,now) if navigation else None,
+                    travel_only=self.travel_only)
         except (NavigationError, OSError, ValueError) as exc:
             return self.stop(ctx, "nav3d_initialization_failed:" + str(exc))
         if command.tap or command.keys:
@@ -1112,6 +1124,9 @@ class RunQuests(State):
                 self.patrol_wait_until = now + 8
 
     def activity_reason(self, now, navigation):
+        encounter = getattr(self, 'nav3d_encounter', None)
+        if encounter and encounter.active:
+            return 'encounter_' + (encounter.state or 'waiting')
         if self.building_access and self.building_access.locked:
             return 'building_' + self.building_access.state
         if navigation is None and self.auto_route:

@@ -508,6 +508,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         ctx.db.end_session(session_id, outcome.status, outcome.stats)
         if getattr(args, "require_prepared", False):
             explanations = {
+                "stopped:quest_encounter_objective_complete_ready_for_turn_in": "任务击杀计数已确认，已停止输出。当前局部三维网格不覆盖交任务路线，请返回萨尔交付。",
+                "stopped:quest_encounter_wait_budget_exhausted": "原地守候达到 300 秒总预算，任务尚未确认完成。已停止选敌。",
+                "stopped:quest_encounter_selector_unverified_reload_and_prepare": "尚未核验罗格洛克的精确选敌键。请 /reload 加载 0.2.76，再重新准备自动任务。",
+                "stopped:quest_encounter_approach_position_required": "已选中任务怪，但技能超距；尚无目标三维位置，角色原地停止，请保留本轮日志。",
+                "stopped:quest_encounter_range_unknown": "任务怪的技能范围回执仍不可读，已停止，未盲目攻击或前进。",
+                "stopped:quest_encounter_combat_target_unconfirmed": "已进入战斗，但当前目标不是已核验的任务怪；已停止自动输入，请接管当前战斗。",
                 "stopped:nav3d_candidates_exhausted": "三维楼层候选已从低到高尝试完，未取得目标范围回执；角色已停止。请保留本轮日志。",
                 "stopped:nav3d_budget_exhausted": "三维导航已达到 120 秒总预算，角色已停止。",
                 "stopped:nav3d_world_alignment_unverified": "当前网格缺少对齐证据，且未配置该网格的人工监督试跑。",

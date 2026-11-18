@@ -32,7 +32,11 @@ WowAgent.RetailQuestData = {
             objectCreature = 249269,
             objectNames = {enUS = "Worn Catapult"},
         },
-        [90896] = {pickup = 244666, turnIn = 244666, after = {[90893] = true, [90895] = true}},
+        [90896] = {
+            pickup = 244666, turnIn = 244666, after = {[90893] = true, [90895] = true},
+            -- zhCN task tracker and user observation, 2026-11-18; spawn ID not yet observed.
+            respawnNames = {zhCN = "罗格洛克"},
+        },
     },
     npcs = {
         [244643] = {69.98, 40.66},

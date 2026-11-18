@@ -1327,7 +1327,7 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
         end
         plan.rangeProbeAt, plan.turnInTarget = nil, nil
     else
-        ConfigureTaskTarget(nil)
+        ConfigureTaskTarget(WowAgent.QuestEncounter and WowAgent.QuestEncounter.Name(plan.quest, phase))
         if phase == 2 and soft and target == soft and Public(UnitIsDead("softinteract")) == true then
             flags = flags + 8
         end
@@ -1989,7 +1989,6 @@ local function UpdateNavigation()
     if fly and fly.active then meta = meta + 2048 end
     if GetBindingAction("F", true) == "INTERACTTARGET" then meta = meta + 4096 end
     navSequence = (navSequence + 1) % 128
-    if WowAgent.WriteNav3D then WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap, meta % 256 >= 128 and gx or nil, meta % 256 >= 128 and gy or nil, flags) end
     writeObjectiveProgress(navSequence % 16, objectiveProgress)
     local recoveryGhost
     if WowAgent.RecoveryState then
@@ -2028,6 +2027,15 @@ local function UpdateNavigation()
             objectCreature, data)
         if preciseObject then navigation.preciseObjective = id end
         if clickKey == 2 and objectPin then clickKey = 4 end
+    end
+    local encounterFlags, encounterTarget = 0, 0
+    if navigation.automatic and WowAgent.QuestEncounter then
+        encounterFlags, encounterTarget = WowAgent.QuestEncounter.State(id, phase, taskTargetButton)
+        if encounterFlags >= 2048 then clickKey, click = 1, encounterTarget end
+    end
+    if WowAgent.WriteNav3D then
+        WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap,
+            meta % 256 >= 128 and gx or nil, meta % 256 >= 128 and gy or nil, flags, encounterFlags)
     end
     local mapCenter, mapSize, mapInfo
     if preciseObject or recoveryGhost or navigation.automatic and InCombatLockdown() then
@@ -2072,7 +2080,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 275 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 276 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4

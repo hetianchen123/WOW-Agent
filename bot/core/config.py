@@ -89,6 +89,7 @@ class Nav3DConfig:
     supervised_trial_mesh_id: str = ""
     budget_s: float = 120.0
     max_replans: int = 3
+    encounter_wait_s: float = 300.0  # Includes retries; does not predict respawn time.
 
 
 @dataclass

@@ -124,6 +124,13 @@ def test_lua_nav3d_packet_round_trip_and_secret_values():
     s=decode_nav3d(image)
     assert s.position_xy==(2100.6,-888.1) and s.goal_xy==(2090,-895) and s.sequence==7
     assert s.public_z==0 and s.grounded and s.bindings_verified
+    lua.execute('WowAgent.WriteNav3D(7,90896,2,2451,2451,.2,.3,4096,3968)')
+    for i in range(26):
+        row=lua.globals().packets[i+1];spec.render_frame(image,0,i*16,spec.encode_frame(row[1],row[2]))
+    updated=decode_nav3d(image)
+    assert updated.encounter_profile and updated.encounter_selector_verified
+    assert updated.encounter_target_matches and updated.encounter_target_alive and updated.encounter_target_attackable
+    assert updated.position_xy == s.position_xy and updated.goal_xy == s.goal_xy
     lua.execute('function issecretvalue(v)return v==0 end; WowAgent.WriteNav3D(8,90896,2,2451,2451,nil,nil,4096)')
     assert lua.globals().packets[2][2]%4096 & 2 == 0
 

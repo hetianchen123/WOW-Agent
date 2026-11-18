@@ -178,7 +178,11 @@ class Nav3DCoordinator:
                 or frame.phase_id!=f'quest:{sample.quest_id}:{sample.phase}'):
             return self.stop('nav3d_world_frame_changed')
         if sample.position_xy is None or sample.heading is None:return self.stop('nav3d_position_unavailable')
-        if not sample.grounded or not sample.bindings_verified or sample.in_combat:return self.stop('nav3d_state_unsafe')
+        if not sample.grounded or not sample.bindings_verified or sample.in_combat:
+            self.log('nav3d_unsafe_state', dict(grounded=sample.grounded,
+                bindings_verified=sample.bindings_verified,in_combat=sample.in_combat,
+                travel_flags=sample.travel_flags,position_xy=sample.position_xy,sequence=sample.sequence))
+            return self.stop('nav3d_state_unsafe')
         if goal_override is not None and tuple(goal_override)!=nav.destination:
             return self.stop('nav3d_goal_override_requires_world_conversion')
         if sample.goal_xy is None or sample.goal_world_id!=sample.world_id:
