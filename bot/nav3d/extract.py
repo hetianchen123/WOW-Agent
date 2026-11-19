@@ -181,8 +181,12 @@ class SceneBuilder:
                 if not fid:raise NavigationError('wmo_doodad_file_missing')
                 self.m2(fid,m@quaternion_matrix(d['rotation'],d['position'],d['scale']),dict(parent=fdid,doodad=i))
 
-    def extract(self,world_id,dbd,output,phase_id):
-        maprow=self.decoder.decode('map',self.casc.read(1349477),dbd=str(Path(dbd).resolve()),build=self.casc.build['Version'],world_id=world_id)
+    def extract(self,world_id,dbd,output,phase_id,*,wdt_file=None):
+        if wdt_file is None:
+            maprow=self.decoder.decode('map',self.casc.read(1349477),dbd=str(Path(dbd).resolve()),
+                build=self.casc.build['Version'],world_id=world_id)
+        else:
+            maprow=dict(ID=world_id,WdtFileDataID=wdt_file,source='explicit_wdt_file')
         if not maprow or maprow.get('ID')!=world_id:raise NavigationError('world_map_db2_missing')
         wdt=self.read('wdt',maprow['WdtFileDataID'])
         if not wdt.get('entries') or wdt.get('worldModelPlacement'):raise NavigationError('global_wmo_map_unsupported')

@@ -43,11 +43,13 @@ def main(argv=None):
     demo.add_argument("--output", type=Path, default=Path("data/nav3d/demo-v1"))
     extract = sub.add_parser("extract-client", help="extract local CASC collision ROI; no game input")
     extract.add_argument("--client", type=Path, required=True)
+    extract.add_argument("--product", choices=("wow", "wowf"), default="wow")
     extract.add_argument("--library", type=Path, required=True)
     extract.add_argument("--readers", type=Path, default=Path("data/nav3d/deps/wow.export"))
     extract.add_argument("--map-dbd", type=Path, default=Path("data/nav3d/deps/Map.dbd"))
     extract.add_argument("--listfile", type=Path)
     extract.add_argument("--world-id", type=int, required=True)
+    extract.add_argument("--wdt-file", type=int, help="explicit WDT FileDataID when Map.db2 is unavailable")
     extract.add_argument("--phase", required=True)
     extract.add_argument("--roi", nargs=4, type=float, required=True, metavar=("E_MIN", "N_MIN", "E_MAX", "N_MAX"))
     extract.add_argument("--output", type=Path, required=True)
@@ -67,11 +69,12 @@ def main(argv=None):
             if args.listfile:
                 for line in args.listfile.read_text().splitlines():
                     key, name = line.split(";", 1); names[name.lower()] = int(key)
-            with LocalCASC(args.client, args.library, cache="data/nav3d/casc-cache") as casc:
+            with LocalCASC(args.client, args.library, product=args.product, cache="data/nav3d/casc-cache") as casc:
                 decoder = ClientDecoder(args.readers, "data/nav3d/decoded-input")
                 try:
                     builder = SceneBuilder(casc, decoder, [args.roi[:2], args.roi[2:]], names)
-                    scene_path = builder.extract(args.world_id, args.map_dbd, args.output, args.phase)
+                    scene_path = builder.extract(args.world_id, args.map_dbd, args.output, args.phase,
+                                                 wdt_file=args.wdt_file)
                     manifest=json.loads(scene_path.read_text());manifest['agent']=asdict(agent)
                     scene_path.write_text(json.dumps(manifest,indent=2))
                     mesh, v, t = build_scene(scene_path, args.output/"mesh")

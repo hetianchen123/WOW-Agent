@@ -1,6 +1,6 @@
 # WowAgent 主配置 —— 由 `python -m bot.cli init-config` 生成
 # 所有坐标都是“截图像素坐标”，用 `python -m bot.cli calibrate` 采集。
-game_version: "12.x"
+game_version: "1.60.1"
 dry_run: false          # true = 只感知+决策，不注入任何输入
 log_level: INFO
 game_process_names: ["World of Warcraft"]
@@ -43,7 +43,7 @@ route_planner:
 # 本地分割入口自动测量地面坐标并生成 NPC 搜索区域，不需要人工标定包。
 segmented_navigation:
   enabled: true
-  building_access: true
+  building_access: false
   models: data/segmentation/models.json
   checkpoint: data/segmentation/sam2.1_hiera_large.pt
   device: cpu
@@ -81,10 +81,10 @@ notify:
 
 # 用户手动启动的门口实走测试；仅授权此摘要的网格试跑，不表示已标定/已进门。
 nav3d:
-  mode: nav3d
-  mesh: data/nav3d/live-2927-door-v5/mesh
+  mode: visual
+  mesh: data/nav3d/forever-northshire-abbey/mesh
   alignment_file: ""
-  supervised_trial_mesh_id: "2141aec34ec36431d1b35d6400609b2d13ecd976063d77fe4f4ded5ed9d27436"
+  supervised_trial_mesh_id: "b69495894320899859b0ea418c6010c16577ad074fd4b37bb7657d0f3d912088"
   budget_s: 120
   max_replans: 3
   encounter_wait_s: 300

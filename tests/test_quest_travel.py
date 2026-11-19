@@ -11,7 +11,7 @@ from bot.control.quest_travel import QuestTrip
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import QuestState
 from bot.perception.travel_channel import (
-    ChoiceStep, CorpseSource, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
+    ChoiceStep, CorpseSource, ForeverStep, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
     decode_travel,
 )
 
@@ -660,6 +660,33 @@ def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows()
     assert decode_travel(extended) is None
     image[16:32] = image[:16]
     assert decode_travel(image) is None
+
+
+def test_forever_progression_carries_full_node_and_ignores_old_task_row():
+    offset = 26
+    image = np.zeros(((offset + 12) * 16, 142, 3), dtype=np.uint8)
+
+    def row(index, kind, value):
+        spec.render_frame(image, 0, (offset + index) * 16, spec.encode_frame(kind, value))
+
+    base = [783, 1429, 520000, 450000, 3 * 8192 + int(Flags.KEYS_VERIFIED), 524288,
+            34708, 23146, 15 + 3 * 16 + 128 + 512 + 1024, 510000, 450000, 1429]
+    for index, value in enumerate(base):
+        row(index, 4 + index, value)
+    for index, kind, value in (
+        (-1, 0, 0), (-2, 1, 7 * 131072 + 3 * 1024 + int(TaskFlags.PREPARED)),
+        (-3, int(ForeverStep.TALENT_SPENT), 104960), (-4, 3, 3 * 64),
+        (-8, 15, 0), (-9, 14, 0), (-10, 13, 0), (-11, 12, 3 * 8192 + 1),
+        (-12, 9, 3 * 1024), (-18, 11, 3 * 8192), (-19, 10, 3 * 8192),
+        (-20, 12, 3 * 8192), (-21, 3, 0), (-22, 13, 3 * 8192), (-23, 14, 3 * 8192),
+    ):
+        row(index, kind, value)
+    progression = decode_travel(image)
+    assert progression.phase == QuestState.READY
+    assert progression.forever_step == ForeverStep.TALENT_SPENT and progression.forever_value == 104960
+    assert progression.objective_action == ObjectiveAction.NONE
+    row(-2, 1, 7 * 131072 + 4 * 1024 + int(TaskFlags.PREPARED))
+    assert decode_travel(image).forever_step == ForeverStep.NONE
 
 
 def test_dropped_skyriding_flag_after_landing_dismounts_instead_of_stopping():

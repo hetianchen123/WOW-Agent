@@ -23,6 +23,7 @@ from ..control.quest_terrain import (SCENE_BOUNDS, SCENE_ERRORS, SceneRequest, T
                                      local_vision_available)
 from ..core.statemachine import State
 from ..core.paths import SCREENSHOT_DIR, DATA_DIR
+from ..data.combat import client_edition
 from ..data.grail import cached_npc_location
 from ..decision.startlux import DECISION_WAIT_S
 from ..decision.route_planner import available as cloud_route_available
@@ -36,8 +37,8 @@ from ..control.approach import ApproachAttempt, ApproachGoal, ApproachObservatio
 from ..perception.quest_channel import (
     RESOURCE_PROGRESS_MAX, Dialogue, Objective, QuestKind, QuestState, decode_quest, quest_region,
 )
-from ..perception.travel_channel import (ChoiceStep, LifeState, ObjectiveAction, PetState, RoundStage, TaskFlags, TravelFlags,
-                                         decode_travel, travel_region)
+from ..perception.travel_channel import (ChoiceStep, ForeverStep, LifeState, ObjectiveAction, PetState, RoundStage,
+                                         TaskFlags, TravelFlags, decode_travel, travel_region)
 from .base import Module
 from .combat import Fight, QuestDefense, QuestHunt, TURN_INTERVAL, TURN_SETTLE, tap_combat_key
 from .recovery import ClassPreparation, QuestRecovery
@@ -53,6 +54,11 @@ CHOICE_HANDOFFS = {(2451, 90911): (85, 91281), (85, 88719): (2432, 88719)}
 CHOICE_HANDOFF_WAIT_S = 600
 CONFIGURED_CHOICE_WAIT_S = 45
 PREPARED_FOCUS_WAIT_S = 45
+FOREVER_TARGET_LEVEL = 15
+# Exterior mesh support for the Northshire Abbey approach, in Elwynn map units.
+NORTHSHIRE_ABBEY_ENTRY = (0.485587, 0.422709)
+NORTHSHIRE_ABBEY_TURN_INS = frozenset({783, 7, 15, 21})
+NORTHSHIRE_ABBEY_PICKUPS = frozenset({7, 15, 21, 54})
 NPC_SCAN_ANGLES = tuple(math.radians(angle) for angle in range(0, 360, 30))
 NPC_MARKER_APPROACH_YARDS = 8
 NPC_MARKER_APPROACH_RADIUS = 1.25
@@ -263,6 +269,16 @@ class RunQuests(State):
         self.objective_index = None
         self.combat_frame = None
         self.last_combat_profile = None
+        self.forever_level_receipt = None
+        self.forever_entry = None
+        self.forever_entry_trip = None
+        self.forever_abbey_segment = None
+        self.forever_abbey_complete = set()
+        self.forever_progress = None
+        self.forever_progress_trip = None
+        self.forever_progress_since = None
+        self.forever_progress_at = float("-inf")
+        self.forever_trainer_scan = 0
         self.combat_adjusted = None
         self.accepted_from_offer = False
         self.hunt: QuestHunt | None = None
@@ -922,6 +938,174 @@ class RunQuests(State):
 
         return self.travel_to_destination(ctx, now, navigation, heading)
 
+    def forever_abbey_mode(self, ctx, nav):
+        if (not nav or ctx.cfg.game_version != "1.60.1" or nav.map_id != 1429 or self.travel_only
+                or not nav.position or not nav.destination or not nav.world_size
+                or (nav.quest_id, nav.phase) in self.forever_abbey_complete):
+            return None
+        router = GridRouter(*nav.world_size)
+        nearby = router.distance(nav.position, NORTHSHIRE_ABBEY_ENTRY) <= 64
+        indoor = not nav.flags & TravelFlags.OUTDOORS or self.forever_abbey_segment == (nav.quest_id, nav.phase, "exit")
+        if nearby and indoor and router.distance(nav.destination, NORTHSHIRE_ABBEY_ENTRY) > 55:
+            return "exit"
+        if nearby and (
+                nav.phase == QuestState.READY and nav.quest_id in NORTHSHIRE_ABBEY_TURN_INS
+                or nav.phase == QuestState.PENDING and nav.quest_id in NORTHSHIRE_ABBEY_PICKUPS):
+            return "enter"
+
+    def approach_forever_abbey(self, ctx, now, nav, heading):
+        mode = self.forever_abbey_mode(ctx, nav)
+        if not mode:
+            return False
+        if mode == "enter" and all(nav.task & flag for flag in (
+                TaskFlags.NPC_SELECTED, TaskFlags.NPC_RANGE_KNOWN, TaskFlags.NPC_WITHIN_5_YARDS)):
+            self.forever_abbey_complete.add((nav.quest_id, nav.phase))
+            return False
+        pose = self.nav3d_sample
+        if (pose is None or pose.position_xy is None or pose.goal_xy is None or pose.goal_world_id != 0
+                or not pose.grounded or not pose.bindings_verified
+                or (pose.sequence, pose.world_id, pose.ui_map_id, pose.quest_id, pose.phase, pose.client_build)
+                != (nav.sequence, 0, nav.map_id, nav.quest_id, int(nav.phase), 70959)):
+            self.wait_for_data(ctx, now, "forever_abbey_pose_unavailable")
+            return True
+        from ..nav3d import NavigationError
+        from ..nav3d.runtime import Nav3DCoordinator
+        segment = nav.quest_id, nav.phase, mode
+        if segment != self.forever_abbey_segment:
+            self.camera.cancel(ctx, now, "forever_abbey_mesh")
+            previous = self.forever_entry
+            self.forever_entry_trip = None
+            self.forever_abbey_segment = segment
+            try:
+                self.forever_entry = Nav3DCoordinator(replace(ctx.cfg.nav3d, mode="nav3d"), now=now,
+                    log_event=ctx.log_event, resume_runs=DATA_DIR / "runs",
+                    scene_phases=(f"quest:{nav.quest_id}:{int(nav.phase)}",) if mode == "enter" else (),
+                    edge_tolerance=.14)
+                if mode == "exit":
+                    if previous and previous.tracker.last and math.dist(previous.tracker.last[:2], pose.position_xy) <= 2:
+                        self.forever_entry.tracker.last = previous.tracker.last
+                    self.forever_entry.begin_exit(pose.goal_xy, now=now, sample=pose)
+            except (OSError, ValueError, NavigationError) as exc:
+                self.stop(ctx, "forever_abbey_mesh_unavailable:" + str(exc))
+                return True
+        coordinator = self.forever_entry
+        if mode == "enter" and coordinator.sequence is None:
+            tracker = coordinator.tracker
+            support = tracker.candidates(pose.position_xy, edge_tolerance=tracker.edge_tolerance)
+            # Exterior starts require a unique surface. The open approach was
+            # checked offline to connect to the abbey's lowest goal surface.
+            if self.forever_entry_trip is not None or len(support) != 1:
+                if self.forever_entry_trip is None:
+                    self.forever_entry_trip = QuestTrip(nav.world_size, NORTHSHIRE_ABBEY_ENTRY,
+                        ctx.cfg.navigation.facing_convention, arrival_radius=.9, walk_only=True,
+                        local_travel=True, log_event=ctx.log_event)
+                    ctx.log_event("forever_abbey_mesh_rejoin", {"position": pose.position_xy,
+                                                              "exterior_point": NORTHSHIRE_ABBEY_ENTRY})
+                command = self.forever_entry_trip.step(now, nav, heading, heading_age=ctx.heading_age())
+                self.apply_travel_command(ctx, command)
+                if command.outcome != "arrived":
+                    if command.outcome:
+                        self.stop(ctx, "forever_abbey_rejoin_" + command.outcome)
+                    return True
+                self.forever_entry_trip = None
+                if len(support) != 1:
+                    self.stop(ctx, "forever_abbey_rejoin_support_unconfirmed")
+                    return True
+        self.unusable_since = self.unusable_reason = None
+        command = coordinator.step(now, pose, nav,
+            target_receipt=building_target_receipt(nav, self.observation, now), travel_only=True)
+        self.apply_travel_command(ctx, command)
+        if command.outcome in {"nav3d_route_arrived", "nav3d_target_confirmed", "nav3d_exit_reached"}:
+            self.forever_abbey_complete.add((nav.quest_id, nav.phase))
+            self.arrived = mode == "enter"
+            self.trip = None
+            ctx.log_event("forever_abbey_handoff", {"position": pose.position_xy, "basis": command.outcome,
+                                                   "next": "interaction" if self.arrived else "outdoor_travel"})
+        elif command.outcome:
+            self.stop(ctx, command.outcome)
+        return True
+
+    def maintain_forever_character(self, ctx, now, nav, heading, dialogue):
+        step = nav.forever_step if nav and (nav.addon_build or 0) >= 291 else ForeverStep.NONE
+        if step == ForeverStep.NONE:
+            if self.forever_progress is not None:
+                self.set_travel_keys(ctx, frozenset())
+                self.trip = None
+                self.arrived = False
+                if self.hunt and self.hunt.fight is None:
+                    self.hunt.reset_search()
+            self.forever_progress = self.forever_progress_trip = self.forever_progress_since = None
+            self.forever_trainer_scan = 0
+            return False
+        if nav.flags & (TravelFlags.IN_COMBAT | TravelFlags.FALLING | TravelFlags.FLYING | TravelFlags.CASTING):
+            self.set_travel_keys(ctx, frozenset())
+            return True
+        value = nav.forever_value
+        if self.forever_progress != (step, value):
+            self.forever_progress = step, value
+            ctx.log_event("forever_progression", {"step": step.name, "value": value,
+                                                  "sequence": nav.sequence})
+        if self.forever_progress_since is None:
+            self.forever_progress_since = now
+        if step != ForeverStep.TRAVEL:
+            self.set_travel_keys(ctx, frozenset())
+            if step in {ForeverStep.TRAINER_GOSSIP, ForeverStep.LEARN, ForeverStep.TALENT, ForeverStep.MACRO,
+                        ForeverStep.TRAINER_FINISH} and now - self.forever_progress_at >= 1.5:
+                self.forever_progress_at = now
+                ctx.input.tap("f4")
+            elif (step == ForeverStep.TRAINER_WAIT and now - self.forever_progress_since >= 95
+                    and now - self.forever_progress_at >= 1.5):
+                self.forever_progress_at = now
+                ctx.input.tap("f4")
+            return True
+        if (dialogue != Dialogue.CLOSED or not nav.interact_verified or not nav.flags & TravelFlags.KEYS_VERIFIED
+                or nav.destination_map != nav.map_id or not nav.destination or not nav.position or not nav.world_size):
+            self.set_travel_keys(ctx, frozenset())
+            return True
+        if now - self.forever_progress_since > 95:
+            self.set_travel_keys(ctx, frozenset())
+            if now - self.forever_progress_at >= 1.5:
+                self.forever_progress_at = now
+                ctx.input.tap("f4")
+            return True
+        if all(nav.task & flag for flag in (TaskFlags.NPC_SELECTED, TaskFlags.NPC_RANGE_KNOWN,
+                                           TaskFlags.NPC_WITHIN_5_YARDS)):
+            self.set_travel_keys(ctx, frozenset())
+            if now - self.forever_progress_at >= 1.7:
+                self.forever_progress_at = now
+                ctx.input.tap("f")
+            return True
+        if nav.task & TaskFlags.NPC_CANDIDATE and not nav.task & TaskFlags.NPC_SELECTED:
+            self.set_travel_keys(ctx, frozenset())
+            if now - self.forever_progress_at >= .8:
+                self.forever_progress_at = now
+                ctx.input.tap("k")
+            return True
+        if self.forever_progress_trip is None:
+            self.forever_progress_trip = QuestTrip(nav.world_size, nav.destination, ctx.cfg.navigation.facing_convention,
+                                                  arrival_radius=2.2, walk_only=True, approach_on_foot=True,
+                                                  log_event=ctx.log_event)
+        trip = self.forever_progress_trip
+        command = trip.step(now, nav, heading, heading_age=ctx.heading_age())
+        if command.outcome == "arrived":
+            self.set_travel_keys(ctx, frozenset())
+            if now - self.forever_progress_at >= .8:
+                self.forever_progress_at = now
+                self.forever_trainer_scan += 1
+                if self.forever_trainer_scan <= 12:
+                    ctx.input.tap("left", hold_s=.13)
+                else:
+                    ctx.input.tap("f4")
+        elif command.outcome:
+            self.set_travel_keys(ctx, frozenset())
+            if now - self.forever_progress_at >= 1.5:
+                self.forever_progress_at = now
+                ctx.log_event("forever_trainer_route_unconfirmed", {"reason": command.outcome})
+                ctx.input.tap("f4")
+        else:
+            self.apply_travel_command(ctx, command)
+        return True
+
     def check_patrol(self, ctx, now, navigation):
         recovery = navigation.recovery
         if self.patrol_wait_until is not None:
@@ -1427,7 +1611,7 @@ class RunQuests(State):
             nav_rect = travel_region(channel.x, channel.y)
             left, top = channel.x, min(nav_rect[1], combat_rect[1]) if self.auto_route else combat_rect[1]
             right = nav_rect[0] + nav_rect[2] if self.auto_route else left + REGION_W
-            if self.auto_route and self.nav3d_enabled(ctx):
+            if self.auto_route and (self.nav3d_enabled(ctx) or ctx.cfg.game_version == "1.60.1"):
                 from ..perception.nav3d_channel import nav3d_region
                 xyz_rect = nav3d_region(channel.x, channel.y)
                 top, right = min(top, xyz_rect[1]), max(right, xyz_rect[0] + xyz_rect[2])
@@ -1440,7 +1624,7 @@ class RunQuests(State):
             self.combat_frame, frame_image = strip(combat_rect), strip(quest_rect)
             if self.auto_route:
                 nav_image = strip(nav_rect)
-                if self.nav3d_enabled(ctx):
+                if self.nav3d_enabled(ctx) or ctx.cfg.game_version == "1.60.1":
                     from ..perception.nav3d_channel import decode_nav3d
                     self.nav3d_sample = decode_nav3d(strip(xyz_rect))
         status = ctx.channel.status(max_age_s=1.5)
@@ -1455,6 +1639,21 @@ class RunQuests(State):
         frame = decode_quest(frame_image)
         observed_combat = decode_combat(self.combat_frame) if self.combat_frame is not None else None
         self.observation = self.observations.snapshot(now, frame, navigation, observed_combat)
+        if (ctx.cfg.game_version == "1.60.1" and observed_combat
+                and client_edition(observed_combat.build) == "forever" and observed_combat.level > 0):
+            level, sequence = observed_combat.level, observed_combat.sequence
+            previous = self.forever_level_receipt
+            if previous is None or level != previous[0]:
+                ctx.log_event("forever_level_observed", {"level": level, "sequence": sequence})
+            if level >= FOREVER_TARGET_LEVEL:
+                self.set_forward(ctx, False)
+                if previous and previous[0] == level and previous[1] != sequence:
+                    ctx.stats["forever_level"] = level
+                    ctx.log_event("forever_level_reached", {"level": level, "sequence": sequence})
+                    self.OUTCOME = "completed"
+                self.forever_level_receipt = level, sequence
+                return
+            self.forever_level_receipt = level, sequence
         if navigation and navigation.addon_build != getattr(self, "loaded_addon_build", None):
             self.loaded_addon_build = navigation.addon_build
             ctx.log_event("quest_addon_loaded", {"build": navigation.addon_build,
@@ -1590,6 +1789,7 @@ class RunQuests(State):
         if (navigation and navigation.map_id == self.map_id and navigation.quest_id == frame.quest_id == step.quest_id
                 and navigation.phase == frame.state and frame.state in {QuestState.PENDING, QuestState.ACTIVE, QuestState.READY}
                 and (not self.require_prepared or navigation.task & TaskFlags.PREPARED)
+                and not self.forever_abbey_mode(ctx, navigation)
                 and self.restore_camera(ctx, now, navigation, dialogue_open=frame.dialogue != Dialogue.CLOSED,
                                         in_combat=in_combat)):
             return
@@ -1673,6 +1873,9 @@ class RunQuests(State):
             return
         if self.suspend_request and not in_combat:
             return self.suspend_task(ctx, now, navigation, in_combat)
+        if (prepared and not in_combat and self.require_prepared and ctx.cfg.game_version == "1.60.1"
+                and self.maintain_forever_character(ctx, now, navigation, heading, frame.dialogue)):
+            return
         if self.round_stage != RoundStage.NONE:
             if self.round_stage == RoundStage.DONE:
                 self.set_forward(ctx, False)
@@ -1933,6 +2136,8 @@ class RunQuests(State):
             if signature != self.action_signature:
                 self.action_signature, self.attempts = signature, 0
             return self.act(ctx, step.dialog_key, now)
+        if navigation and not in_combat and self.approach_forever_abbey(ctx, now, navigation, heading):
+            return
         if (navigation and not in_combat and not mount_tutorial and self.terrain is None
                 and self.process_building_access(ctx,now,navigation,heading)):
             return
@@ -1993,7 +2198,8 @@ class RunQuests(State):
                 and navigation.destination and navigation.world_size and self.search_waypoint is None
                 and self.phase == QuestState.ACTIVE and not self.travel_only
                 and not navigation.flags & (TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING)):
-            if inside_quest_search_area(navigation):
+            fallback_radius = 28 if ctx.cfg.game_version == "1.60.1" else 90
+            if inside_quest_search_area(navigation, fallback_radius=fallback_radius):
                 self.set_forward(ctx, False)
                 self.arrived, self.trip = True, None
                 ctx.log_event("quest_hunt_start_here", {"position": navigation.position,
@@ -3495,8 +3701,18 @@ class NavigateCurrentQuest(State):
                 self.started = now
                 log.info("魔兽已回到前台，继续核对任务色条。")
         channel = ctx.cfg.channel
-        navigation = decode_travel(ctx.capture.grab(*travel_region(channel.x, channel.y)))
+        travel_image = ctx.capture.grab(*travel_region(channel.x, channel.y))
+        navigation = decode_travel(travel_image)
         if navigation and navigation.quest_id > 0 and navigation.map_id > 0:
+            if self.require_prepared and ctx.cfg.game_version == "1.60.1":
+                sample = decode_combat(ctx.capture.grab(*combat_region(channel.x, channel.y)))
+                if sample is None:
+                    if time.monotonic() - self.started > 5:
+                        self.OUTCOME = "stopped:forever_character_channel_unavailable"
+                    return
+                if client_edition(sample.build) != "forever":
+                    self.OUTCOME = "stopped:forever_client_required"
+                    return
             if self.require_prepared:
                 previous = self.sequence
                 self.sequence = navigation.quest_id, navigation.sequence
@@ -3524,6 +3740,17 @@ class NavigateCurrentQuest(State):
                           "controller": controller_version, "protocol": navigation.protocol_version,
                           "phase": navigation.phase.name, "mode": "prepared" if self.require_prepared else "travel"})
         elif time.monotonic() - self.started > 5:
+            if self.require_prepared and ctx.cfg.game_version == "1.60.1" and ctx.input.name != "mock":
+                from ..perception.channel_spec import decode_frame, sample_nibbles
+                from ..perception.travel_channel import TRAVEL_ROWS
+
+                offset = travel_image.shape[0] - TRAVEL_ROWS * REGION_H
+                rows = [decode_frame(sample_nibbles(travel_image, 0, offset + i * REGION_H))
+                        for i in range(TRAVEL_ROWS)]
+                crop = save_snapshot(travel_image, "forever_prepared_channel", directory=SCREENSHOT_DIR)
+                ctx.log_event("forever_prepared_channel_missing", {
+                    "origin": travel_region(channel.x, channel.y)[:2], "rows": rows, "crop": str(crop),
+                })
             self.OUTCOME = "stopped:quest_navigation_not_prepared"
 
 

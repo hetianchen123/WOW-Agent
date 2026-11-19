@@ -37,7 +37,9 @@ frame:SetClampedToScreen(true)
 if WowAgentDB and WowAgentDB.point then
     frame:SetPoint(unpack(WowAgentDB.point))
 else
-    frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 40, 40)
+    -- In Forever, leave room below all protocol rows for the chat input and
+    -- the macOS input-method indicator that can overlay the game window.
+    frame:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 40, WowAgent.Forever and 130 or 40)
 end
 
 -- value is 20 bits

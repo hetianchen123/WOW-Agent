@@ -17,6 +17,12 @@ TURN_INTERVAL = .45
 TURN_SETTLE = .50
 
 
+def same_combat_character(previous, sample):
+    current = sample.identity
+    return (previous == current or client_edition(sample.build) == "forever"
+            and previous[:-1] == current[:-1] and current[-1] > previous[-1])
+
+
 class Fight:
     def __init__(self, target_id: int, *, approach=False, defense=False, immediate=False):
         self.target_id = target_id
@@ -60,7 +66,7 @@ class Fight:
             return "unsafe_player_state", None
         if not client_edition(sample.build) or not all(sample.identity[:4]):
             return "unknown_client_profile", None
-        if self.identity is not None and sample.identity != self.identity:
+        if self.identity is not None and not same_combat_character(self.identity, sample):
             return "character_profile_changed", None
         if sample.target_id != self.target_id:
             return "target_missing_or_changed", None
@@ -269,7 +275,8 @@ class QuestHunt:
         if not sample.key_verified or not 1 <= sample.key <= 9:
             return "unverified_action_binding", None
         binding = (sample.identity, sample.key)
-        if self.binding is not None and binding != self.binding:
+        if self.binding is not None and (sample.key != self.binding[1]
+                                         or not same_combat_character(self.binding[0], sample)):
             return "action_binding_changed", None
         self.binding = binding
 
@@ -367,7 +374,7 @@ class QuestDefense:
         if not client_edition(sample.build) or not all(sample.identity[:4]):
             return "unknown_client_profile", None
         binding = (sample.identity, sample.key)
-        if self.binding and self.binding != binding:
+        if self.binding and (sample.key != self.binding[1] or not same_combat_character(self.binding[0], sample)):
             return "action_binding_changed", None
         self.binding = binding
 

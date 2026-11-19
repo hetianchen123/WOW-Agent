@@ -657,8 +657,19 @@ local function MacroDefinition(kind, id)
         return "WASAssist", AssistMacro(), "assist"
     elseif kind == "spell" then
         return "WAS" .. id, MacroBody(id), id
+    elseif kind == "forever" and WowAgent.Forever then
+        return "WAFHunter", WowAgent.Forever.OutputMacro(id, Spellbook()), id
     end
     return UtilityMacro(kind, id)
+end
+
+local function RememberForeverMacro(slot, body)
+    if not WowAgentDB or not GetMacroInfo then return end
+    local kind, index = ReadAction(slot)
+    local name = kind == "macro" and index and Public(GetMacroInfo(index))
+    if name == "WAS75" or (name and name:match("^WAFHunter%d*$")) then
+        WowAgentDB.foreverOutputMacro = {name = name, body = MacroText(body)}
+    end
 end
 
 local function SetupAction(kind, id, requestedKey)
@@ -674,9 +685,25 @@ local function SetupAction(kind, id, requestedKey)
     for candidate = requestedKey or 1, requestedKey or 9 do
         local bound = BoundSlot(candidate)
         if ActionMatches(candidate, action, body) then
+            if kind == "forever" then RememberForeverMacro(bound, body) end
             if action then return ArmAction(candidate, action, body)
             else print("WowAgent：宏已在数字键 " .. candidate) end
             return true
+        end
+        if kind == "forever" and bound and EditMacro then
+            local existing, index = ReadAction(bound)
+            local actualName = existing == "macro" and index and GetMacroInfo and Public(GetMacroInfo(index))
+            local actualBody = actualName and ReadMacroBody(index, actualName)
+            local owner = WowAgentDB and WowAgentDB.foreverOutputMacro
+            local legacyAutoShot = actualName == "WAS75" and actualBody == MacroText(MacroBody(75))
+            if legacyAutoShot or (owner and owner.name == actualName and owner.body == actualBody) then
+                local ok = pcall(EditMacro, index, nil, nil, body)
+                if ok and ActionMatches(candidate, action, body) then
+                    RememberForeverMacro(bound, body)
+                    return ArmAction(candidate, action, body)
+                end
+                return nil, ok and "macro_pending" or "forever_macro_unconfirmed"
+            end
         end
         if not slot and bound and hasAction and Public(hasAction(bound)) == false then
             key, slot = candidate, bound
@@ -723,6 +750,7 @@ local function SetupAction(kind, id, requestedKey)
         print(string.format("WowAgent：数字键 %s 的动作核对未通过，类型 %s，宏或技能编号 %s。请查看准备状态后重试。",
             key, tostring(placedKind or "空"), tostring(placedID or "无法确认")))
     elseif action then
+        if kind == "forever" then RememberForeverMacro(slot, body) end
         return ArmAction(key, action, body)
     else
         print("WowAgent：宏已放到数字键 " .. key)
@@ -807,6 +835,8 @@ events:SetScript("OnEvent", function(_, event, unit, message, spellID)
     elseif event == "SPELLS_CHANGED" and armed and armed.spell == "assist" then
         -- Mount and action-bar transitions can temporarily hide Assisted Combat.
         -- Update verifies the current spell and action before publishing the key.
+        stateEpoch = (stateEpoch + 1) % 64
+    elseif WowAgent.Forever and (event == "SPELLS_CHANGED" or event == "TRAIT_CONFIG_UPDATED") then
         stateEpoch = (stateEpoch + 1) % 64
     elseif event ~= "PLAYER_SPECIALIZATION_CHANGED" or unit == "player" then
         Disarm()

@@ -17,10 +17,12 @@ local function QuestObjectives(id)
     local entries = Public(C_QuestLog.GetQuestObjectives(id))
     if type(entries) == "table" and (not canaccesstable or canaccesstable(entries)) then return entries end
 end
-local retail = WowAgent.RetailQuestData
+local forever = WowAgent.Forever
+local retail = forever and forever.questData or WowAgent.RetailQuestData
 local FindFollowup
 
 local function QuestKind(id, info, mapID)
+    if forever and retail.quests[id] and (retail.quests[id].map or retail.map) == mapID then return 3 end
     local classification = info and info.questClassification or C_QuestInfoSystem.GetQuestClassification(id)
     if classification == K.WorldQuest or C_QuestLog.IsWorldQuest(id) then return 4 end
     if classification == K.Recurring or classification == K.Calling
@@ -556,12 +558,14 @@ local function KnownFollowup(expectedID, area, afterID, suspended)
     area = area or player
     local nearest, best = nil, math.huge
     for id, data in pairs(retail.quests) do
-        if not (suspended and suspended[id]) and (not expectedID or id == expectedID) and data.after and next(data.after)
-            and (not afterID or data.after[afterID])
+        if not (suspended and suspended[id]) and (not expectedID or id == expectedID)
+            and (data.starter or (data.after and next(data.after)))
+            and (not afterID or (data.after and data.after[afterID]))
+            and (not forever or (UnitFactionGroup("player") == "Alliance" and UnitLevel("player") >= data.level))
             and Public(C_QuestLog.IsOnQuest(id)) == false
             and Public(C_QuestLog.IsQuestFlaggedCompleted(id)) == false then
             local ready = true
-            for prerequisite in pairs(data.after) do
+            for prerequisite in pairs(data.after or {}) do
                 if Public(C_QuestLog.IsQuestFlaggedCompleted(prerequisite)) ~= true then
                     ready = false
                     break
@@ -1024,16 +1028,25 @@ local function ConfigureTaskTarget(name)
 end
 
 local function SetupTaskDialogue(support, plan)
-    local index, reason = support.WriteMacro("WAQTask", taskDialogueBody)
-    if not index then return nil, reason end
-    if not taskDialogueButton then
-        taskDialogueButton = CreateFrame("Button", "WowAgentTaskDialogue", UIParent, "SecureActionButtonTemplate")
-        taskDialogueButton:RegisterForClicks("AnyDown", "AnyUp")
-        taskDialogueButton:SetAttribute("type", "macro")
+    if forever then
+        if not taskDialogueButton then
+            taskDialogueButton = CreateFrame("Button", "WowAgentTaskDialogue", UIParent)
+            taskDialogueButton:RegisterForClicks("LeftButtonUp")
+            taskDialogueButton:SetScript("OnClick", function() WowAgent.RunPreparedQuestAction() end)
+        end
+    else
+        local index, reason = support.WriteMacro("WAQTask", taskDialogueBody)
+        if not index then return nil, reason end
+        if not taskDialogueButton then
+            taskDialogueButton = CreateFrame("Button", "WowAgentTaskDialogue", UIParent, "SecureActionButtonTemplate")
+            taskDialogueButton:RegisterForClicks("AnyDown", "AnyUp")
+            taskDialogueButton:SetAttribute("type", "macro")
+        end
+        taskDialogueButton:SetAttribute("macro", index)
+        plan.dialogueMacro = index
     end
-    taskDialogueButton:SetAttribute("macro", index)
     SetOverrideBindingClick(taskBindingOwner, false, "9", "WowAgentTaskDialogue", "LeftButton")
-    plan.dialogueMacro = index
+    if forever then forever.BindProgression(taskBindingOwner, plan) end
     local suspendBinding = Public(GetBindingAction("F5", true))
     if plan.round and suspendBinding ~= nil and suspendBinding ~= "SITORSTAND" and suspendBinding ~= "PITCHDOWN" then
         if not WowAgentTaskSuspend then
@@ -1351,7 +1364,7 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
         and Public(GetBindingAction("F", true)) == "INTERACTTARGET"
         and Public(GetBindingAction("TAB", true)) == "TARGETNEARESTENEMY"
         and TaskClickMatches("9", "WowAgentTaskDialogue")
-    if not sky then
+    if not sky and not forever then
         prepared = prepared and plan.dialogueMacro
             and WowAgent.LayoutSupport.ReadMacroBody(plan.dialogueMacro) == taskDialogueBody
     end
@@ -1882,6 +1895,10 @@ local function DisplayedWorldObjectMatches(objectName)
 end
 
 local function GenericObjective(id, objectives, objective, index, objectName, knownObject, objectCreature, resourceProfile)
+    if resourceProfile and resourceProfile.combatNPC and objective and Public(objective.type) == "monster" then
+        local target = UnitGUID and CreatureID(Public(UnitGUID("target")))
+        return 1, target == resourceProfile.combatNPC and target or 0
+    end
     if IsResourceObjective(id, objectives, index) then
         local target = UnitGUID and CreatureID(Public(UnitGUID("target")))
         if target and UnitCanAttack and Public(UnitCanAttack("player", "target")) == true then
@@ -2021,6 +2038,11 @@ local function NavigationDestination(plan, phase, map)
         if routeMap then return routeMap, x, y, guided end
     end
     local targetMap, x, y = QuestDestination(id, map)
+    if not targetMap and forever and phase == 2 then
+        local data = RetailQuest(id, map)
+        local point = data and data.objectivePoint
+        if point then return map, point[1] / 100, point[2] / 100 end
+    end
     if not targetMap and round and round.immediate and phase == 3 then
         local point = round.offers[id] or plan.pickup
         if point then return point.map, point.x, point.y end
@@ -2115,6 +2137,14 @@ local function UpdateNavigation()
     end
     local objectPin = targetMap ~= nil
     if not targetMap then targetMap, gx, gy, aprWaypoint = NavigationDestination(navigation, phase, mapID) end
+    if WowAgent.Forever and navigation.automatic then
+        navigation.foreverTrain = phase == 2 and IsOutdoors() or navigation.foreverTraining
+        navigation.foreverProgress = WowAgent.Forever.Progression(navigation, mapID)
+        if navigation.foreverProgress and navigation.foreverProgress.trainer then
+            local trainer = navigation.foreverProgress.trainer
+            targetMap, gx, gy, objectiveNPC = trainer.map, trainer.x, trainer.y, trainer.id
+        end
+    end
     local position = C_Map.GetPlayerMapPosition and C_Map.GetPlayerMapPosition(mapID, "player")
     local px, py
     if position then px, py = position:GetXY() end
@@ -2193,7 +2223,8 @@ local function UpdateNavigation()
     local nearMarker = (phase == 1 or phase == 3 or objectiveNPC) and targetMap == mapID and width > 0 and depth > 0
         and Coordinate(px) and Coordinate(py) and meta % 256 >= 128
         and ((gx - px) * width)^2 + ((gy - py) * depth)^2 <= 8^2
-    local task, click, clickKey = InteractionFlags(navigation, phase, sky, nearMarker, objectiveNPC), 0, 0
+    local task, click, clickKey = InteractionFlags(navigation, navigation.foreverProgress and 2 or phase,
+        sky, nearMarker, objectiveNPC), 0, 0
     local preciseObject
     if id == 90883 and phase == 2 then
         local objective, progress = Objective(id, active)
@@ -2219,6 +2250,13 @@ local function UpdateNavigation()
         encounterFlags, encounterTarget = WowAgent.QuestEncounter.State(id, phase, taskTargetButton)
         if encounterFlags >= 2048 and not choice then clickKey, click = 1, encounterTarget end
     end
+    if navigation.foreverProgress then
+        local state = navigation.foreverProgress
+        clickKey, click = 7, state.value or state.node or 0
+        if click >= 1048576 then click = 0 end
+        if state.trainer then navigation.foreverTraining = true end
+        if state.code == 11 or state.code == 12 then navigation.foreverTraining = nil end
+    end
     if WowAgent.WriteNav3D then
         WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap,
             meta % 256 >= 128 and gx or nil, meta % 256 >= 128 and gy or nil, flags, encounterFlags)
@@ -2231,7 +2269,7 @@ local function UpdateNavigation()
     writeMinimap[2](1, mapSize or 0)
     writeMinimap[3](2, mapInfo and mapInfo + navSequence * 2048 or 0)
     writeSky(0, ascent + halt * 16 + (pitch or 0) * 256 + (dismount or 0) * 16384)
-    writeClick(2, click)
+    writeClick(navigation.foreverProgress and navigation.foreverProgress.code or 2, click)
     writeTask(1, task + navSequence * 1024 + clickKey * 131072)
     local roundStatus = 0
     if round then
@@ -2266,7 +2304,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 285 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 291 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4
@@ -2340,12 +2378,21 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
     local actions = {}
     for kind, key in ipairs(travelKeys) do
         local name, body = WowAgent.TravelMacro(kind)
-        if name then
+        if name and not forever then
             actions[#actions + 1] = {kind = "travel", id = kind, key = key, body = body}
         end
     end
     if automatic then
-        actions[#actions + 1] = {kind = "assist", key = 1}
+        if forever then
+            local spell = support.LearnedSpells and forever.OutputSpell(support.LearnedSpells())
+            if not spell then
+                WowAgent.StopQuestNavigation()
+                return print("WowAgent：无限服猎人的已学输出技能尚未核对。")
+            end
+            actions[#actions + 1] = {kind = "forever", id = spell, key = 4}
+        else
+            actions[#actions + 1] = {kind = "assist", key = 1}
+        end
         actions[#actions + 1] = {kind = "prepared_dialogue", key = 9}
     else
         actions[#actions + 1] = {kind = "quest", id = id, key = 9}

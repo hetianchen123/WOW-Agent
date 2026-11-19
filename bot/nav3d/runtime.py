@@ -18,9 +18,10 @@ class SurfaceTracker:
     This is inferred Z, never a native altitude observation. Stacked surfaces
     cannot be initialized from XY alone. Mesh erosion is respected.
     """
-    def __init__(self, mesh):
+    def __init__(self, mesh, *, edge_tolerance=.08):
         self.mesh=mesh;self.triangles=mesh.debug_triangles();self.last=None
         self.support_basis='mesh_triangle'
+        self.edge_tolerance=edge_tolerance
 
     def candidates(self, xy, *, edge_tolerance=0):
         p=np.asarray(xy,float);t=self.triangles
@@ -58,11 +59,14 @@ class SurfaceTracker:
         if self.last is not None:
             distance=math.dist(xy,self.last[:2])
             if distance>2:raise NavigationError('nav3d_displacement_discontinuity')
+            # A stair transition can rise more than the horizontal displacement.
+            # Keep the mesh's agent clearance and the separate short-path check.
+            step_limit=self.mesh.agent.max_climb+self.mesh.agent.cell_height/2
             def connected(points):
                 result=[]
                 for p in points:
-                    if abs(p[2]-self.last[2])>max(.45,distance*1.1):continue
-                    try:route=self.mesh.plan(Query(self.mesh.frame,self.last,p,horizontal_snap=.08))
+                    if abs(p[2]-self.last[2])>max(.45,step_limit,distance*1.1):continue
+                    try:route=self.mesh.plan(Query(self.mesh.frame,self.last,p,horizontal_snap=self.edge_tolerance))
                     except NavigationError:continue
                     if route.length<=distance*1.5+.3:result.append(p)
                 return result
@@ -70,28 +74,31 @@ class SurfaceTracker:
             # Exact support has priority. Projection must not introduce adjacent
             # slope heights as extra floors when the pose is already inside.
             if not candidates:
-                candidates=connected(self.candidates(xy,edge_tolerance=.08))
+                candidates=connected(self.candidates(xy,edge_tolerance=self.edge_tolerance))
                 self.support_basis='bounded_edge_projection'
         else:
             # Include nearby support at startup so a tiny edge miss cannot
             # silently initialize to the roof above an unobserved ground floor.
-            candidates=self.candidates(xy,edge_tolerance=.08)
+            candidates=self.candidates(xy,edge_tolerance=self.edge_tolerance)
         if len(candidates)!=1:
             raise NavigationError('nav3d_support_ambiguous' if candidates else 'nav3d_support_missing')
         self.last=candidates[0];return self.last
 
 
 class Nav3DCoordinator:
-    def __init__(self, config, *, now, log_event=lambda *_:None, resume_runs=None):
+    def __init__(self, config, *, now, log_event=lambda *_:None, resume_runs=None, scene_phases=(),
+                 edge_tolerance=.08):
         if config.mode not in {'nav3d','nav3d-shadow'}:raise NavigationError('invalid_nav3d_mode')
         if not 0<config.budget_s<=120 or not 0<=config.max_replans<=3:raise NavigationError('invalid_nav3d_budget')
-        self.config=config;self.mesh=NavMesh.load(config.mesh);self.tracker=SurfaceTracker(self.mesh)
+        self.config=config;self.mesh=NavMesh.load(config.mesh)
+        self.tracker=SurfaceTracker(self.mesh,edge_tolerance=edge_tolerance)
         self.log=log_event;self.deadline=now+config.budget_s;self.follower=None;self.replans=0
         self.sequence=None;self.changed_at=now;self.identity=None;self.terminal=None;self.route=None
         self.goals=None;self.goal_index=0;self.arrived_at=None
         self.exit_goal=None;self.exit_candidates=();self.exit_phase_released=False
         self.exit_hypotheses=None;self.exit_hypothesis_index=0
         self.resume_runs=resume_runs
+        self.scene_phases=frozenset(scene_phases)
         trial_id=config.supervised_trial_mesh_id
         if trial_id and trial_id!=self.mesh.mesh_id:raise NavigationError('nav3d_trial_mesh_mismatch')
         self.supervised_trial=bool(trial_id) and config.mode=='nav3d'
@@ -181,7 +188,7 @@ class Nav3DCoordinator:
                 if control is None:continue
                 previous=control['data']['position']
                 if math.dist(previous[:2],sample.position_xy)>2:continue
-                match=[p for p in self.tracker.candidates(sample.position_xy,edge_tolerance=.08)
+                match=[p for p in self.tracker.candidates(sample.position_xy,edge_tolerance=self.tracker.edge_tolerance)
                     if abs(p[2]-previous[2])<=.35]
                 if len(match)!=1:continue
                 self.tracker.last=match[0]
@@ -237,7 +244,7 @@ class Nav3DCoordinator:
             return False
         self.exit_hypothesis_index+=1
         target_z=self.exit_hypotheses[self.exit_hypothesis_index]
-        matches=[p for p in self.tracker.candidates(xy,edge_tolerance=.08)
+        matches=[p for p in self.tracker.candidates(xy,edge_tolerance=self.tracker.edge_tolerance)
             if abs(p[2]-target_z)<1]
         if not matches:
             return False
@@ -276,7 +283,8 @@ class Nav3DCoordinator:
             stopped=last['nav3d_pose']['data']['position_xy']
             if math.dist(stopped,sample.position_xy)>.1 or math.dist(previous[:2],stopped)>.5:return
             # Validate the recorded support itself before seeding continuity.
-            if not any(abs(p[2]-previous[2])<=.15 for p in self.tracker.candidates(previous[:2],edge_tolerance=.08)):return
+            if not any(abs(p[2]-previous[2])<=.15 for p in self.tracker.candidates(
+                    previous[:2],edge_tolerance=self.tracker.edge_tolerance)):return
             self.tracker.last=tuple(previous)
             self.log('nav3d_resume_support',dict(source_run=path.parent.name,position=previous,
                 stopped_xy=stopped,z_source='previous_inferred_support',native_altitude_verified=False))
@@ -296,6 +304,8 @@ class Nav3DCoordinator:
         self.sequence=sample.sequence;self.changed_at=now
         frame=self.mesh.frame
         phase_id=f'quest:{sample.quest_id}:{sample.phase}'
+        if phase_id in self.scene_phases:
+            phase_id=frame.phase_id
         if frame.phase_id!=phase_id and self.exit_goal is not None:
             # Static collision geometry is unchanged across quest phases and
             # quest labels; the mesh's scene tag never binds an exit segment.
@@ -331,7 +341,8 @@ class Nav3DCoordinator:
             # only a fast path. A wrong floor fails through support loss, stuck
             # or deviation and advances; this is a mesh-candidate trial, never
             # a native altitude claim.
-            levels=sorted({p[2] for p in self.tracker.candidates(sample.position_xy,edge_tolerance=.08)})
+            levels=sorted({p[2] for p in self.tracker.candidates(
+                sample.position_xy,edge_tolerance=self.tracker.edge_tolerance)})
             if len(levels)>1:
                 self.exit_hypotheses=levels;self.exit_hypothesis_index=0
                 self.tracker.last=(*sample.position_xy,levels[0])
@@ -345,7 +356,7 @@ class Nav3DCoordinator:
                 return TravelCommand()
             self.log('nav3d_support_failure',dict(reason=str(exc),previous=self.tracker.last,
                 position_xy=sample.position_xy,exact=self.tracker.candidates(sample.position_xy),
-                nearby=self.tracker.candidates(sample.position_xy,edge_tolerance=.08)))
+                nearby=self.tracker.candidates(sample.position_xy,edge_tolerance=self.tracker.edge_tolerance)))
             raise
         if target_receipt and self.config.mode=='nav3d' and self.exit_goal is None:
             self.log('nav3d_target_receipt',target_receipt)

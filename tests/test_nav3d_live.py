@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from bot.core.config import Nav3DConfig
 from bot.nav3d import Frame, NavMesh, NavigationError
+from bot.nav3d.planner import Agent
 from bot.nav3d.demo import scene
 from bot.nav3d.extract import terrain, placement_matrix, quaternion_matrix
 from bot.nav3d.runtime import SurfaceTracker, Nav3DCoordinator
@@ -310,7 +311,7 @@ def edge_tracker():
     triangles=np.array([[[0,0,0],[.8,.6,.9],[.416,1.2,.9]],
         [[-2,-2,17],[3,-2,17],[-2,3,17]],[[3,-2,17],[3,3,17],[-2,3,17]]])
     mesh=SimpleNamespace(debug_triangles=lambda:triangles,frame=Frame('test',0,'test','east_north_up'),
-        plan=lambda q:SimpleNamespace(length=math.dist(q.start,q.goal)))
+        agent=Agent(),plan=lambda q:SimpleNamespace(length=math.dist(q.start,q.goal)))
     return SurfaceTracker(mesh)
 
 
@@ -320,6 +321,22 @@ def test_doorway_edge_tolerance_retains_connected_floor_not_roof():
     actual=tracker.update((.7,.5))
     assert actual[:2]==(.7,.5) and actual[2]==pytest.approx(.774)
     assert tracker.update((.7,.5))==actual  # held position remains stable
+
+
+def test_short_stair_movement_respects_agent_climb_and_connected_path():
+    triangles = np.array([
+        [[-1,-1,0],[0,-1,0],[0,1,0]],
+        [[0,-1,.6],[1,-1,.6],[0,1,.6]],
+    ])
+    mesh = SimpleNamespace(debug_triangles=lambda: triangles, frame=Frame('test',0,'test','east_north_up'),
+                           agent=Agent(max_climb=.8),
+                           plan=lambda q: SimpleNamespace(length=math.dist(q.start,q.goal)))
+    tracker = SurfaceTracker(mesh)
+    assert tracker.update((-.15, 0)) == (-.15, 0., 0.)
+    assert tracker.update((.15, 0)) == (.15, 0., .6)
+    mesh.plan = lambda q: SimpleNamespace(length=12.)
+    with pytest.raises(NavigationError, match='missing'):
+        tracker.update((-.15, 0))
 
 
 def test_edge_tolerance_does_not_select_a_floor_without_continuity():

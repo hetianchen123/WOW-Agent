@@ -4,11 +4,11 @@ import math
 from .pathfinding import GridRouter
 
 
-def inside_quest_search_area(nav):
+def inside_quest_search_area(nav, *, fallback_radius=90):
     router = GridRouter(*nav.world_size)
     if nav.search_area is not None:
         return any(router.distance(nav.position, point) <= 22 for point in nav.search_area)
-    return router.distance(nav.position, nav.destination) <= 90
+    return router.distance(nav.position, nav.destination) <= fallback_radius
 
 
 class QuestAreaSearch:

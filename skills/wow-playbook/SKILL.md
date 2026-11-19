@@ -1,6 +1,6 @@
 ---
 name: wow-playbook
-description: 开发、调试和实机回归魔兽世界正式服 WowAgent。用于任务推进、寻路、战斗、拾取、游戏插件与 macOS 主控协作，涵盖查日志、修复、回归、一键准备、启动脚本和核对游戏回执。
+description: 开发、调试和实机回归魔兽世界 WowAgent。用于正式服和无限服的任务、寻路、战斗、职业成长、插件与 macOS 主控协作。
 ---
 
 # Wow 开发与实机回归
@@ -17,6 +17,7 @@ description: 开发、调试和实机回归魔兽世界正式服 WowAgent。用�
    - 远程与近战站位、战斗镜头、切换目标、团本和大秘境：[战斗站位与选敌](references/combat-positioning.md)。
    - 附近未知任务、批量领取、立刻可交任务、后续任务：[任务轮次](references/quest-rounds.md)。
    - 键位、代码入口、测试、部署和实机结论：[实现与验证](references/implementation.md)。
+   - 无限服分支、北郡网格、训练师、天赋和输出宏：[无限服回归](references/forever-leveling.md)。
    - 正式服目标、任务、战斗、跑图和镜头接口的可用性：[正式服插件 API 参考](../../docs/retail-addon-api.md)。
 
 ## 开发、测试和实机复跑

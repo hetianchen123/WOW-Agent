@@ -75,6 +75,8 @@ def client_edition(build: int) -> str | None:
     # current client's action binding/range/receipt verification.
     if build == 70961:
         return "retail"
+    if build == 70959:
+        return "forever"
     return next((key for key, (_, full) in EDITIONS.items()
                  if int(full.rsplit(".", 1)[1]) == build), None)
 
