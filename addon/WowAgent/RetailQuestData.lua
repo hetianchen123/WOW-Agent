@@ -37,6 +37,29 @@ WowAgent.RetailQuestData = {
             -- zhCN task tracker and user observation, 2026-11-18; spawn ID not yet observed.
             respawnNames = {zhCN = "罗格洛克"},
         },
+        [90898] = {
+            -- WowHead series: ... 90893 -> 90895 -> 90896 -> 90898 "Back to
+            -- Hammerfall" -> 90911. `after` lists prerequisites of this quest.
+            -- Turn-in is the Hammerfall Thrall spawn, not the siege-camp one:
+            -- Grail G[90898]='T:244715 P:90896', G[244715]={'2451:69.14,34.63'}
+            -- (cross-checked with the live pin 2026-11-19). Creature-ID
+            -- matching rejected the wrong 244666 as "never selected".
+            pickup = 244666, turnIn = 244715, after = {[90896] = true},
+        },
+        [90911] = {
+            -- Follow-up accepted at Hammerfall in build 278. Grail's pickup
+            -- points to the other branch, so use the live offer/map pin here.
+            pickup = false, after = {[90898] = true},
+            choice = {fromMap = 2451, giver = 244715, point = {69.20, 34.40}, gossip = 133894,
+                dialog = 902, response = 1701, map = 85, nextQuest = 91281},
+        },
+        -- Orgrimmar: walking up to the projection grants the objective credit.
+        [91281] = {map = 85, arrival = true, turnIn = 241677, turnInPoint = {53.26, 77.15}},
+        [88719] = {map = 2432, turnIn = 236692, turnInPoint = {48.50, 38.41},
+            choice = {fromMap = 85, giver = 241677, point = {53.26, 77.15}, gossip = 133521, map = 2432,
+                retryStanding = true}},
+        -- The scenario updates the objective while Liadrin walks to the plaza.
+        [86769] = {map = 2432, arrival = true},
     },
     npcs = {
         [244643] = {69.98, 40.66},
@@ -46,6 +69,7 @@ WowAgent.RetailQuestData = {
         [244658] = {19.46, 57.43},
         [244666] = {24.58, 37.07},
         [244667] = {24.66, 37.11},
+        [244715] = {69.14, 34.63},
         [244729] = {56.44, 59.54},
     },
     npcNames = {
@@ -56,6 +80,14 @@ WowAgent.RetailQuestData = {
         [244658] = {enUS = "Lady Jaina Proudmoore", zhCN = "吉安娜·普罗德摩尔"},
         [244666] = {enUS = "Thrall", zhCN = "萨尔"},
         [244667] = {enUS = "Lady Jaina Proudmoore", zhCN = "吉安娜·普罗德摩尔"},
+        [244715] = {enUS = "Thrall", zhCN = "萨尔"},
         [244729] = {enUS = "Farmer Bruvk", zhCN = "农夫布鲁沃克"},
+        [241677] = {zhCN = "女伯爵莉亚德琳的影像"},
+        [236692] = {zhCN = "女伯爵莉亚德琳"},
     },
 }
+
+-- A quest-level role point overrides the NPC's default spawn coordinates.
+function WowAgent.RetailQuestData.NPCPoint(data, npc, role)
+    return data and (data[role .. "Point"] or (npc and WowAgent.RetailQuestData.npcs[npc])) or nil
+end

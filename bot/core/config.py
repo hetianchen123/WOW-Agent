@@ -90,6 +90,10 @@ class Nav3DConfig:
     budget_s: float = 120.0
     max_replans: int = 3
     encounter_wait_s: float = 300.0  # Includes retries; does not predict respawn time.
+    # 2026-11-18 split policy (user decision): after the encounter objective
+    # completes, Nav3D walks to a mesh exit and hands open-field travel back
+    # to the legacy straight-line stack. False restores the stop-at-kill run end.
+    legacy_handoff: bool = True
 
 
 @dataclass

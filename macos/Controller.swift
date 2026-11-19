@@ -183,10 +183,39 @@ private func start(_ task: Process) throws {
     try task.run()
 }
 
+private func requestPrepared(simulate: Bool) throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
+    let input: FileHandle
+    while true {
+        do {
+            input = try InputSocket.connect(simulate: simulate)
+            break
+        } catch {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw error }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+    defer { try? input.close() }
+    let fd = input.fileDescriptor
+    guard InputSocket.send(fd, ["op": "run_prepared"]) else {
+        throw InputError.message("无法发送启动请求，请核对任务启动日志")
+    }
+    let reply = try InputSocket.reply(fd)
+    guard reply["ok"] as? Bool == true else {
+        throw InputError.message(reply["error"] as? String ?? "键鼠助手未受理启动请求")
+    }
+    print("已提交一次启动请求。")
+}
+
 @main
 enum ControllerApp {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args == ["--request-prepared"] || args == ["--request-prepared-smoke"] {
+            do { try requestPrepared(simulate: args == ["--request-prepared-smoke"]) }
+            catch { fputs("\(error)\n", stderr); exit(2) }
+            return
+        }
         if args == ["--smoke"] || args == ["--permissions"] {
             do {
                 let smoke = args == ["--smoke"]

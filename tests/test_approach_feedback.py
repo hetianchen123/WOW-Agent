@@ -98,6 +98,20 @@ def test_turn_in_marker_is_search_area_not_exact_npc_footprint(tmp_path,monkeypa
     assert run.OUTCOME is None
 
 
+def test_new_ready_followup_waits_for_fresh_stable_turn_in_pin(tmp_path, monkeypatch):
+    run, ctx, _, nav, _ = npc(tmp_path, monkeypatch)
+    run.accepted_from_offer = True
+    initial = replace(nav, destination=nav.position, task=TaskFlags.PREPARED)
+    run.travel_to_destination(ctx, 1, initial, 0)
+    run.travel_to_destination(ctx, 2.1, initial, 0)
+    assert not run.arrived and run.trip is None
+    updated = replace(initial, destination=(.4, .497), sequence=2)
+    run.travel_to_destination(ctx, 2.2, updated, 0)
+    run.travel_to_destination(ctx, 3.3, replace(updated, sequence=3), 0)
+    assert run.arrived and run.trip.destination == updated.destination
+    assert not ctx.input.count("key_down", "f")
+
+
 def test_independent_channel_updates_do_not_refresh_stale_navigation():
     tracker = ObservationTracker()
     nav = sample()

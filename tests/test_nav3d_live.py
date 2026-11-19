@@ -251,7 +251,7 @@ def test_explicit_mesh_bound_trial_produces_intent_without_claiming_alignment(li
     cfg=Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),supervised_trial_mesh_id=m.mesh_id)
     rt=Nav3DCoordinator(cfg,now=0,log_event=lambda *e:events.append(e))
     command=rt.step(0,s,n)
-    assert command.outcome is None and command.tap
+    assert command.outcome is None and (command.tap or command.keys==frozenset({'w'}))
     assert not rt.alignment and not rt.follower.alignment_verified and rt.follower.supervised_trial
     assert events[0][0]=='nav3d_supervised_trial' and events[0][1]['phase_verified'] is False
     # World/build/phase checks remain mandatory even during a supervised trial.
@@ -288,16 +288,20 @@ def test_actual_coordinator_commands_obey_precise_executor_contract(live_mesh,tm
     rt=Nav3DCoordinator(Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),
         supervised_trial_mesh_id=m.mesh_id),now=0)
     command=rt.step(0,replace(s,heading=heading),n)
-    assert command.tap and command.precise and command.outcome is None
-    sleeps=[]
-    monkeypatch.setattr(input_base.time,'sleep',sleeps.append)
-    # Mock only the OS injection; retain InputBase.tap_precise's real validation
-    # and release logic, exactly as inherited by HelperInput.
-    executor=MockInput()
-    executor.tap_precise(command.tap,command.hold_s)
-    assert sleeps==[command.hold_s]
-    assert executor.count('key_down',command.tap)==executor.count('key_up',command.tap)==1
-    assert not executor._held_keys
+    assert command.outcome is None
+    if command.tap:  # misaligned: bounded precise turn pulse, W released over ~30 degrees
+        assert command.precise and command.hold_s<=.12
+        sleeps=[]
+        monkeypatch.setattr(input_base.time,'sleep',sleeps.append)
+        # Mock only the OS injection; retain InputBase.tap_precise's real validation
+        # and release logic, exactly as inherited by HelperInput.
+        executor=MockInput()
+        executor.tap_precise(command.tap,command.hold_s)
+        assert sleeps==[command.hold_s]
+        assert executor.count('key_down',command.tap)==executor.count('key_up',command.tap)==1
+        assert not executor._held_keys
+    else:  # aligned cruise holds W instead of stutter-tapping
+        assert command.keys==frozenset({'w'})
 
 
 def edge_tracker():
@@ -348,3 +352,65 @@ def test_resume_edge_stop_requires_matching_recent_run(live_mesh,tmp_path,monkey
     if invalid=='moved':s=replace(s,position_xy=(start[0]+.2,start[1]))
     rt.resume_support(s)
     assert (rt.tracker.last is not None)==(invalid is None)
+
+
+def cruise_runtime(live_mesh,tmp_path,now=0):
+    m,start,goal=live_mesh;s,n=samples(start,goal)
+    rt=Nav3DCoordinator(Nav3DConfig(mode='nav3d',mesh=str(tmp_path/'mesh'),
+        supervised_trial_mesh_id=m.mesh_id),now=now)
+    rt.step(now,s,n)
+    return rt,s,n,list(start[:2])
+
+def drive(rt,s,n,now,seq,xy,heading):
+    s=replace(s,sequence=seq,position_xy=xy,heading=heading)
+    nav=SimpleNamespace(**{**vars(n),'sequence':seq})
+    return rt.step(now,s,nav),s,nav
+
+def waypoint_heading(rt,xy):
+    target=rt.route.points[rt.follower.index]
+    return math.atan2(-(target[0]-xy[0]),target[1]-xy[1])%math.tau
+
+
+def test_follower_cruises_on_held_w_without_stutter_taps(live_mesh,tmp_path):
+    rt,s,n,xy=cruise_runtime(live_mesh,tmp_path)
+    now,seq,commands=.2,2,[]
+    for _ in range(6):
+        heading=waypoint_heading(rt,xy)
+        cmd,s,n=drive(rt,s,n,now,seq,tuple(xy),heading)
+        commands.append(cmd)
+        target=rt.route.points[rt.follower.index]
+        dx,dy=target[0]-xy[0],target[1]-xy[1]
+        length=math.hypot(dx,dy) or 1
+        xy=[xy[0]+dx/length*.5,xy[1]+dy/length*.5]
+        now+=.2;seq+=1
+    holds=[c for c in commands if not c.tap]
+    assert len(holds)>=5
+    assert all(c.keys==frozenset({'w'}) and c.outcome is None for c in holds)
+    # A duplicate receipt keeps the established hold instead of releasing keys.
+    repeat=rt.step(now,s,n)
+    assert repeat.keys==frozenset({'w'}) and not repeat.tap and repeat.outcome is None
+
+
+def test_follower_steers_on_the_move_and_rotates_in_place_only_past_30_degrees(live_mesh,tmp_path):
+    rt,s,n,xy=cruise_runtime(live_mesh,tmp_path)
+    heading=waypoint_heading(rt,xy)
+    off15=(heading-math.radians(15))%math.tau
+    # Late enough to clear the initial turn pulse's interval gate.
+    cmd,s,n=drive(rt,s,n,1.0,2,tuple(xy),off15)
+    assert cmd.tap=='left' and cmd.precise and cmd.keys==frozenset({'w'}) and cmd.hold_s<=.12
+    off60=(heading-math.radians(60))%math.tau
+    cmd,s,n=drive(rt,s,n,1.6,3,tuple(xy),off60)
+    assert cmd.tap=='left' and cmd.keys==frozenset()
+    # Inside the pulse interval at large error: no motion while misaligned.
+    cmd,s,n=drive(rt,s,n,1.7,4,tuple(xy),off60)
+    assert not cmd.tap and cmd.keys==frozenset()
+
+
+def test_held_forward_cruise_still_reports_stuck_without_progress(live_mesh,tmp_path):
+    rt,s,n,xy=cruise_runtime(live_mesh,tmp_path)
+    heading=waypoint_heading(rt,xy)
+    for i,now in enumerate([.2,.6,1.0,1.4,1.8,2.2]):
+        cmd,s,n=drive(rt,s,n,now,2+i,tuple(xy),heading)
+    assert cmd.outcome is None and not cmd.keys and rt.replans==1
+    cmd,s,n=drive(rt,s,n,2.4,8,tuple(xy),heading)
+    assert cmd.outcome=='nav3d_candidates_exhausted' and not cmd.keys

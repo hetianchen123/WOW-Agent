@@ -44,7 +44,9 @@ class WorldRouteFollower:
         self.index, self.sequence, self.last_pose = 0, None, None
         self.progress_at, self.last_turn, self.last_direction = now, float("-inf"), None
         self.travelled = 0.0
+        self.last_delta = 0.0
         self.commanded_motion = False
+        self.hold_forward = False
         self.terminal = None
 
     def stop(self, reason):
@@ -77,7 +79,9 @@ class WorldRouteFollower:
         if not pose.grounded or pose.in_combat or not pose.bindings_verified:
             return self.stop("nav3d_state_unsafe")
         if self.sequence == pose.sequence:
-            return TravelCommand()  # Release keys while awaiting a new receipt.
+            # Same receipt: keep the established hold instead of stutter-stepping;
+            # freshness is still bounded by the captured_at check above.
+            return TravelCommand(keys=frozenset({"w"}) if self.hold_forward else frozenset())
         self.sequence = pose.sequence
         # Never snap a pose to a different floor or jump to a later route branch.
         target = self.route.points[self.index]
@@ -89,6 +93,7 @@ class WorldRouteFollower:
             delta = math.dist(position, self.last_pose)
             if delta > 2:
                 return self.stop("nav3d_displacement_discontinuity")
+            self.last_delta = delta
             if self.commanded_motion:
                 self.travelled += delta
                 if self.travelled >= .1:
@@ -96,35 +101,49 @@ class WorldRouteFollower:
                 elif now-self.progress_at > 2:
                     return self.stop("nav3d_stuck_replan_required")
         self.last_pose = position
-        # Dense path points are consumed sequentially; no look-ahead across walls.
-        while math.dist(position, self.route.points[self.index]) <= .18:
-            if self.index == len(self.route.points)-1:
-                if (math.dist(position, self.route.points[-1]) <= .18
-                        and abs(position[2]-self.route.requested_goal[2]) <= .3):
-                    return self.stop("nav3d_route_arrived")
-                break
+        # Pure-pursuit targeting: dense waypoints inside the lookahead radius
+        # are consumed so one 5 Hz receipt at running speed (~1.4 yards) cannot
+        # leave the target behind the character. Run 20261118T142539 chased
+        # blown-past early waypoints backward and spun in place.
+        while (self.index < len(self.route.points)-1
+                and math.dist(position, self.route.points[self.index]) <= 1.8):
             self.index += 1
+        if (self.index == len(self.route.points)-1
+                and math.dist(position, self.route.points[-1]) <= max(.18, self.last_delta)
+                and abs(position[2]-self.route.requested_goal[2]) <= .3):
+            # The final frame can carry the character past a boundary vertex
+            # (exit points sit on the mesh edge); arriving within one frame's
+            # displacement still counts, with the floor check unchanged.
+            return self.stop("nav3d_route_arrived")
         target = self.route.points[self.index]
-        if math.dist(position, target) > 1.0:
+        window = self.route.points[max(0, self.index-4):self.index+8]
+        if min(math.dist(position, point) for point in window) > 2.0:
+            # Drift is judged against the polyline, not the pursuit target, so
+            # the lookahead distance itself can never trigger deviation.
             return self.stop("nav3d_route_deviation")
         dx, dy, dz = (b-a for a,b in zip(position,target))
         if math.hypot(dx,dy) < .03 and abs(dz) > .3:
             return self.stop("nav3d_floor_mismatch")
         error = heading_error(pose.heading, math.atan2(-dx,dy) % math.tau)
-        self.commanded_motion = False
+        # Smooth travel holds W across control cycles (the field-tested legacy
+        # pattern) and steers with bounded precise turn pulses on top. Only a
+        # misalignment large enough to drift out of the dense-waypoint corridor
+        # releases W to rotate in place; deviation replans and stuck checks
+        # below still bound every hold.
+        running = abs(error) <= math.radians(15)
+        self.hold_forward = running
+        self.commanded_motion = running
         if abs(error) > math.radians(10):
             direction = "left" if error > 0 else "right"
             interval = .9 if self.last_direction and direction != self.last_direction else .45
             if now-self.last_turn < interval:
-                return TravelCommand()
+                return TravelCommand(keys=frozenset({"w"}) if running else frozenset())
             self.last_turn, self.last_direction = now, direction
             self.progress_at = now
             # InputBase.tap_precise accepts movement pulses up to 120 ms.
             # Larger turns use successive pulses with fresh heading feedback.
-            return TravelCommand(tap=direction, hold_s=min(.12,max(.03,abs(error)/math.radians(240))), precise=True)
-        if now-self.last_turn < .45:
-            return TravelCommand()
-        self.commanded_motion = True
-        # Short pulses keep the next target within the verified corridor. Inputs
-        # must be released by the existing executor before observing again.
-        return TravelCommand(tap="w", hold_s=min(.03,max(.015,math.hypot(dx,dy)/7)), precise=True)
+            # Rate calibrated from run 20261118T142539 receipts: 0.12 s pulses
+            # turned 22.5 deg, i.e. ~190 deg/s (was assumed 240).
+            return TravelCommand(keys=frozenset({"w"}) if running else frozenset(),
+                tap=direction, hold_s=min(.12,max(.03,abs(error)/math.radians(190))), precise=True)
+        return TravelCommand(keys=frozenset({"w"}))

@@ -88,3 +88,4 @@ nav3d:
   budget_s: 120
   max_replans: 3
   encounter_wait_s: 300
+  legacy_handoff: true   # 局部分治：击杀完成后 Nav3D 走到网格出口，交回旧直线移动去交付/后续任务

@@ -171,6 +171,20 @@ def test_npc_progress_toward_marker_can_continue_but_is_not_arrival(tmp_path, mo
     assert not run.npc_rejoin and run.terrain is None
 
 
+def test_npc_candidate_change_releases_step_and_reselects_before_interacting(tmp_path, monkeypatch):
+    run, ctx, _, nav, _ = npc(tmp_path, monkeypatch)
+    run.interact_quest_target(ctx, 1, nav, 0)
+    assert ctx.input._held_keys == {"w"}
+    new_candidate = replace(nav, sequence=2, task=TaskFlags.PREPARED | TaskFlags.NPC_CANDIDATE)
+    run.interact_quest_target(ctx, 1.2, new_candidate, 0)
+    assert not ctx.input._held_keys and run.npc_step is None and run.OUTCOME is None
+    run.interact_quest_target(ctx, 3.5, replace(new_candidate, sequence=3), 0)
+    assert ctx.input.count("key_down", "k") == 1 and not ctx.input.count("key_down", "f")
+    in_range = replace(nav, sequence=4, task=nav.task | TaskFlags.NPC_WITHIN_5_YARDS)
+    run.interact_quest_target(ctx, 4, in_range, 0)
+    assert ctx.input.count("key_down", "f") == 1
+
+
 def test_near_marker_without_npc_range_does_not_walk_past_it(tmp_path, monkeypatch):
     run, ctx, _, nav, _ = npc(tmp_path, monkeypatch)
     nav = replace(nav, destination=(.4, .4995))

@@ -471,7 +471,8 @@ local pickupNPCs = {
 }
 
 local function RetailQuest(id, map)
-    return retail and map == retail.map and retail.quests[id]
+    local data = retail and retail.quests[id]
+    return data and map == (data.map or retail.map) and data
 end
 
 local function IsFollowup(id, previous, map)
@@ -482,7 +483,7 @@ end
 local function RetailNPCPoint(id, role, map)
     local data = RetailQuest(id, map)
     local npc = data and data[role]
-    local coords = npc and retail.npcs[npc]
+    local coords = data and retail.NPCPoint(data, npc, role)
     if coords then return {id = id, map = map, x = coords[1] / 100, y = coords[2] / 100, npc = npc} end
 end
 
@@ -688,6 +689,21 @@ local function ReconcileRoundSuspensions(round)
     return count
 end
 
+local function HasOpenQuestOffer(id)
+    if WowAgent.OpenQuestOfferID() == id then return true end
+    for _, offered in ipairs(DialogueQuests()) do
+        if offered.id == id and offered.phase == OFFER then return true end
+    end
+    return false
+end
+
+local function QuestPickup(id, round)
+    local anchor = round and round.anchor
+    return NearbyQuest(id, anchor)
+        or (round and round.offers and InQuestArea(round.offers[id], anchor) and round.offers[id])
+        or KnownFollowup(id, anchor)
+end
+
 function WowAgent.GetQuestRoundResumeID()
     local saved, character = SavedRound()
     local round = saved and saved[character]
@@ -695,9 +711,18 @@ function WowAgent.GetQuestRoundResumeID()
     ReconcileRoundSuspensions(round)
     if round.stage == ROUND_DONE then return end
     local current = not (round.suspended and round.suspended[round.current]) and round.current
-    if round.immediate and current then return current end
+    if current then
+        local phase = QuestPhase(current)
+        if round.immediate and phase >= 3 then return current end
+        if round.stage == ROUND_PICKUP then
+            if phase == 2 or phase == 3
+                or (phase == 1 and (HasOpenQuestOffer(current) or QuestPickup(current, round))) then return current end
+            current = nil
+        elseif phase == 1 then
+            current = nil
+        end
+    end
     if round.stage == ROUND_TURN_IN then return RoundQuest(round, 3) or current end
-    if round.stage == ROUND_PICKUP and current then return current end
     return RoundQuest(round, 2) or RoundQuest(round, 3) or current
 end
 
@@ -876,9 +901,7 @@ end
 
 local function MatchesNPC(unit, guid, expected)
     if not guid or not guid:match("^Creature%-") or Public(UnitIsDead(unit)) ~= false then return false end
-    if type(expected) == "number" then
-        return CreatureID(guid) == expected
-    end
+    if type(expected) == "number" then return CreatureID(guid) == expected end
     return expected and UnitName and Public(UnitName(unit)) == expected
 end
 
@@ -890,7 +913,7 @@ end
 
 local function KnownTaskTargetName(expected)
     if type(expected) == "string" then return SafeTaskTargetName(expected) end
-    if not retail or not retail.npcNames or retail.map ~= C_Map.GetBestMapForUnit("player") then return end
+    if not retail or not retail.npcNames then return end
     local names = retail.npcNames[expected]
     local locale = GetLocale and GetLocale()
     return names and SafeTaskTargetName(names[locale == "enGB" and "enUS" or locale])
@@ -1096,7 +1119,9 @@ local function SetQuestInteraction(plan, id, npc, pickup)
     plan.pickupNPC = plan.automatic and ((seen and seen.npc) or PickupNPC(id) or (pickup and pickup.npc))
     plan.pickupName = seen and seen.npc == plan.pickupNPC and SafeTaskTargetName(seen.name)
     plan.rangeProbeAt, plan.turnInTarget, plan.rejectedNPCs = nil, nil, nil
-    plan.targetEvidence = nil
+    plan.targetEvidence, plan.liveTargetEvidence, plan.npcUnmatchedSince = nil, nil, nil
+    plan.choiceSeen, plan.choiceOpened, plan.transportSent = nil, nil, nil
+    plan.transportStandUntil = nil
     ConfigureTaskTarget(nil)
 end
 
@@ -1119,7 +1144,7 @@ local function RecoverQuestDialogue(plan, id, phase, pickup)
         end
     end
     local npc = QuestGiverGUID() or plan.turnInTarget
-    if npc and (pickup or not plan.npc) then
+    if npc then
         plan.rejectedNPCs = plan.rejectedNPCs or {}
         plan.rejectedNPCs[npc] = true
     end
@@ -1159,6 +1184,63 @@ local function SwitchRoundQuest(plan, nextAction)
     end
 end
 
+local function ChoiceRoute(plan)
+    local data = retail and retail.quests[plan.quest]
+    return data and data.choice
+end
+
+local function ChoiceTable(value)
+    value = Public(value)
+    if type(value) == "table" and (not canaccesstable or canaccesstable(value)) then return value end
+end
+
+local function QuestChoicePanel(route)
+    local info = route.dialog and C_PlayerChoice and C_PlayerChoice.GetCurrentPlayerChoiceInfo
+        and ChoiceTable(C_PlayerChoice.GetCurrentPlayerChoiceInfo())
+    if info and Public(info.choiceID) == route.dialog then return info end
+end
+
+local function QuestChoiceResponse(route, info)
+    if not (info and route.response and C_PlayerChoice.SendPlayerChoiceResponse) then return end
+    for _, option in ipairs(ChoiceTable(info.options) or {}) do
+        option = ChoiceTable(option)
+        if option and Public(option.disabledOption) == false then
+            for _, button in ipairs(ChoiceTable(option.buttons) or {}) do
+                button = ChoiceTable(button)
+                if button and Public(button.id) == route.response and Public(button.disabled) == false then
+                    return route.response
+                end
+            end
+        end
+    end
+end
+
+local function QuestTransportOption(route)
+    if panel ~= GOSSIP or not route.gossip or CreatureID(QuestGiverGUID()) ~= route.giver
+        or not C_GossipInfo.GetOptions or not C_GossipInfo.SelectOption then return end
+    for _, option in ipairs(ChoiceTable(C_GossipInfo.GetOptions()) or {}) do
+        option = ChoiceTable(option)
+        if option and Public(option.gossipOptionID) == route.gossip then return route.gossip end
+    end
+end
+
+-- Choice channel values are mirrored by ChoiceStep in travel_channel.py.
+local function QuestChoiceStep(plan, route)
+    if plan.transportStandUntil and GetTime() < plan.transportStandUntil then return 4 end
+    local info = QuestChoicePanel(route)
+    if info then
+        local response = not plan.transportSent and QuestChoiceResponse(route, info)
+        if response then return 1, response end
+        return 0
+    end
+    if not plan.transportSent and not plan.choiceOpened then
+        local option = QuestTransportOption(route)
+        if option then return route.dialog and 2 or 1, nil, option end
+        if route.giver and route.point then return 3 end
+    end
+    return 0
+end
+
 function WowAgent.SuspendPreparedQuest()
     local plan = navigation
     if not plan or not plan.automatic or not plan.round or not screen:IsShown()
@@ -1179,6 +1261,19 @@ end
 function WowAgent.RunPreparedQuestAction()
     local plan = navigation
     if not plan or not plan.automatic or InCombatLockdown() or not screen:IsShown() then return end
+    local route = ChoiceRoute(plan)
+    if type(route) == "table" and C_Map.GetBestMapForUnit("player") == route.fromMap
+        and QuestPhase(plan.quest) == 2 and not IsMounted() then
+        local step, response, option = QuestChoiceStep(plan, route)
+        if step == 1 then plan.choiceSeen, plan.transportSent = plan.quest, GetTime() end
+        if response then
+            C_PlayerChoice.SendPlayerChoiceResponse(response)
+        elseif option then
+            if step == 2 then plan.choiceOpened = true end
+            C_GossipInfo.SelectOption(option)
+        end
+        if step == 1 or step == 2 or step == 4 then return end
+    end
     if plan.round then
         local questPhase = QuestPhase(plan.quest)
         local stage = plan.round.stage
@@ -1247,7 +1342,7 @@ local function NativeFiveYardRange(plan, soft, target)
         return nil
     end
     -- Soft-target identity can still reflect the old range on the first frame.
-    if GetTime() >= plan.rangeProbeAt then return soft == target end
+    if GetTime() >= plan.rangeProbeAt then return soft ~= nil and soft == target end
 end
 
 local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
@@ -1261,7 +1356,8 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
             and WowAgent.LayoutSupport.ReadMacroBody(plan.dialogueMacro) == taskDialogueBody
     end
     local flags = prepared and 1 or 0
-    if plan.npc or objectiveNPC then flags = flags + 32 end
+    local expected = objectiveNPC or (phase == 3 and plan.npc) or (phase == 1 and plan.pickupNPC)
+    if expected then flags = flags + 32 end
     local itemBound = plan.item and TaskClickMatches("J", "WowAgentTaskItem")
     if itemBound then flags = flags + 16 end
     if itemBound and plan.useItem and phase == 2 and QuestItemID(plan.quest) == plan.item then
@@ -1269,19 +1365,26 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
     end
     if not prepared or not UnitGUID or not UnitIsDead
         or (GetCursorInfo and GetCursorInfo()) or (SpellIsTargeting and SpellIsTargeting()) then return flags end
+    if phase ~= plan.npcEvidencePhase then
+        plan.npcEvidencePhase = phase
+        plan.rangeProbeAt, plan.turnInTarget, plan.rejectedNPCs = nil, nil, nil
+        plan.targetEvidence, plan.liveTargetEvidence, plan.npcUnmatchedSince = nil, nil, nil
+        RestoreNativeRange()
+    end
     local soft, target = Public(UnitGUID("softinteract")), Public(UnitGUID("target"))
-    local expected = objectiveNPC or (phase == 3 and plan.npc) or (phase == 1 and plan.pickupNPC)
+    local function Rejected(guid)
+        return (phase == 1 or phase == 3) and plan.rejectedNPCs and plan.rejectedNPCs[guid]
+    end
     local function Matches(unit, guid)
-        if (phase == 1 or phase == 3) and plan.rejectedNPCs and plan.rejectedNPCs[guid] then return false end
-        if expected then
-            if objectiveNPC and (not nearMarker or not UnitCanAttack
-                or Public(UnitCanAttack("player", unit)) ~= false) then
-                return false
-            end
-            return MatchesNPC(unit, guid, expected)
+        return expected and not Rejected(guid) and (not objectiveNPC or (nearMarker and UnitCanAttack
+            and Public(UnitCanAttack("player", unit)) == false)) and MatchesNPC(unit, guid, expected)
+    end
+    local function LiveName(unit, guid)
+        if nearMarker and guid and guid:match("^Creature%-") and not Rejected(guid)
+            and Public(UnitIsDead(unit)) == false and UnitCanAttack
+            and Public(UnitCanAttack("player", unit)) == false and UnitName then
+            return SafeTaskTargetName(Public(UnitName(unit)))
         end
-        return nearMarker and guid and guid:match("^Creature%-") and Public(UnitIsDead(unit)) == false
-            and UnitCanAttack and Public(UnitCanAttack("player", unit)) == false
     end
     if (phase == 3 or phase == 1 or objectiveNPC) and (expected or nearMarker) then
         local softMatches = Matches("softinteract", soft)
@@ -1304,29 +1407,72 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
         local observed = expected and evidence and evidence.expected == expected
             and (not plan.rejectedNPCs or not plan.rejectedNPCs[evidence.guid])
         local exactName = observed and evidence.name
-        -- Nearby NPCs can monopolize soft targeting. A verified name can locate
-        -- the expected NPC by the marker, then Matches still checks identity.
-        if not exactName and nearMarker and expected and (phase ~= 1 or not plan.rejectedNPCs) then
-            exactName = (phase == 1 and plan.pickupName) or KnownTaskTargetName(expected)
-        end
-        ConfigureTaskTarget(exactName or nil)
-        if softMatches or (nearMarker and exactName) then
-            flags = flags + 2
-            if softMatches and target == soft then plan.turnInTarget = target end
+        local knownName = expected and ((phase == 1 and plan.pickupName) or KnownTaskTargetName(expected))
+        if not exactName and nearMarker and (phase ~= 1 or not plan.rejectedNPCs) then
+            exactName = knownName
         end
         local observedTarget = observed and evidence.guid == target
-        if target and (target == plan.turnInTarget or (expected and (nearMarker or observedTarget)))
-            and Matches("target", target) then
+        local selected = target and Matches("target", target)
+            and (target == plan.turnInTarget or target == soft or nearMarker or observedTarget)
+        local close, probingLiveRange
+        if (phase == 1 or phase == 3) and nearMarker and not (softMatches or selected) then
+            plan.npcUnmatchedSince = plan.npcUnmatchedSince or GetTime()
+            local live = plan.liveTargetEvidence
+            local liveSelected = live and target == live.guid and LiveName("target", target) == live.name
+            local softName = LiveName("softinteract", soft)
+            if liveSelected then close = TargetWithinFiveYards() end
+            local softInRange
+            if liveSelected or plan.rangeProbeAt then
+                -- Keep the hard range active across a retarget. Its positive
+                -- receipt can displace a stale selection near the same pin.
+                softInRange = NativeFiveYardRange(plan, soft, soft)
+                probingLiveRange = true
+                if softInRange == true and softName then
+                    if liveSelected and soft == target then
+                        close = true
+                    elseif close ~= true then
+                        liveSelected = false
+                    end
+                end
+                if liveSelected and close == nil and softInRange ~= nil then close = false end
+            end
+            if not liveSelected then
+                live = nil
+                -- Give the configured target a chance first. A same-name spawn
+                -- can be probed immediately. A different name needs live evidence
+                -- and a short window without any configured match.
+                if softName and (not exactName or softName == knownName or softInRange == true
+                    or GetTime() - plan.npcUnmatchedSince >= 6) then
+                    live = {guid = soft, name = softName}
+                end
+            end
+            plan.liveTargetEvidence = live
+            if live then
+                exactName = live.name
+                selected = target == live.guid and LiveName("target", target) == live.name
+            end
+        else
+            plan.liveTargetEvidence, plan.npcUnmatchedSince = nil, nil
+        end
+        ConfigureTaskTarget(exactName or nil)
+        if softMatches or (nearMarker and exactName) then flags = flags + 2 end
+        if selected then
             plan.turnInTarget = target
             flags = flags + 4
-            local close = TargetWithinFiveYards()
-            if close == nil then close = NativeFiveYardRange(plan, soft, target) end
+            if not probingLiveRange then
+                close = TargetWithinFiveYards()
+                if close == nil then close = NativeFiveYardRange(plan, soft, target) end
+            end
             if close ~= nil then flags = flags + 256 end
             if close then flags = flags + 128 end
             return flags
         end
-        plan.rangeProbeAt, plan.turnInTarget = nil, nil
+        plan.turnInTarget = nil
+        if probingLiveRange then return flags end
+        plan.rangeProbeAt = nil
     else
+        plan.rangeProbeAt, plan.turnInTarget = nil, nil
+        plan.liveTargetEvidence, plan.npcUnmatchedSince = nil, nil
         ConfigureTaskTarget(WowAgent.QuestEncounter and WowAgent.QuestEncounter.Name(plan.quest, phase))
         if phase == 2 and soft and target == soft and Public(UnitIsDead("softinteract")) == true then
             flags = flags + 8
@@ -1862,6 +2008,10 @@ local function NavigationDestination(plan, phase, map)
         if point then return point.map, point.x, point.y end
     end
     if plan.automatic and phase == 2 then
+        local choice = ChoiceRoute(plan)
+        if choice and choice.fromMap == map and choice.point then
+            return map, choice.point[1] / 100, choice.point[2] / 100
+        end
         local data = RetailQuest(id, map)
         if data and data.arrival then
             local point = RetailNPCPoint(id, "turnIn", map)
@@ -1899,9 +2049,40 @@ local function MinimapGeometry()
     return Pack(x, y), Pack(w, h), math.floor(radius + .5) + (rotating == "1" and 1024 or 0)
 end
 
+local function ObserveChoiceHandoff(plan, map)
+    local round = plan.round
+    local choice = ChoiceRoute(plan)
+    if not round or type(choice) ~= "table" then return end
+    if map == choice.fromMap and QuestPhase(plan.quest) == 2 then
+        if QuestChoicePanel(choice) or (not choice.dialog and QuestTransportOption(choice)) then
+            plan.choiceSeen = plan.quest
+        end
+        return
+    end
+    if plan.choiceSeen ~= plan.quest or map ~= choice.map then return end
+    local nextQuest = choice.nextQuest or plan.quest
+    if choice.nextQuest then
+        if Public(C_QuestLog.IsOnQuest(plan.quest)) ~= false or (WowAgent.OpenQuestOfferID() ~= nextQuest
+                and Public(C_QuestLog.IsOnQuest(nextQuest)) ~= true) then return end
+    elseif QuestPhase(plan.quest) ~= 3 then return end
+    local anchor = QuestArea()
+    if not anchor then return end
+    local previous = plan.quest
+    plan.choiceSeen, plan.transportSent, plan.choiceOpened = nil, nil, nil
+    local stage = choice.nextQuest and ROUND_PICKUP or ROUND_TURN_IN
+    SwitchRoundQuest(plan, {id = nextQuest, stage = stage, anchor = anchor})
+    if stage == ROUND_TURN_IN then
+        SetQuestInteraction(plan, nextQuest, nil, nil)
+        AddRoundQuest(round, nextQuest)
+    end
+    print("WowAgent：已核对冒险选择后的地图和后续任务 " .. previous .. " → " .. nextQuest .. "。")
+end
+
 local function UpdateNavigation()
     if not navigation then return end
-    local id, mapID = navigation.quest, C_Map.GetBestMapForUnit("player") or 0
+    local mapID = C_Map.GetBestMapForUnit("player") or 0
+    ObserveChoiceHandoff(navigation, mapID)
+    local id = navigation.quest
     local phase = QuestPhase(id)
     local active = phase == 2 or phase == 3
     local round = navigation.round
@@ -1917,10 +2098,13 @@ local function UpdateNavigation()
     local entry, objectiveIndex, objectivesFinished = ActiveObjective(objectives)
     local objectiveKind, objectiveProgress, encodedIndex = Objective(id, active, objectives)
     local multi = type(objectives) == "table" and #objectives > 1
-    local data = navigation.automatic and phase == 2 and not multi and RetailQuest(id, mapID)
+    local profile = navigation.automatic and phase == 2 and RetailQuest(id, mapID)
+    local route = navigation.automatic and phase == 2 and ChoiceRoute(navigation)
+    local choice = type(route) == "table" and route.fromMap == mapID
+    local data = not multi and profile
     if objectivesFinished and not multi then entry = Public(objectives[1]) end
-    local objectiveNPC = navigation.automatic and phase == 2 and not (data and data.arrival)
-        and TalkObjectiveNPC(entry)
+    local objectiveNPC = choice and route.giver or (navigation.automatic and phase == 2
+        and not (data and data.arrival) and TalkObjectiveNPC(entry))
     local objectNames = data and data.objectNames
     local objectCreature = data and data.objectCreature
     local locale = objectNames and GetLocale and GetLocale()
@@ -2017,6 +2201,8 @@ local function UpdateNavigation()
             task = task + 512
             click, clickKey = MountTutorialClick(navigation)
         end
+    elseif choice then
+        clickKey, click = 6, QuestChoiceStep(navigation, route)
     elseif objectiveNPC then
         clickKey = 5
     elseif data and data.arrival then
@@ -2031,7 +2217,7 @@ local function UpdateNavigation()
     local encounterFlags, encounterTarget = 0, 0
     if navigation.automatic and WowAgent.QuestEncounter then
         encounterFlags, encounterTarget = WowAgent.QuestEncounter.State(id, phase, taskTargetButton)
-        if encounterFlags >= 2048 then clickKey, click = 1, encounterTarget end
+        if encounterFlags >= 2048 and not choice then clickKey, click = 1, encounterTarget end
     end
     if WowAgent.WriteNav3D then
         WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap,
@@ -2080,7 +2266,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 276 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 285 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4
@@ -2123,9 +2309,7 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
             npc, useItem = round.options[id].npc, round.options[id].useItem
         end
     end
-    local pickup = automatic and id and (NearbyQuest(id, round and round.anchor)
-        or (round and InQuestArea(round.offers[id], round.anchor) and round.offers[id])
-        or KnownFollowup(id, round and round.anchor))
+    local pickup = automatic and id and QuestPickup(id, round)
     local function CanPrepare()
         if not id or id < 1 or id > 1048575 then return false end
         if C_QuestLog.IsOnQuest(id) then return true end
@@ -2133,11 +2317,7 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
         if round and (round.stage ~= ROUND_PICKUP or round.immediate) and C_QuestLog.IsQuestFlaggedCompleted(id) then
             return true
         end
-        if WowAgent.OpenQuestOfferID() == id or pickup then return true end
-        for _, offered in ipairs(DialogueQuests()) do
-            if offered.id == id and offered.phase == OFFER then return true end
-        end
-        return false
+        return pickup or HasOpenQuestOffer(id)
     end
     if not CanPrepare() then return print("WowAgent：请选择已接任务，或先打开对应的接任务对话。") end
     local support = WowAgent.LayoutSupport
@@ -2351,15 +2531,31 @@ navFrame:RegisterEvent("PLAYER_LOGOUT")
 navFrame:RegisterEvent("PLAYER_DEAD")
 navFrame:RegisterEvent("PLAYER_UNGHOST")
 navFrame:RegisterEvent("LOOT_SLOT_CLEARED")
+navFrame:RegisterEvent("UI_ERROR_MESSAGE")
 navFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
-navFrame:SetScript("OnEvent", function(_, event, name, _, spell)
+navFrame:SetScript("OnEvent", function(_, event, name, message, spell)
     if event == "UNIT_SPELLCAST_SUCCEEDED" and name == "player" then
         if WowAgent.RecordPetMend then WowAgent.RecordPetMend(spell) end
         local action = SkySpellAction(Public(spell))
         if action then skyCast, skyCastEpoch = action, (skyCastEpoch + 1) % 4 end
     end
+    if event == "UI_ERROR_MESSAGE" and navigation and navigation.transportSent and not navigation.transportStandUntil then
+        local route = ChoiceRoute(navigation)
+        local now = GetTime()
+        if route and route.retryStanding and now - navigation.transportSent <= 3
+            and C_Map.GetBestMapForUnit("player") == route.fromMap and QuestPhase(navigation.quest) == 2 then
+            local code = Public(name)
+            message = Public(message)
+            if (type(code) == "number" and (code == LE_GAME_ERR_SPELL_FAILED_NOT_STANDING
+                    or code == LE_GAME_ERR_TAXINOTSTANDING))
+                or (type(message) == "string" and (message == SPELL_FAILED_NOT_STANDING
+                    or message == ERR_SPELL_FAILED_NOT_STANDING or message == ERR_TAXINOTSTANDING)) then
+                navigation.transportSent, navigation.transportStandUntil = nil, now + 2
+            end
+        end
+    end
     if event == "LOOT_SLOT_CLEARED" then lootEpoch = (lootEpoch + 1) % 256 end
     if event == "PLAYER_DEAD" and WowAgent.RecordRecoveryDeath then WowAgent.RecordRecoveryDeath() end
     if event == "PLAYER_UNGHOST" and WowAgent.ClearRecoveryDeath then WowAgent.ClearRecoveryDeath() end
-    if event == "PLAYER_LOGOUT" or name == "WowAgent" then RestoreNativeRange() end
+    if event == "PLAYER_LOGOUT" or (event == "ADDON_LOADED" and name == "WowAgent") then RestoreNativeRange() end
 end)

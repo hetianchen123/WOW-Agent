@@ -849,6 +849,47 @@ def test_npc_search_releases_turn_between_pulses(tmp_path, monkeypatch):
     assert ctx.input.count("key_down", "right") == 2
 
 
+@pytest.mark.parametrize("hint, source, target", [
+    ((236693, (.4601, .4437)), "grail_cache", (.4601, .4437)),
+    ((236693, (.43, .4437)), "quest_marker", (.46146, .44376)),
+    (None, "quest_marker", (.46146, .44376)),
+])
+def test_missing_npc_reapproaches_live_marker_without_assuming_interaction(tmp_path, monkeypatch, hint, source, target):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route, run.phase = True, QuestState.READY
+    nav = TravelSample(86769, 2432, 2432, (.46146, .44376), (.46235, .44249), (3200, 2133.4), 0,
+                       QuestState.READY, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED,
+                       interact_verified=True, npc_range_supported=True)
+    events = []
+    ctx.log_event = lambda name, data: events.append((name, data))
+    monkeypatch.setattr(quest, "cached_npc_location", lambda *_: hint)
+    run.interact_quest_target(ctx, 100, nav, 0)
+    probe = next(data for name, data in events if name == "quest_npc_marker_approach")
+    assert probe["source"] == source and probe["destination"] == target
+    assert not ctx.input.count("key_down", "f")
+    range_receipt = TaskFlags.NPC_SELECTED | TaskFlags.NPC_RANGE_KNOWN | TaskFlags.NPC_WITHIN_5_YARDS
+    run.interact_quest_target(ctx, 101, replace(nav, position=target, sequence=2, task=nav.task | range_receipt), 0)
+    assert run.npc_marker_approach is None and ctx.input.count("key_down", "f") == 1
+
+
+def test_live_candidate_outside_range_keeps_the_same_map_location_hint(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.auto_route, run.phase = True, QuestState.READY
+    hint = (236693, (.4601, .4437))
+    monkeypatch.setattr(quest, "cached_npc_location", lambda *_: hint)
+    marked = (.46146, .44376)
+    task = TaskFlags.PREPARED | TaskFlags.NPC_SELECTED | TaskFlags.NPC_RANGE_KNOWN
+    nav = TravelSample(86769, 2432, 2432, marked, (.46141, .44374), (3200, 2133.4), 0,
+                       QuestState.READY, TravelFlags.KEYS_VERIFIED, 1, task=task,
+                       interact_verified=True, npc_range_supported=True)
+    goals = []
+    monkeypatch.setattr(run, "align_npc_approach", lambda _ctx, _now, n, _head: goals.append(n.destination))
+    run.interact_quest_target(ctx, 100, nav, 0)
+    assert goals == [hint[1]] and not ctx.input.count("key_down", "f")
+    run.interact_quest_target(ctx, 101, replace(nav, task=task | TaskFlags.NPC_CONFIGURED), 0)
+    assert goals == [hint[1], marked]
+
+
 @pytest.mark.parametrize("needs_choice", [False, True])
 def test_active_talk_uses_verified_npc_and_waits_for_quest_feedback(tmp_path, monkeypatch, needs_choice):
     run, ctx, tick = make_run(tmp_path, monkeypatch)

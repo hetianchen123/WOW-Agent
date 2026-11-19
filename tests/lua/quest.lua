@@ -58,6 +58,20 @@ WowAgent = {
     end},
 }
 dofile("addon/WowAgent/RetailQuestData.lua")
+do
+    -- 90898 "Back to Hammerfall" turns in at the Hammerfall Thrall spawn
+    -- (244715, Grail T:244715), never the siege-camp 244666.
+    local retail = WowAgent.RetailQuestData
+    local data = retail.quests[90898]
+    assert(data.turnIn == 244715 and retail.npcNames[244715].zhCN == "萨尔")
+    assert(retail.NPCPoint(data, 244715, "turnIn")[1] == 69.14)
+    assert(retail.NPCPoint(data, 244715, "turnIn")[2] == 34.63)
+    assert(retail.NPCPoint(retail.quests[90896], 244666, "turnIn") == retail.npcs[244666])
+    assert(retail.quests[90898].after[90896] and retail.quests[90896].after[90895])
+    -- Quest-level role points still override the NPC default (phased spawns).
+    local override = {turnInPoint = {69.14, 34.63}}
+    assert(retail.NPCPoint(override, 244666, "turnIn")[1] == 69.14)
+end
 dofile("addon/WowAgent/APRQuestData.lua")
 dofile("addon/WowAgent/Recovery.lua")
 dofile("addon/WowAgent/QuestCamera.lua")
@@ -751,6 +765,7 @@ event("QUEST_FINISHED")
 questState[90883], questState[90887] = 4, 2
 dead = false
 soft, selected = "Creature-0-0-0-0-244655-01", "Creature-0-0-0-0-244655-01"
+npc = "吉安娜·普罗德摩尔"
 WowAgent.PrepareQuestNavigation(90886, 0, 0, true, true, nil, nil, true)
 while #timers > 0 do table.remove(timers, 1)() end
 assert(values[4] == 90886 and values[5] == 2451)
@@ -952,22 +967,242 @@ function UnitGUID(unit)
     if unit == "questnpc" or unit == "npc" then return selected end
     return previousGUID(unit)
 end
-soft, selected = "Creature-0-0-0-0-311111-01", "Creature-0-0-0-0-311111-01"
+soft, selected, npc = "Creature-0-0-0-0-311111-01", nil, "Nearby giver"
 WowAgent.PrepareQuestNavigation(70005, 0, 0, true, true)
 while #timers > 0 do table.remove(timers, 1)() end
+assert(math.floor(values[1] / 2) % 4 == 1 and math.floor(values[1] / 32) % 2 == 0)
+assert(selector.attributes.macrotext == "/targetexact Nearby giver")
+selected = "Creature-0-0-0-0-311119-01" -- The same name can select the wrong GUID.
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 2) % 4 == 1)
+selected = soft
+frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[1] / 2) % 4 == 3)
+-- The earlier candidate stays selected as another giver enters the hard
+-- soft-target range. Only selecting the new GUID authorizes interaction.
+local firstGiver, unitName, itemAPI = selected, UnitName, C_Item
+C_Item = nil
+function UnitName(unit)
+    if unit == "target" and selected == firstGiver then return "Nearby giver" end
+    return unitName(unit)
+end
+soft, npc = "Creature-0-0-0-0-311115-01", "Giver in range"
+function UnitDistanceSquared() return 0, false end
+now = now + .7
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[1] % 512 == 3)
+assert(selector.attributes.macrotext == "/targetexact Giver in range")
+assert(cvars.SoftTargetInteractRange == "5" and cvars.SoftTargetInteractRangeIsHard == "1")
+frames[3].scripts.OnUpdate(nil, .2)
+assert(selected == firstGiver and values[1] % 512 == 3)
+selected = soft
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[1] % 512 == 7 + 256 + 128)
+UnitName, C_Item = unitName, itemAPI
 C_GossipInfo.GetActiveQuests = function() return {{questID = 70002, isComplete = true}} end
 event("GOSSIP_SHOW")
 WowAgent.RunPreparedQuestAction()
 frames[3].scripts.OnUpdate(nil, .2)
 assert(questState[70005] == 3 and math.floor(values[1] / 2) % 4 == 0)
-soft = "Creature-0-0-0-0-311112-01"
+soft, npc = "Creature-0-0-0-0-311112-01", "Other giver"
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[1] / 2) % 4 == 1)
+assert(selector.attributes.macrotext == "/targetexact Other giver")
+selected = soft
+function UnitDistanceSquared() return 16, true end
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 128) % 4 == 3)
+currentID = 70005
+event("QUEST_COMPLETE")
+WowAgent.RunPreparedQuestAction()
+assert(questState[70005] == 4)
 WowAgent.StopQuestNavigation()
+UnitDistanceSquared = nil
+
+-- A living, same-name phased NPC is eligible for inspection near the marker.
+-- The same fallback is available after a configured lookup cannot select the NPC.
+questState[70005] = 3
+WowAgent.RetailQuestData.quests[70005] = {turnIn = 244666, turnInPoint = {56.42, 59.73}}
+soft, selected, npc = "Creature-0-0-0-0-244715-01", nil, "萨尔"
+event("QUEST_FINISHED")
+WowAgent.PrepareQuestNavigation(70005, 0, 0, true, true)
+while #timers > 0 do table.remove(timers, 1)() end
+assert(selector.attributes.macrotext == "/targetexact 萨尔")
+selected = soft
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 2) % 4 == 3)
+event("GOSSIP_SHOW")
+WowAgent.RunPreparedQuestAction()
+frames[3].scripts.OnUpdate(nil, .2)
+assert(questState[70005] == 3 and math.floor(values[1] / 4) % 2 == 0)
+soft, selected, npc = "Creature-0-0-0-0-311113-01", nil, "Live alternate"
+now = now + 6.1
+frames[3].scripts.OnUpdate(nil, .2)
+assert(selector.attributes.macrotext == "/targetexact Live alternate")
+function UnitCanAttack() return true end
+selected = soft
+frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[1] / 4) % 2 == 0)
+WowAgent.StopQuestNavigation()
+WowAgent.RetailQuestData.quests[70005] = nil
 C_GossipInfo.GetActiveQuests = function() return {} end
 UnitGUID, UnitCanAttack = previousGUID, canAttack
 C_QuestLog.GetQuestsOnMap = questMarkers
+
+do
+    -- The saved Hammerfall round points to an unavailable pickup, with 90911
+    -- still in the log. One-click preparation must use the active job.
+    local saved, lines, offers = WowAgentDB.questRounds, C_QuestLine.GetAvailableQuestLines, available
+    local round = {
+        stage = 1, current = 66084, jobs = {90911}, offers = {}, options = {}, suspended = {},
+        anchor = {map = 2451, x = .69256, y = .34423, width = 3477.1, height = 2318.8},
+    }
+    WowAgentDB.questRounds = {[UnitGUID("player")] = round}
+    C_QuestLine.GetAvailableQuestLines = function() return {} end
+    questState[90911] = 2
+    C_QuestLog.GetQuestObjectives = function()
+        return {{type = "monster", text = "Next Adventure Chosen", numFulfilled = 0, numRequired = 1}}
+    end
+    available = {{questID = 66084}}
+    event("GOSSIP_SHOW")
+    assert(WowAgent.GetQuestRoundResumeID() == 66084) -- An actual offer remains resumable.
+    available = {}
+    event("GOSSIP_CLOSED")
+    local id = WowAgent.GetQuestRoundResumeID()
+    assert(id == 90911)
+    WowAgent.PrepareQuestNavigation(id, 0, 0, true, true, nil, nil, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    assert(round.current == 90911 and values[4] == 90911)
+    assert(messages[#messages]:find("授权并运行已准备任务", 1, true))
+    assert(math.floor(values[1] / 131072) == 6 and values[2] == 3) -- Approach Thrall, never hunt.
+    local map, choiceAPI, guid = C_Map.GetBestMapForUnit, C_PlayerChoice, UnitGUID
+    local getOptions, selectOption = C_GossipInfo.GetOptions, C_GossipInfo.SelectOption
+    local choiceID, selectedResponse, gossipPresses = nil, nil, 0
+    local button = {id = 1702, disabled = false}
+    C_PlayerChoice = {
+        GetCurrentPlayerChoiceInfo = function()
+            return choiceID and {choiceID = choiceID, options = {{disabledOption = false, buttons = {button}}}}
+        end,
+        SendPlayerChoiceResponse = function(id) assert(not selectedResponse); selectedResponse = id end,
+    }
+    function UnitGUID(unit)
+        if unit == "questnpc" then return "Creature-0-0-0-0-244715-01" end
+        return guid(unit)
+    end
+    C_GossipInfo.GetOptions = function() return {{gossipOptionID = 133894}} end
+    C_GossipInfo.SelectOption = function(id)
+        assert(id == 133894)
+        gossipPresses = gossipPresses + 1
+    end
+    event("GOSSIP_SHOW")
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 2)
+    WowAgent.RunPreparedQuestAction()
+    WowAgent.RunPreparedQuestAction()
+    assert(gossipPresses == 1 and not selectedResponse)
+    choiceID = 903
+    WowAgent.RunPreparedQuestAction()
+    assert(not selectedResponse)
+    choiceID = 902
+    WowAgent.RunPreparedQuestAction()
+    assert(not selectedResponse) -- The unrelated response must never be selected.
+    button.id, button.disabled = 1701, true
+    WowAgent.RunPreparedQuestAction()
+    assert(not selectedResponse)
+    button.disabled = false
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 1)
+    WowAgent.RunPreparedQuestAction()
+    WowAgent.RunPreparedQuestAction()
+    assert(selectedResponse == 1701 and gossipPresses == 1)
+    questState[90911] = nil
+    C_Map.GetBestMapForUnit = function() return 85 end
+    currentID = 99900
+    event("QUEST_DETAIL")
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[4] == 90911 and round.anchor.map == 2451)
+    currentID = 91281
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[4] == 91281 and round.current == 91281 and round.anchor.map == 85)
+    WowAgent.RunPreparedQuestAction()
+    assert(questState[91281] == 2)
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(math.floor(values[1] / 131072) == 3) -- 91281 is real arrival despite monster telemetry.
+    WowAgent.StopQuestNavigation()
+    C_Map.GetBestMapForUnit, C_PlayerChoice, UnitGUID = map, choiceAPI, guid
+    C_GossipInfo.GetOptions, C_GossipInfo.SelectOption = getOptions, selectOption
+    questState[91281] = nil
+    WowAgentDB.questRounds, C_QuestLine.GetAvailableQuestLines, available = saved, lines, offers
+    C_QuestLog.GetQuestObjectives = questObjectives
+end
+
+do
+    local saved, map, guid = WowAgentDB.questRounds, C_Map.GetBestMapForUnit, UnitGUID
+    local getOptions, selectOption = C_GossipInfo.GetOptions, C_GossipInfo.SelectOption
+    local mapID, npcID, optionID, selectedOption = 85, 241677, 133522, nil
+    local presses = 0
+    C_Map.GetBestMapForUnit = function() return mapID end
+    function UnitGUID(unit)
+        if unit == "questnpc" then return "Creature-0-0-0-0-" .. npcID .. "-01" end
+        return guid(unit)
+    end
+    C_GossipInfo.GetOptions = function() return {{gossipOptionID = optionID}} end
+    C_GossipInfo.SelectOption = function(id) selectedOption, presses = id, presses + 1 end
+    WowAgentDB.questRounds = {}
+    questState[88719] = 2
+    event("GOSSIP_SHOW")
+    WowAgent.PrepareQuestNavigation(88719, 0, 0, true, true, nil, nil, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    assert(math.floor(values[1] / 131072) == 6 and values[2] == 3)
+    WowAgent.RunPreparedQuestAction()
+    assert(presses == 0)
+    optionID = 133521
+    npcID = 236692
+    WowAgent.RunPreparedQuestAction()
+    assert(presses == 0)
+    npcID = 241677
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 1)
+    WowAgent.RunPreparedQuestAction()
+    WowAgent.RunPreparedQuestAction()
+    assert(selectedOption == 133521 and presses == 1)
+    local standing = SPELL_FAILED_NOT_STANDING
+    SPELL_FAILED_NOT_STANDING = "Must be standing"
+    frames[3].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, "Other error")
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 0)
+    frames[3].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, SPELL_FAILED_NOT_STANDING)
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 4)
+    WowAgent.RunPreparedQuestAction()
+    assert(presses == 1) -- Allow time for the controller to send a native movement key.
+    now = now + 2.1
+    event("GOSSIP_CLOSED")
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 3)
+    event("GOSSIP_SHOW")
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[2] == 1)
+    WowAgent.RunPreparedQuestAction()
+    frames[3].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 0, SPELL_FAILED_NOT_STANDING)
+    frames[3].scripts.OnUpdate(nil, .2)
+    WowAgent.RunPreparedQuestAction()
+    assert(presses == 2 and values[2] == 0) -- A second error cannot authorize another retry.
+    SPELL_FAILED_NOT_STANDING = standing
+    mapID = 2432
+    event("PLAYER_ENTERING_WORLD")
+    frames[3].scripts.OnUpdate(nil, .2)
+    local round = WowAgentDB.questRounds[UnitGUID("player")]
+    assert(round.anchor.map == 85)
+    questState[88719] = 3
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(round.anchor.map == 2432 and round.current == 88719 and round.stage == 3)
+    assert(values[5] == 2432 and values[6] == math.floor(.4850 * 1048575 + .5))
+    WowAgent.StopQuestNavigation()
+    questState[88719] = nil
+    WowAgentDB.questRounds, C_Map.GetBestMapForUnit, UnitGUID = saved, map, guid
+    C_GossipInfo.GetOptions, C_GossipInfo.SelectOption = getOptions, selectOption
+end
 
 -- The pumpkin quest is a world-object interaction even when the quest log
 -- classifies its count as an item. Unrelated yellow markers are ignored.
@@ -1289,7 +1524,10 @@ assert(status == 3 + 20 + 256 + 512 and corpse == 460 * 1024 + 512)
 
 -- Runtime build extension is separate from the v15 core and follows nav sequence.
 assert(math.floor((rowValues[-288] % 524288) / 512) == math.floor(357888 / 512))
-assert(rowValues[-272] % 4096 == 276)
+local toc = assert(io.open("addon/WowAgent/WowAgent.toc"))
+local minor, patch = toc:read("*a"):match("## Version: 0%.(%d+)%.(%d+)")
+toc:close()
+assert(rowValues[-272] % 4096 == tonumber(minor) * 100 + tonumber(patch))
 assert(math.floor(rowValues[-272] / 4096) % 128 == math.floor(rowValues[-256] / 8192))
 -- Independently versioned visibility row; old v15/schema 6 remain unchanged.
 assert(math.floor(rowValues[-304] / 16384) == 45)

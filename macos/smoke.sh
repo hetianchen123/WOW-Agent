@@ -26,3 +26,11 @@ with socket.socket(socket.AF_UNIX) as client:
 print("Unsigned socket client rejected")
 PY
 "$apps/WowAgent Controller.app/Contents/MacOS/WowAgentController" --smoke
+if result=$("$apps/WowAgent Controller.app/Contents/MacOS/WowAgentController" --request-prepared-smoke 2>&1); then
+    echo '模拟执行器意外受理了实机任务启动' >&2
+    exit 1
+fi
+if [[ "$result" != '模拟执行器不能启动实机任务' ]]; then
+    printf '%s\n' "$result" >&2
+    exit 1
+fi

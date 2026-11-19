@@ -179,6 +179,41 @@ def cmd_init_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_grail_sync(args: argparse.Namespace) -> int:
+    from .data import grail
+
+    quest_ids, map_id = args.quest, args.map
+    try:
+        if args.tracked:
+            sample = read_live_navigation(duration=5)
+            if sample is None or not sample.quest_id:
+                raise ValueError("未读到连续一致的任务色条。请先在插件中准备任务寻路。")
+            if map_id is not None and map_id != sample.map_id:
+                raise ValueError(f"当前追踪地图为 {sample.map_id}，与 --map {map_id} 不符。")
+            quest_ids, map_id = [sample.quest_id], sample.map_id
+        result = grail.sync(quest_ids, map_id=map_id, deploy=args.deploy,
+                            report_only=args.report, missing_only=args.tracked)
+    except (CaptureError, OSError, ValueError) as exc:
+        print(f"Grail 同步失败：{exc}", file=sys.stderr)
+        return 2
+    for entry in result["entries"]:
+        quest = entry["quest"]
+        print(f"任务 {quest['id']} pickup={quest.get('pickup')} turnIn={quest.get('turnIn')} "
+              f"prerequisites={quest['prerequisites']}")
+        for npc, point in entry["npcs"].items():
+            print(f"  NPC {npc} @ ({point[0]}, {point[1]}) names={entry['names'].get(npc)}")
+        for role, candidates in entry["unresolved"].items():
+            print(f"  {role} 缺少唯一的同地图点位，候选 NPC {candidates}")
+    if result["written"]:
+        print(f"已补全 RetailQuestData，插件 build {result['build']}。")
+        print("已部署到游戏目录，请在游戏内 /reload。" if args.deploy else "部署并 /reload 后生效。")
+    elif result["changes"]:
+        print("报告模式发现可补数据。")
+    else:
+        print("没有可补的数据。")
+    return 0
+
+
 # ---------------------------------------------------------------- selftest ----
 def cmd_selftest(args: argparse.Namespace) -> int:
     from . import selftest as st
@@ -508,7 +543,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         ctx.db.end_session(session_id, outcome.status, outcome.stats)
         if getattr(args, "require_prepared", False):
             explanations = {
-                "stopped:quest_encounter_objective_complete_ready_for_turn_in": "任务击杀计数已确认，已停止输出。当前局部三维网格不覆盖交任务路线，请返回萨尔交付。",
+                "stopped:quest_encounter_objective_complete_ready_for_turn_in": "任务击杀计数已确认，但出门/交接未能自动继续（局部分治已关闭或网格出口不可用）。请手动返回萨尔交付。",
+                "stopped:nav3d_exit_unreachable": "已尝试网格边缘的候选出口，均未找到完整路线，自动交付中止。请手动前往萨尔交付并保留本轮日志。",
+                "stopped:nav3d_exit_reached": "已走到网格出口。",
+                "stopped:quest_choice_handoff_unconfirmed": "等待冒险选择或任务传送超时，尚未收到已核对的接续回执。",
                 "stopped:quest_encounter_wait_budget_exhausted": "原地守候达到 300 秒总预算，任务尚未确认完成。已停止选敌。",
                 "stopped:quest_encounter_selector_unverified_reload_and_prepare": "尚未核验罗格洛克的精确选敌键。请 /reload 加载 0.2.76，再重新准备自动任务。",
                 "stopped:quest_encounter_approach_position_required": "已选中任务怪，但技能超距；尚无目标三维位置，角色原地停止，请保留本轮日志。",
@@ -642,25 +680,40 @@ def cmd_probe_quests(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_probe_navigation(args: argparse.Namespace) -> int:
-    from .perception.travel_channel import TravelFlags, decode_travel, travel_region
+def read_live_navigation(duration):
+    from .perception.travel_channel import decode_travel, travel_region
 
     cfg = load_config()
     capture = ScreenCapture(cfg.capture)
     region = travel_region(cfg.channel.x, cfg.channel.y)
-    sequence = None
-    deadline = time.monotonic() + args.duration
+    previous = None
+    deadline = time.monotonic() + duration
     while time.monotonic() < deadline:
         sample = decode_travel(capture.grab(*region))
         if sample:
-            if sequence is not None and sample.sequence != sequence:
-                result = dataclasses.asdict(sample)
-                result["phase"] = sample.phase.name
-                result["flags"] = [flag.name for flag in TravelFlags if sample.flags & flag]
-                print(json.dumps(result, ensure_ascii=False))
-                return 0
-            sequence = sample.sequence
+            identity = (sample.quest_id, sample.map_id, sample.phase)
+            if previous is not None and identity == previous[0] and sample.sequence != previous[1]:
+                return sample
+            previous = identity, sample.sequence
+        else:
+            previous = None
         time.sleep(.1)
+
+
+def cmd_probe_navigation(args: argparse.Namespace) -> int:
+    from .perception.travel_channel import TravelFlags
+
+    try:
+        sample = read_live_navigation(args.duration)
+    except CaptureError as exc:
+        print(f"无法读取寻路色条：{exc}", file=sys.stderr)
+        return 2
+    if sample is not None:
+        result = dataclasses.asdict(sample)
+        result["phase"] = sample.phase.name
+        result["flags"] = [flag.name for flag in TravelFlags if sample.flags & flag]
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     print("未读到持续更新的寻路色条。请先在插件中点「准备任务寻路」。", file=sys.stderr)
     return 2
 
@@ -706,6 +759,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     sub.add_parser("init-config", help="生成默认配置文件").set_defaults(func=cmd_init_config)
 
     sub.add_parser("selftest", help="合成环境端到端自测（无需游戏）").set_defaults(func=cmd_selftest)
+
+    p = sub.add_parser("grail-sync", help="从固定 Grail 快照补全任务和 NPC 数据")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--quest", type=int, action="append", help="任务号，可重复")
+    source.add_argument("--tracked", action="store_true", help="从寻路色条识别当前追踪任务")
+    p.add_argument("--map", type=int, default=None, help="uiMapID，默认读数据表")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--deploy", action="store_true", help="写入后部署到游戏目录")
+    action.add_argument("--report", action="store_true", help="报告可补字段")
+    p.set_defaults(func=cmd_grail_sync)
 
     p = sub.add_parser("probe-channel", help="像素通道解码探针")
     p.add_argument("--duration", type=float, default=20.0)

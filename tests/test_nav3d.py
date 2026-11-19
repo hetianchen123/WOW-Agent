@@ -219,8 +219,9 @@ def follower_and_pose(meshes):
 
 def test_follower_consumes_full_3d_path_without_claiming_quest_success(meshes):
     f,p,kwargs=follower_and_pose(meshes)
-    command=f.step(0,p,**kwargs); assert command.tap=="w"
-    assert f.step(.01,p,**kwargs).tap is None
+    # Aligned cruise holds W instead of stutter-tapping.
+    command=f.step(0,p,**kwargs); assert command.keys==frozenset({"w"}) and not command.tap
+    assert f.step(.01,p,**kwargs).keys==frozenset({"w"})  # duplicate receipt keeps the hold
     for i,point in enumerate(f.route.points[1:],2):
         command=f.step(i*.05,replace(p,position=point,sequence=i,captured_at=i*.05),**kwargs)
     assert command.outcome=="nav3d_route_arrived"

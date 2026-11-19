@@ -11,7 +11,7 @@ from bot.control.quest_travel import QuestTrip
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import QuestState
 from bot.perception.travel_channel import (
-    CorpseSource, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
+    ChoiceStep, CorpseSource, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
     decode_travel,
 )
 
@@ -191,7 +191,7 @@ def test_skyriding_launches_brakes_lands_and_waits_for_dismount():
     assert not trip.step(4, flying, east).keys
     approach = replace(flying, position=(.275, .2), sky_halt_key="4")
     assert trip.step(6, approach, east).tap == "4"
-    assert trip.step(7, approach, east).keys == {"f12"}
+    assert trip.step(7, approach, east).keys == {"f12", "w"}  # dive-land near the marker
     above = replace(approach, position=start.destination)
     assert trip.step(8, above, east).tap is None
     landed = replace(mounted, position=start.destination)
@@ -209,7 +209,7 @@ def test_skyriding_landing_stall_releases_pitch_and_tries_one_offset_approach():
     trip = QuestTrip(start.world_size, start.destination, "ccw_west")
     east = 3 * math.pi / 2
     assert not trip.step(0, airborne, east).keys
-    assert trip.step(.4, airborne, east).keys == {"0"}
+    assert trip.step(.4, airborne, east).keys == {"0", "w"}  # stationary hover dives forward
     assert not trip.step(.9, airborne, east).keys
     recovery = trip.step(1.9, airborne, east)
     assert recovery.tap == "2" and not recovery.keys
@@ -217,7 +217,7 @@ def test_skyriding_landing_stall_releases_pitch_and_tries_one_offset_approach():
     assert not trip.step(2.2, airborne, east).keys
     retry = replace(airborne, position=trip.sky_landing_target)
     trip.step(2.6, retry, east)
-    assert trip.step(3, retry, east).keys == {"0"}
+    assert trip.step(3, retry, east).keys == {"0", "w"}  # offset retry also dives forward
     assert trip.step(4.5, retry, east).outcome == "skyriding_landing_blocked"
 
 
@@ -589,6 +589,14 @@ def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows()
     spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 765432))
     assert decode_travel(with_button).objective_action == ObjectiveAction.COMBAT
     assert decode_travel(with_button).objective_target == 765432
+    spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 6 * 131072 + 3 * 1024 + int(TaskFlags.PREPARED)))
+    choice = decode_travel(with_button)
+    assert choice.objective_action == ObjectiveAction.CHOICE and choice.choice_step == ChoiceStep.WAIT
+    for step in ChoiceStep:
+        spec.render_frame(with_button, 0, 0, spec.encode_frame(2, int(step)))
+        assert decode_travel(with_button).choice_step == step
+    spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 5))
+    assert decode_travel(with_button).choice_step == ChoiceStep.WAIT
     spec.render_frame(with_button, 0, 16, spec.encode_frame(1, 2 * 131072 + 3 * 1024 + int(TaskFlags.PREPARED)))
     spec.render_frame(with_button, 0, 0, spec.encode_frame(2, 400 * 1024 + 600))
     assert decode_travel(with_button).objective_cursor == (400 / 1023, 600 / 1023)
@@ -652,3 +660,41 @@ def test_navigation_channel_decodes_coordinates_flags_and_rejects_corrupt_rows()
     assert decode_travel(extended) is None
     image[16:32] = image[:16]
     assert decode_travel(image) is None
+
+
+def test_dropped_skyriding_flag_after_landing_dismounts_instead_of_stopping():
+    # 20261118T145120: the gliding-derived flag drops mid-dismount while still
+    # mounted next to the turn-in NPC; that must not terminal-stop the flight.
+    east = 3 * math.pi / 2
+    mounted = sample(destination=(.8, .2), sky_pitch_key="0", sky_dismount_key="z", sky_ascent_key="2",
+                     flags=Flags.MOUNTED | Flags.SKYRIDING | Flags.KEYS_VERIFIED | Flags.CAN_FLY | Flags.STYLE_SWITCH,
+                     flight_mount_active=True, sky_flight=SkyFlight(charges=6, speed=24))
+    trip = QuestTrip(mounted.world_size, mounted.destination, "ccw_west")
+    assert trip.step(0, mounted, east).tap == "space"
+    airborne = replace(mounted, flags=mounted.flags | Flags.FLYING, height=104)
+    trip.step(.6, airborne, east)
+    landed = replace(mounted, position=(.79, .2), sequence=2)
+    assert trip.step(3, landed, east).tap == "z"  # near target: dismount begins
+    flag_dropped = replace(landed, sequence=3, flags=landed.flags & ~Flags.SKYRIDING)
+    command = trip.step(3.4, flag_dropped, east)
+    assert command.outcome != "skyriding_controls_unavailable" and not command.keys
+    unmounted = replace(flag_dropped, flags=flag_dropped.flags & ~Flags.MOUNTED, flight_mount_active=False)
+    assert trip.step(4, unmounted, east).outcome is None  # ground travel resumes
+
+
+def test_hovering_landing_dives_with_forward_near_the_marker():
+    # 20261119T012728: pitched down without forward motion the skyriding mount
+    # hovered at the marker until the landing budget expired. Near the marker
+    # the pitch window must include W to dive into ground contact.
+    east = 3 * math.pi / 2
+    mounted = sample(destination=(.8, .2), sky_pitch_key="0", sky_dismount_key="z", sky_ascent_key="2",
+                     flags=Flags.MOUNTED | Flags.SKYRIDING | Flags.KEYS_VERIFIED | Flags.CAN_FLY | Flags.STYLE_SWITCH,
+                     flight_mount_active=True, sky_flight=SkyFlight(charges=6, speed=24))
+    trip = QuestTrip(mounted.world_size, mounted.destination, "ccw_west")
+    assert trip.step(0, mounted, east).tap == "space"
+    airborne = replace(mounted, flags=mounted.flags | Flags.FLYING, height=104)
+    trip.step(.6, airborne, east)
+    close = replace(airborne, position=(.79, .2), sequence=2)  # ~10 yards out
+    trip.step(2, close, east)   # brake window
+    command = trip.step(2.5, replace(close, sequence=3), east)  # sky_land begins
+    assert "0" in command.keys and "w" in command.keys  # dive-land near the marker

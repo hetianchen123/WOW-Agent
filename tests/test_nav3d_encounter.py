@@ -222,25 +222,60 @@ def test_new_individual_of_same_species_revalidates_without_old_pending_cast(enc
     assert state.fight.state_epoch == 2 and state.fight.presses == 1
 
 
-def test_manual_runner_hands_off_without_nav_step_and_releases_movement(encounter, tmp_path, monkeypatch):
+def test_manual_runner_hands_off_releases_movement_then_begins_mesh_exit(encounter, tmp_path, monkeypatch):
     from test_npc_obstacle import npc
+    from bot.control.quest_travel import TravelCommand
     state, step, _ = encounter
-    run, ctx, _, _, _ = npc(tmp_path, monkeypatch)
+    run, ctx, _, _, events = npc(tmp_path, monkeypatch)
     ctx.cfg.nav3d.mode = 'nav3d'
+    exits, coordinator_steps = [], []
     run.nav3d_coordinator = NS(mesh=NS(mesh_id=MESH_ID),
-        step=lambda *a, **kw: pytest.fail('movement must relinquish ownership in holding region'))
+        tracker=NS(candidates=lambda xy, **kw: [(2118.2, -864.6, 67.6)]),
+        begin_exit=lambda goal, *, now, sample=None: exits.append(goal),
+        step=lambda *a, **kw: (coordinator_steps.append(a), TravelCommand())[1])
     step(0)
     run.nav3d_sample, nav, run.observation = step.last
     run.set_travel_keys(ctx, frozenset({'w'}))
     run.travel_nav3d(ctx, 0, nav)
-    assert not ctx.input._held_keys and run.OUTCOME is None
+    assert not coordinator_steps and not ctx.input._held_keys and run.OUTCOME is None
     assert run.nav3d_encounter.state == 'waiting_spawn'
     step(.3, target=True)
     run.nav3d_sample, nav, run.observation = step.last
     run.travel_nav3d(ctx, .3, nav)
-    assert run.nav3d_encounter.state == 'fighting' and run.OUTCOME is None
+    assert run.nav3d_encounter.state == 'fighting' and run.OUTCOME is None and not coordinator_steps
+    step(.6, xyz={'phase': 3}, nav={'phase': QuestState.READY})
+    run.nav3d_sample, nav, run.observation = step.last
+    run.travel_nav3d(ctx, .6, nav)
+    # Kill credit no longer ends the run: the bounded mesh exit owns movement.
+    assert run.OUTCOME is None and run.nav3d_exit_started and exits == [(2133, -854)]
+    assert not ctx.input._held_keys and not coordinator_steps
+    run.travel_nav3d(ctx, .7, NS(**{**vars(nav), 'sequence': nav.sequence + 1}))
+    assert coordinator_steps and not run.nav3d_released
+    # Reaching the exit releases ownership; the legacy stack owns all travel.
+    run.nav3d_coordinator = NS(step=lambda *a, **kw: TravelCommand(outcome='nav3d_exit_reached'))
+    run.travel_nav3d(ctx, .8, NS(**{**vars(nav), 'sequence': nav.sequence + 2}))
+    assert run.nav3d_released and run.OUTCOME is None and not run.arrived and run.trip is None
+    assert any(name == 'quest_encounter_handoff_legacy' for name, _ in events)
+
+
+def test_legacy_handoff_disabled_restores_stop_at_kill(encounter, tmp_path, monkeypatch):
+    from test_npc_obstacle import npc
+    state, step, _ = encounter
+    run, ctx, _, _, _ = npc(tmp_path, monkeypatch)
+    ctx.cfg.nav3d.mode = 'nav3d'
+    ctx.cfg.nav3d.legacy_handoff = False
+    run.nav3d_coordinator = NS(mesh=NS(mesh_id=MESH_ID),
+        tracker=NS(candidates=lambda xy, **kw: [(2118.2, -864.6, 67.6)]),
+        begin_exit=lambda goal, *, now, sample=None: pytest.fail('exit must not begin with handoff disabled'),
+        step=lambda *a, **kw: pytest.fail('movement must relinquish ownership in holding region'))
+    step(0)
+    run.nav3d_sample, nav, run.observation = step.last
+    run.travel_nav3d(ctx, 0, nav)
+    step(.3, target=True)
+    run.nav3d_sample, nav, run.observation = step.last
+    run.travel_nav3d(ctx, .3, nav)
     step(.6, xyz={'phase': 3}, nav={'phase': QuestState.READY})
     run.nav3d_sample, nav, run.observation = step.last
     run.travel_nav3d(ctx, .6, nav)
     assert run.OUTCOME == 'stopped:quest_encounter_objective_complete_ready_for_turn_in'
-    assert not ctx.input._held_keys
+    assert not run.nav3d_exit_started and not ctx.input._held_keys

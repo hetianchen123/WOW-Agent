@@ -129,6 +129,7 @@ def _smoke() -> None:
     backend.right_click()
     backend.rmb_turn(35)
     assert backend.position() == (-1765, 500)
+    events = backend._request("info")["events"]
     try:
         backend.move_to(3000, 500, jitter_px=0)
     except OSError:
@@ -141,12 +142,13 @@ def _smoke() -> None:
         pass
     else:
         raise AssertionError("world interaction accepted while moving")
+    assert backend._request("info")["events"] == events
     backend.release_all()
-    assert backend._request("info")["events"] == 8
+    assert backend._request("info")["events"] == events + 1
     backend.click_world_object()
-    assert backend._request("info")["events"] == 10
+    assert backend._request("info")["events"] == events + 3
     backend.click_ui()
-    assert backend._request("info")["events"] == 12
+    assert backend._request("info")["events"] == events + 5
     backend.down("w")
     try:
         backend.click_ui()
@@ -157,7 +159,7 @@ def _smoke() -> None:
     backend._request("simulate_blur")
     assert backend.interrupted()
     info = backend._request("info")
-    assert info["events"] == 14 and not info["armed"]
+    assert info["events"] == events + 7 and not info["armed"]
     print("Signed controller, simulated input, window bounds, focus loss and key release passed")
 
 

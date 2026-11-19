@@ -52,6 +52,15 @@ class ObjectiveAction(IntEnum):
     INTERACT = 2
     ARRIVE = 3
     NPC_TALK = 5
+    CHOICE = 6
+
+
+class ChoiceStep(IntEnum):
+    WAIT = 0
+    SELECT = 1
+    OPEN_PANEL = 2
+    APPROACH = 3
+    STAND = 4
 
 
 class RoundStage(IntEnum):
@@ -240,6 +249,7 @@ class TravelSample:
     round_pending_count: int | None = None
     extension_schema: int | None = None
     visual_ui_hidden: int | None = None
+    choice_step: ChoiceStep = ChoiceStep.WAIT
 
 
 def travel_region(x: int, y: int) -> tuple[int, int, int, int]:
@@ -306,6 +316,7 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
             range_supported = version >= 5
             action_code = code if version >= 7 else 0
     action = ObjectiveAction.NONE
+    choice_step = ChoiceStep.WAIT
     objective_pin = False
     target = 0
     cursor = None
@@ -317,11 +328,13 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
             if task & TaskFlags.MOUNT_TUTORIAL:
                 mount_button = point
                 mount_button_key = str(action_code) if point and 2 <= action_code <= 4 else None
-            elif version >= 8 and phase == QuestState.ACTIVE and 1 <= action_code <= 5:
+            elif version >= 8 and phase == QuestState.ACTIVE and 1 <= action_code <= 6:
                 objective_pin = action_code == 4
                 action = ObjectiveAction.INTERACT if objective_pin else ObjectiveAction(action_code)
                 target = value if action == ObjectiveAction.COMBAT else 0
                 cursor = point if action == ObjectiveAction.INTERACT else None
+                if action == ObjectiveAction.CHOICE and 0 <= value <= ChoiceStep.STAND:
+                    choice_step = ChoiceStep(value)
     round_stage, round_advance, round_blocked, round_immediate = RoundStage.NONE, False, False, False
     corpse_lootable, fetch_ready, precise_object, apr_waypoint, strafe_verified = None, False, False, False, False
     last_target_verified = False
@@ -525,4 +538,5 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         version, camera, addon_build, probe_camera_available, overhead_camera_available,
         calibration_orbit_available,calibration_orbit_active,
         round_pending_count, extension_schema, visual_ui_hidden,
+        choice_step,
     )

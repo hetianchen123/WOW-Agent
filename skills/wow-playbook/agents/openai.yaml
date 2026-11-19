@@ -1,4 +1,4 @@
 interface:
-  display_name: "魔兽任务操作准则"
-  short_description: "维护寻路避障、找怪战斗、拾取与批量交接任务规则，并用于脚本开发和实机排错"
-  default_prompt: "使用 $wow-playbook 分析当前任务日志，按玩家操作准则修复脚本并更新对应规则和测试。"
+  display_name: "Wow 开发"
+  short_description: "维护 WowAgent 脚本与插件，按实机日志修复、回归、一键准备和复跑"
+  default_prompt: "使用 $wow-playbook 查最新任务日志，修复并回归，随后准备和启动脚本，核对实机回执。"

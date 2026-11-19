@@ -6,7 +6,7 @@ import math
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from ..control.quest_terrain import (SCENE_BOUNDS, SCENE_ERRORS, SceneRequest, T
                                      local_vision_available)
 from ..core.statemachine import State
 from ..core.paths import SCREENSHOT_DIR, DATA_DIR
+from ..data.grail import cached_npc_location
 from ..decision.startlux import DECISION_WAIT_S
 from ..decision.route_planner import available as cloud_route_available
 from ..perception.capture import CaptureError, ScreenCapture, frontmost_game_bounds, game_ui_bounds
@@ -35,7 +36,7 @@ from ..control.approach import ApproachAttempt, ApproachGoal, ApproachObservatio
 from ..perception.quest_channel import (
     RESOURCE_PROGRESS_MAX, Dialogue, Objective, QuestKind, QuestState, decode_quest, quest_region,
 )
-from ..perception.travel_channel import (LifeState, ObjectiveAction, PetState, RoundStage, TaskFlags, TravelFlags,
+from ..perception.travel_channel import (ChoiceStep, LifeState, ObjectiveAction, PetState, RoundStage, TaskFlags, TravelFlags,
                                          decode_travel, travel_region)
 from .base import Module
 from .combat import Fight, QuestDefense, QuestHunt, TURN_INTERVAL, TURN_SETTLE, tap_combat_key
@@ -48,8 +49,13 @@ PICKUP_DIALOGUE = {Dialogue.OFFER, Dialogue.DETAIL}
 TURN_IN_DIALOGUE = {Dialogue.TURN_IN, Dialogue.PROGRESS, Dialogue.REWARD}
 QUEST_TARGETS = {90882: frozenset({244669, 244670, 244671, 244672})}
 ARRIVAL_QUESTS = frozenset({90883})
+CHOICE_HANDOFFS = {(2451, 90911): (85, 91281), (85, 88719): (2432, 88719)}
+CHOICE_HANDOFF_WAIT_S = 600
+CONFIGURED_CHOICE_WAIT_S = 45
 PREPARED_FOCUS_WAIT_S = 45
 NPC_SCAN_ANGLES = tuple(math.radians(angle) for angle in range(0, 360, 30))
+NPC_MARKER_APPROACH_YARDS = 8
+NPC_MARKER_APPROACH_RADIUS = 1.25
 OBJECT_APPROACH_YARDS = 2.5
 OBJECT_CLOSE_RECHECK_YARDS = 16
 OBJECT_REFINE_YARDS = 1.25
@@ -75,7 +81,8 @@ TASK_FAILURES = {
     "quest_pickup_dialogue_not_open", "quest_pickup_npc_not_found", "quest_pickup_npc_selection_unconfirmed",
     "quest_ready_state_unconfirmed", "quest_resource_search_area_exhausted", "quest_reward_choice_required",
     "quest_route_blocked", "quest_turn_in_approach_blocked", "quest_turn_in_approach_exhausted",
-    "quest_turn_in_npc_selection_unconfirmed", "quest_turn_in_npc_lost", "quest_flight_route_blocked",
+    "quest_turn_in_npc_selection_unconfirmed", "quest_turn_in_npc_not_in_interact_range",
+    "quest_turn_in_npc_lost", "quest_flight_route_blocked",
     "quest_skyriding_landing_blocked", "quest_skyriding_timeout",
     "quest_patrol_blocking_route",
     "quest_npc_visual_unavailable", "quest_npc_route_unconfirmed",
@@ -195,7 +202,15 @@ class RunQuests(State):
         self.phase = None
         self.follower = None
         self.arrived = False
+        self.nav3d_released = False
+        self.nav3d_exit_started = False
+        self.choice_wait = None
+        self.choice_action_sent = ChoiceStep.WAIT
+        self.accepted_turn_in_pin = None
         self.npc_press_at: float | None = None
+        self.npc_marker_approach = None
+        self.npc_marker_anchor = None
+        self.npc_grail_hint = None
         self.npc_range_wait_since: float | None = None
         self.npc_step: ApproachAttempt | None = None
         self.observations = ObservationTracker()
@@ -320,6 +335,85 @@ class RunQuests(State):
                 self.suspend_camera = {"started": None, "requested": False, "result": None}
             return
         self.OUTCOME = f"stopped:{reason}"
+
+    def wait_for_choice_handoff(self, ctx, now, frame, navigation):
+        if self.travel_only or self.accept_only or ctx.cfg.nav3d.mode == "nav3d-shadow":
+            return False
+        coherent = (frame is not None and navigation is not None and frame.tracking
+                    and (frame.quest_id, frame.map_id, frame.state) ==
+                    (navigation.quest_id, navigation.map_id, navigation.phase))
+        if self.choice_wait is None:
+            if not (coherent and frame.map_id == self.map_id and frame.state == QuestState.ACTIVE
+                    and navigation.objective_action == ObjectiveAction.CHOICE and not navigation.current_suspended
+                    and navigation.task & TaskFlags.PREPARED):
+                return False
+            source = (frame.map_id, frame.quest_id)
+            configured = source in CHOICE_HANDOFFS and (navigation.addon_build or 0) >= 283
+            if configured and navigation.choice_step == ChoiceStep.APPROACH:
+                return False
+            budget = CONFIGURED_CHOICE_WAIT_S if configured else CHOICE_HANDOFF_WAIT_S
+            self.choice_wait = (*source, now + budget)
+            self.choice_action_sent = ChoiceStep.WAIT
+            self.cancel_scene_requests()
+            self.camera.cancel(ctx, now, "choice_handoff")
+            self.set_forward(ctx, False)
+            ctx.log_event("quest_choice_waiting", {"id": frame.quest_id, "map": frame.map_id,
+                                                   "step": navigation.choice_step.name})
+            log.info("任务 %s 正在等待游戏内的冒险目的地和后续任务回执。", frame.quest_id)
+        source_map, source_quest, deadline = self.choice_wait
+        expected_handoff = CHOICE_HANDOFFS.get((source_map, source_quest))
+        if coherent and navigation.task & TaskFlags.PREPARED:
+            destination = (frame.map_id, frame.quest_id)
+            ready = (navigation.round_stage == RoundStage.TURN_IN and frame.state == QuestState.READY
+                     if frame.quest_id == source_quest else navigation.round_stage == RoundStage.PICKUP)
+            if ready and destination == expected_handoff:
+                self.choice_wait = None
+                self.map_id, self.nav3d_released = frame.map_id, True
+                self.round_advance_at = now
+                self.round_stage = RoundStage.NONE
+                self.phase = self.sample = self.last_sequence = self.nav_sequence = None
+                self.arrived, self.trip, self.hunt = False, None, None
+                self.last_frame = self.last_target = now
+                self.ground_trace.clear()
+                ctx.log_event("quest_choice_handoff", {"id": source_quest, "map": frame.map_id,
+                                                      "next_id": frame.quest_id})
+                return False
+            if destination == (source_map, source_quest):
+                sent = self.choice_action_sent
+                if (frame.state in {QuestState.READY, QuestState.TURNED_IN}
+                        and not (expected_handoff and sent in {ChoiceStep.SELECT, ChoiceStep.STAND})):
+                    self.choice_wait = None
+                    self.last_frame = self.last_target = now
+                    return False
+                choice_step = navigation.choice_step
+                if now < deadline and sent == ChoiceStep.STAND and choice_step == ChoiceStep.APPROACH:
+                    self.choice_wait = None
+                    self.npc_press_at = None
+                    self.last_frame = self.last_target = now
+                    return False
+                stand = (sent == ChoiceStep.SELECT and choice_step == ChoiceStep.STAND
+                         and navigation.flags & TravelFlags.KEYS_VERIFIED and navigation.position is not None
+                         and (navigation.recovery is None or navigation.recovery.life == LifeState.ALIVE))
+                next_action = (sent == ChoiceStep.WAIT and choice_step == ChoiceStep.OPEN_PANEL
+                               or sent != ChoiceStep.SELECT and choice_step == ChoiceStep.SELECT)
+                if (now < deadline and expected_handoff and (next_action or stand)
+                        and frame.state == QuestState.ACTIVE and navigation.objective_action == ObjectiveAction.CHOICE
+                        and not navigation.current_suspended
+                        and not navigation.flags & (TravelFlags.IN_COMBAT | TravelFlags.MOUNTED | TravelFlags.FLYING
+                                                    | TravelFlags.FALLING | TravelFlags.CASTING | TravelFlags.SWIMMING)):
+                    self.choice_action_sent = choice_step
+                    self.execution_started = True
+                    ctx.log_event("quest_transport_stand" if stand else "quest_transport_option", {
+                        "id": source_quest, "map": source_map, "step": choice_step.name,
+                        "sequence": navigation.sequence,
+                    })
+                    if stand:
+                        ctx.input.tap("w", hold_s=.10)
+                    else:
+                        ctx.input.tap(self.steps[self.index].dialog_key)
+        if now >= deadline:
+            self.stop(ctx, "quest_choice_handoff_unconfirmed")
+        return True
 
     def suspend_task(self, ctx, now, nav, in_combat):
         task, phase, epoch, reason, started, state = self.suspend_request
@@ -646,8 +740,59 @@ class RunQuests(State):
         except (CaptureError, ValueError, OSError) as exc:
             ctx.log_event("quest_camera_evidence_unavailable", {"reason": str(exc)})
 
+    def nav3d_mesh_quest_id(self):
+        mesh = getattr(getattr(self, "nav3d_coordinator", None), "mesh", None)
+        frame = getattr(mesh, "frame", None)
+        if frame is None:
+            return None
+        parts = frame.phase_id.split(":")
+        return int(parts[1]) if len(parts) > 2 and parts[0] == "quest" else None
+
     def nav3d_enabled(self, ctx):
-        return getattr(getattr(ctx.cfg, "nav3d", None), "mode", "visual") != "visual"
+        # After the mesh-exit handoff the legacy stack owns all remaining travel.
+        return (getattr(getattr(ctx.cfg, "nav3d", None), "mode", "visual") != "visual"
+                and not getattr(self, "nav3d_released", False))
+
+    def release_nav3d_outside_mesh(self, ctx, sample, reason):
+        from ..control.quest_travel import TravelCommand
+
+        self.nav3d_released = True
+        ctx.log_event("nav3d_exit_skipped_outside_mesh", {
+            "position_xy": sample.position_xy, "world_id": sample.world_id,
+        })
+        ctx.log_event("quest_encounter_handoff_legacy", {"reason": reason})
+        return TravelCommand()
+
+    def begin_nav3d_exit(self, ctx, now):
+        """Hand ground travel to the legacy stack via a bounded mesh exit.
+
+        2026-11-18 split policy (user decision): Nav3D covers mesh scenes;
+        open-field legs (turn-in, follow-ups) reuse the legacy straight-line
+        stack. Returns a released TravelCommand when the exit segment (or a
+        direct outside-mesh release) started; None falls back to the old
+        stop-at-kill run end.
+        """
+        from ..nav3d import NavigationError
+        from ..control.quest_travel import TravelCommand
+        sample = getattr(self, 'nav3d_sample', None)
+        position = sample.position_xy if sample is not None else None
+        goal = (sample.goal_xy if sample is not None and sample.goal_xy is not None
+                and sample.goal_world_id == sample.world_id else None)
+        if position is not None and not self.nav3d_coordinator.tracker.candidates(position):
+            return self.release_nav3d_outside_mesh(ctx, sample, "outside_mesh")
+        if goal is None:
+            if not getattr(self, 'nav3d_exit_goal_wait', False):
+                ctx.log_event("nav3d_exit_goal_unavailable", {})
+                self.nav3d_exit_goal_wait = True
+            return None
+        self.nav3d_exit_goal_wait = False
+        try:
+            self.nav3d_coordinator.begin_exit(goal, now=now, sample=sample)
+        except (NavigationError, ValueError) as exc:
+            ctx.log_event("nav3d_exit_begin_failed", {"reason": str(exc)})
+            return None
+        self.nav3d_exit_started = True
+        return TravelCommand()
 
     def travel_nav3d(self, ctx, now, navigation):
         from ..nav3d.runtime import Nav3DCoordinator
@@ -665,15 +810,70 @@ class RunQuests(State):
                     self.nav3d_encounter = RespawnEncounter(self.nav3d_coordinator.mesh.mesh_id,
                                                           wait_budget_s=ctx.cfg.nav3d.encounter_wait_s,
                                                           log_event=ctx.log_event)
-                command = self.nav3d_encounter.step(now, getattr(self, 'nav3d_sample', None),
-                                                    navigation, self.observation)
-            if command is None:
+                if not getattr(self, 'nav3d_exit_started', False):
+                    command = self.nav3d_encounter.step(now, getattr(self, 'nav3d_sample', None),
+                                                        navigation, self.observation)
+                    if (command is not None
+                            and command.outcome == "quest_encounter_objective_complete_ready_for_turn_in"
+                            and getattr(ctx.cfg.nav3d, "legacy_handoff", False)):
+                        released = self.begin_nav3d_exit(ctx, now)
+                        if released is not None:
+                            command = released
+                    elif (command is None and navigation.phase == QuestState.READY
+                            and getattr(ctx.cfg.nav3d, "legacy_handoff", False)):
+                        # Fresh run resuming with the objective already complete
+                        # outside the holding region: the encounter never
+                        # activates, so start the mesh exit (or a direct
+                        # outside-mesh release) from the current position.
+                        released = self.begin_nav3d_exit(ctx, now)
+                        if released is not None:
+                            command = released
+                        elif getattr(self, 'nav3d_exit_goal_wait', False):
+                            # Wait for the turn-in goal receipt instead of
+                            # stopping with a misleading frame-mismatch reason.
+                            from ..control.quest_travel import TravelCommand
+                            command = TravelCommand()
+            if (command is None and ctx.cfg.nav3d.mode == 'nav3d' and not self.travel_only
+                    and not self.nav3d_released and not self.nav3d_exit_started
+                    and navigation is not None
+                    and navigation.quest_id != (self.nav3d_mesh_quest_id() or navigation.quest_id)
+                    and getattr(ctx.cfg.nav3d, "legacy_handoff", False)):
+                # Split policy for a quest outside this mesh's scene: release
+                # to the legacy stack when off-mesh, exit the mesh first when
+                # still on it; a goal inside another quest's mesh scene is not
+                # configured and stops clearly (run 20261119T011845 died on
+                # the mesh's quest label instead).
+                sample = getattr(self, 'nav3d_sample', None)
+                if (sample is None or sample.position_xy is None or
+                        (sample.sequence, sample.quest_id, sample.phase, sample.ui_map_id) !=
+                        (navigation.sequence, navigation.quest_id, int(navigation.phase), navigation.map_id)):
+                    return self.wait_for_data(ctx, now, "nav3d_handoff_telemetry_unavailable")
+                frame = self.nav3d_coordinator.mesh.frame
+                if sample.world_id != frame.world_id:
+                    if self.nav3d_coordinator.sequence is not None:
+                        return self.stop(ctx, "nav3d_world_frame_changed")
+                    command = self.release_nav3d_outside_mesh(ctx, sample, "outside_mesh_world")
+                else:
+                    if str(sample.client_build) != frame.client_build.rsplit('.', 1)[-1]:
+                        return self.stop(ctx, "nav3d_world_frame_changed")
+                    goal = sample.goal_xy if sample.goal_world_id == sample.world_id else None
+                    if goal is not None and self.nav3d_coordinator.tracker.candidates(goal):
+                        return self.stop(ctx, "nav3d_scene_quest_mismatch")
+                    command = self.begin_nav3d_exit(ctx, now)
+                    if command is None and getattr(self, 'nav3d_exit_goal_wait', False):
+                        return self.wait_for_data(ctx, now, "nav3d_exit_goal_unavailable")
+                if self.unusable_reason in {"nav3d_handoff_telemetry_unavailable", "nav3d_exit_goal_unavailable"}:
+                    self.unusable_since, self.unusable_reason = None, None
+            if command is None and not getattr(self, 'nav3d_released', False):
                 command = self.nav3d_coordinator.step(now, getattr(self, "nav3d_sample", None), navigation,
-                    goal_override=self.object_target or self.search_waypoint,
+                    goal_override=None if getattr(self, 'nav3d_exit_started', False)
+                        else (self.object_target or self.search_waypoint),
                     target_receipt=building_target_receipt(navigation,self.observation,now) if navigation else None,
                     travel_only=self.travel_only)
         except (NavigationError, OSError, ValueError) as exc:
             return self.stop(ctx, "nav3d_initialization_failed:" + str(exc))
+        if command is None:
+            return
         if command.tap or command.keys:
             self.execution_started = True
         self.apply_travel_command(ctx, command)
@@ -687,6 +887,12 @@ class RunQuests(State):
         elif command.outcome == "nav3d_target_confirmed":
             self.arrived,self.last_progress=True,now
             self.stop(ctx,"nav3d_target_reached_waiting_task_execution")
+        elif command.outcome == "nav3d_exit_reached":
+            # Split policy: from the mesh exit the legacy stack owns all travel.
+            self.nav3d_released = True
+            self.arrived, self.trip = False, None
+            ctx.log_event("quest_encounter_handoff_legacy",
+                          {"position_xy": getattr(getattr(self, "nav3d_sample", None), "position_xy", None)})
         elif command.outcome:
             self.stop(ctx, command.outcome)
 
@@ -756,6 +962,16 @@ class RunQuests(State):
         destination = self.object_target or self.search_waypoint or navigation.destination
         local_search = self.search_waypoint is not None
         live_object = bool(self.object_target or navigation.objective_pin and not local_search)
+        if self.accepted_from_offer and self.phase == QuestState.READY and not (local_search or live_object):
+            # An immediately ready follow-up can briefly inherit the pickup pin.
+            pin = self.accepted_turn_in_pin
+            if pin is None or pin[0] != destination:
+                self.accepted_turn_in_pin = (destination, now, navigation.sequence)
+                self.trip = None
+                self.set_travel_keys(ctx, frozenset())
+                return
+            if now - pin[1] < 1 or navigation.sequence == pin[2]:
+                return
         if self.trip is None or self.trip.router.distance(self.trip.destination, destination) > (4 if live_object else 8):
             # A kill objective is an area marker. Start checking targets before
             # walking into whatever occupies the exact center of that area.
@@ -837,6 +1053,12 @@ class RunQuests(State):
 
     def process_building_access(self, ctx, now, nav, heading):
         if self.nav3d_enabled(ctx):
+            return False
+        # 2026-11-18 split policy: after the mesh handoff the legacy leg is
+        # open-field travel. Building scenes belong to Nav3D; the legacy visual
+        # probes must not hijack the turn-in route (run 20261118T144009
+        # suspended on quest_building_access_unconfirmed instead of flying).
+        if getattr(self, "nav3d_released", False):
             return False
         config=getattr(ctx.cfg,'segmented_navigation',None)
         if not (self.auto_route and self.require_prepared and not self.travel_only
@@ -1254,6 +1476,8 @@ class RunQuests(State):
                             "npc_step": self.npc_step is not None,
                             "travel": getattr(self.trip, "mode", None)},
             })
+        if self.auto_route and self.wait_for_choice_handoff(ctx, now, frame, navigation):
+            return
         if self.auto_route and self.nav3d_enabled(ctx):
             # One owner for all ground movement, including building/approach.
             # Shadow is intercepted before recovery, camera, combat or NPC taps.
@@ -1345,6 +1569,7 @@ class RunQuests(State):
         if (self.phase == QuestState.PENDING and sample.state in {QuestState.ACTIVE, QuestState.READY}
                 and not self.accepted_from_offer):
             self.accepted_from_offer = True
+            self.accepted_turn_in_pin = None
             ctx.stats["quests_accepted"] = ctx.stats.get("quests_accepted", 0) + 1
             ctx.log_event("quest_accept_confirmed", {"id": step.quest_id, "state": sample.state.name})
         in_combat = bool(status[0] & StatusFlags.IN_COMBAT
@@ -1522,7 +1747,8 @@ class RunQuests(State):
                     and not mount_tutorial and navigation.destination_map and navigation.destination_map != self.map_id):
                 return self.stop(ctx, "quest_cross_map_route_required")
             objective_action = navigation.objective_action
-            if sample.state == QuestState.ACTIVE and navigation.objectives_finished and not self.travel_only:
+            if (sample.state == QuestState.ACTIVE and navigation.objectives_finished and not self.travel_only
+                    and objective_action != ObjectiveAction.CHOICE):
                 if self.hunt and self.loot_corpse(ctx, now, progress[0], self.read_combat(ctx), navigation):
                     return
                 return self.wait_for_data(ctx, now, "quest_ready_state_unconfirmed")
@@ -1536,7 +1762,9 @@ class RunQuests(State):
             or (objective_index == self.objective_index and self.phase == QuestState.ACTIVE
                 and self.hunt is not None and objective_action == ObjectiveAction.NONE)
         )
-        talk_objective = sample.state == QuestState.ACTIVE and objective_action == ObjectiveAction.NPC_TALK
+        talk_objective = sample.state == QuestState.ACTIVE and (objective_action == ObjectiveAction.NPC_TALK
+            or objective_action == ObjectiveAction.CHOICE and navigation.choice_step == ChoiceStep.APPROACH
+            and (navigation.map_id, navigation.quest_id) in CHOICE_HANDOFFS)
         if in_combat:
             if self.hunt is not None and sample.state == QuestState.READY:
                 return self.wait_for_data(ctx, now, "quest_combat_did_not_end")
@@ -1551,7 +1779,7 @@ class RunQuests(State):
         if (not self.auto_route and route is None) or (
             sample.state == QuestState.ACTIVE and sample.objective == Objective.UNKNOWN and not self.travel_only
             and step.quest_id not in ARRIVAL_QUESTS
-            and objective_action not in {ObjectiveAction.ARRIVE, ObjectiveAction.NPC_TALK, ObjectiveAction.INTERACT}
+            and not talk_objective and objective_action not in {ObjectiveAction.ARRIVE, ObjectiveAction.INTERACT}
             and not (objective_index and objective_action == ObjectiveAction.COMBAT and measurable)
         ):
             return self.wait_for_data(ctx, now, "quest_objective_unsupported")
@@ -1582,6 +1810,8 @@ class RunQuests(State):
             self.corpse_restore = None
             self.arrived, self.attempts, self.action_signature = False, 0, None
             self.npc_press_at, self.npc_step, self.npc_steps = None, None, 0
+            self.npc_marker_approach, self.npc_marker_anchor = None, None
+            self.npc_grail_hint = None
             self.npc_rejoin = False
             self.npc_obstacle_attempts.clear()
             self.npc_range_wait_since = None
@@ -1830,6 +2060,14 @@ class RunQuests(State):
             return self.stop(ctx, "quest_automatic_not_prepared")
         if not self.npc_ground_ready(ctx, now, navigation):
             return
+        candidate = bool(navigation.task & TaskFlags.NPC_CANDIDATE) and self.attempts < 3
+        if candidate or navigation.task & TaskFlags.NPC_SELECTED:
+            self.npc_marker_approach = None
+        if (self.npc_detouring or self.npc_obstacle_reason or self.npc_step is not None
+                or navigation.task & TaskFlags.NPC_SELECTED) and not navigation.task & TaskFlags.NPC_CONFIGURED:
+            hint = self.npc_location_hint(navigation)
+            if hint is not None:
+                navigation = replace(navigation, destination=hint[1])
         range_receipt = TaskFlags.NPC_SELECTED | TaskFlags.NPC_RANGE_KNOWN | TaskFlags.NPC_WITHIN_5_YARDS
         if navigation.npc_range_supported and navigation.task & range_receipt == range_receipt:
             # A fresh native range receipt outranks the unfinished detour. It
@@ -1852,7 +2090,7 @@ class RunQuests(State):
             if now - self.npc_press_at > 2:
                 return self.stop(ctx, "quest_turn_in_npc_lost")
             return
-        if navigation.task & TaskFlags.NPC_CANDIDATE and self.attempts < 3:
+        if candidate:
             self.set_travel_keys(ctx, frozenset())
             if now - self.last_action >= 2:
                 self.npc_select_attempted = True
@@ -2374,6 +2612,11 @@ class RunQuests(State):
                 "moved_yards": result.moved_yards, "reason": result.reason, "sequence": navigation.sequence})
             if result.state == ActionState.CANCELLED:
                 self.npc_step = None
+                if not selected and navigation.task & TaskFlags.NPC_CANDIDATE:
+                    # A new candidate can replace the selected soft target.
+                    # Release the old step and let K verify selection again.
+                    self.npc_alignment = self.npc_range_wait_since = None
+                    return
                 return self.stop(ctx, "quest_turn_in_npc_lost")
             if result.state == ActionState.RECOVERABLE:
                 self.npc_step = None
@@ -2424,12 +2667,70 @@ class RunQuests(State):
             })
             self.set_travel_keys(ctx, frozenset({"w"}))
 
+    def npc_location_hint(self, nav):
+        if (self.phase not in {QuestState.PENDING, QuestState.READY} or nav.destination_map != nav.map_id
+                or nav.destination is None or nav.world_size is None):
+            return None
+        identity = (nav.quest_id, nav.phase, nav.map_id)
+        if self.npc_grail_hint is None or self.npc_grail_hint[0] != identity:
+            role = "pickup" if self.phase == QuestState.PENDING else "turnIn"
+            self.npc_grail_hint = identity, cached_npc_location(nav.quest_id, nav.map_id, role)
+        hint = self.npc_grail_hint[1]
+        if hint is not None and GridRouter(*nav.world_size).distance(hint[1], nav.destination) <= 6:
+            return hint
+        return None
+
+    def approach_npc_search_marker(self, ctx, now, nav, heading):
+        if (self.phase not in {QuestState.PENDING, QuestState.READY} or nav.destination_map != nav.map_id
+                or not nav.npc_range_supported or not nav.task & TaskFlags.PREPARED
+                or (self.phase == QuestState.PENDING and self.npc_select_attempted and self.attempts < 3)):
+            return False
+        identity = (nav.quest_id, nav.phase, nav.map_id)
+        router = GridRouter(*nav.world_size)
+        if router.distance(nav.position, nav.destination) > NPC_MARKER_APPROACH_YARDS:
+            self.npc_marker_approach = None
+            return False
+        if self.npc_marker_anchor != identity:
+            self.npc_marker_anchor = identity
+            self.npc_marker_approach = None
+            hint = self.npc_location_hint(nav)
+            goal, source, npc = nav.destination, "quest_marker", None
+            if hint is not None:
+                npc_id, point = hint
+                if router.distance(nav.position, point) <= NPC_MARKER_APPROACH_YARDS:
+                    goal, source, npc = point, "grail_cache", npc_id
+            if router.distance(nav.position, goal) > NPC_MARKER_APPROACH_RADIUS:
+                trip = QuestTrip(nav.world_size, goal, ctx.cfg.navigation.facing_convention,
+                                 walk_only=True, arrival_radius=NPC_MARKER_APPROACH_RADIUS,
+                                 log_event=ctx.log_event)
+                self.npc_marker_approach = trip, now + 12, nav.destination
+                ctx.log_event("quest_npc_marker_approach", {"id": nav.quest_id, "source": source,
+                    "npc_hint": npc, "start": nav.position, "destination": goal})
+        if self.npc_marker_approach is None:
+            return False
+        trip, deadline, marker = self.npc_marker_approach
+        if router.distance(marker, nav.destination) > 1.5:
+            self.npc_marker_approach = None
+            self.set_forward(ctx, False)
+            return False
+        command = trip.step(now, nav, heading, heading_age=ctx.heading_age()) if now < deadline else None
+        if command is not None and not command.outcome and not command.keys and command.tap in {None, "w", "left", "right"}:
+            self.apply_travel_command(ctx, command)
+            return True
+        self.npc_marker_approach = None
+        self.set_forward(ctx, False)
+        ctx.log_event("quest_npc_marker_approach_result", {"id": nav.quest_id, "position": nav.position,
+            "result": "deadline" if command is None else command.outcome or "unverified_local_movement"})
+        return False
+
     def search_quest_npc(self, ctx, now, navigation, heading):
         if not self.npc_ground_ready(ctx, now, navigation):
             return
         if not (navigation.flags & TravelFlags.KEYS_VERIFIED and navigation.position
                 and navigation.destination and navigation.world_size):
             return self.stop(ctx, "quest_interact_position_unavailable")
+        if self.approach_npc_search_marker(ctx, now, navigation, heading):
+            return
         if self.npc_scan_started is None:
             self.npc_scan_started, self.npc_scan_heading = now, heading
             ctx.log_event("quest_npc_search", {

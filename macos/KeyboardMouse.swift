@@ -150,21 +150,29 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
     }
 
     @objc private func runPrepared() {
-        guard !simulate, server >= 0, !session, questProcess == nil, launchDeadline == nil else { return }
+        let reply = requestPrepared()
+        if let message = reply["error"] as? String { state.title = message }
+    }
+
+    private func requestPrepared() -> [String: Any] {
+        guard !simulate else { return error("模拟执行器不能启动实机任务") }
+        guard server >= 0, !session, questProcess == nil, launchDeadline == nil else {
+            return error("键鼠执行器尚未就绪或已有任务在运行")
+        }
         do {
             let log = try questRoot().appendingPathComponent("data/logs/quest-launch.log")
             try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-            questRequestedAt = Date()
             try Data("已请求运行任务。\n".utf8).write(to: log)
+            questRequestedAt = Date()
         } catch {
-            state.title = "无法写入任务启动日志 · \(error.localizedDescription)"
-            return
+            return self.error("无法写入任务启动日志 · \(error.localizedDescription)")
         }
         let now = ProcessInfo.processInfo.systemUptime
         launchDeadline = now + 120
         nextLaunchCheck = now
         launchWait = nil
-        watch()
+        state.title = "已请求运行任务，正在等待权限和魔兽前台"
+        return ["ok": true]
     }
 
     private func questRoot() throws -> URL {
@@ -312,6 +320,7 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
         guard let op = request["op"] as? String else { return error("缺少键鼠操作") }
         watch()
         if op == "info" { return ["ok": true, "simulate": simulate, "armed": armed, "events": eventCount] }
+        if op == "run_prepared" { return requestPrepared() }
         if simulate && op == "simulate_blur" {
             simulatedFocus = false
             watch()

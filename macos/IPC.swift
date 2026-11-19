@@ -93,4 +93,24 @@ enum InputSocket {
             return true
         }
     }
+
+    static func reply(_ fd: Int32) throws -> [String: Any] {
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var data = Data()
+        var bytes = [UInt8](repeating: 0, count: 512)
+        while data.count < 1024 {
+            let count = recv(fd, &bytes, bytes.count, 0)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { break }
+            data.append(contentsOf: bytes.prefix(count))
+            if let end = data.firstIndex(of: 10) {
+                if let value = try? JSONSerialization.jsonObject(with: data[..<end]) as? [String: Any] {
+                    return value
+                }
+                break
+            }
+        }
+        throw InputError.message("未收到键鼠助手的启动回执，请核对任务启动日志")
+    }
 }

@@ -254,7 +254,13 @@ class QuestTrip:
             self.failed_modes.add("fly")
             self.enter("choose", now)
             return TravelCommand()
-        if not (sample.sky_pitch_key and sample.sky_dismount_key and sample.flags & Flags.SKYRIDING):
+        landing = self.phase in {"sky_glide", "sky_brake", "sky_land", "sky_recover", "sky_dismount"}
+        # The SKYRIDING flag derives from active gliding: it can drop during
+        # the post-landing dismount while still mounted. It is only mandatory
+        # before the landing regime begins (run 20261118T145120 stopped beside
+        # the turn-in NPC on this dropped flag). Missing control keys always stop.
+        if not (sample.sky_pitch_key and sample.sky_dismount_key) or (
+                not sample.flags & Flags.SKYRIDING and not (landing and not flying)):
             return TravelCommand(outcome="skyriding_controls_unavailable")
         if sample.flags & Flags.FALLING and not flying and self.phase != "sky_launch":
             return TravelCommand()
@@ -383,6 +389,15 @@ class QuestTrip:
             if distance <= 12:
                 steering = frozenset()
             pitch = {sample.sky_pitch_key} if landing_time % .7 < .45 else set()
+            # A skyriding mount hovers in place when pitched down without
+            # forward motion (run 20261119T012728 hovered at the marker until
+            # the landing budget ran out). While close to the marker or held
+            # stationary, dive with W so ground contact clears FLYING and the
+            # dismount regime can begin.
+            stationary = (self.motion_position is not None
+                          and self.router.distance(self.motion_position, sample.position) < 1.2)
+            if pitch and (stationary or distance <= 12):
+                pitch = pitch | {"w"}
             return TravelCommand(steering | pitch)
         return TravelCommand(outcome="skyriding_state_unexpected")
 
