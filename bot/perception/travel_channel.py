@@ -269,6 +269,7 @@ class TravelSample:
     choice_step: ChoiceStep = ChoiceStep.WAIT
     forever_step: ForeverStep = ForeverStep.NONE
     forever_value: int = 0
+    counted_drop: bool = False
 
 
 def travel_region(x: int, y: int) -> tuple[int, int, int, int]:
@@ -340,10 +341,13 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
     target = 0
     cursor = None
     forever_step, forever_value = ForeverStep.NONE, 0
+    counted_drop = False
     if version >= 7 and offset >= 3 * row_height:
         row = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 3 * row_height))
         if row and version >= 15 and action_code == 7 and row[0] in ForeverStep._value2member_map_:
             forever_step, forever_value = ForeverStep(row[0]), row[1]
+        elif row and version >= 15 and phase == QuestState.ACTIVE and action_code == 1 and row[0] == 3:
+            action, target, counted_drop = ObjectiveAction.COMBAT, row[1], True
         elif row and row[0] == 2:
             value = row[1]
             point = ((value >> 10) / 1023, (value & 1023) / 1023) if value else None
@@ -560,5 +564,5 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         version, camera, addon_build, probe_camera_available, overhead_camera_available,
         calibration_orbit_available,calibration_orbit_active,
         round_pending_count, extension_schema, visual_ui_hidden,
-        choice_step, forever_step, forever_value,
+        choice_step, forever_step, forever_value, counted_drop,
     )

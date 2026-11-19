@@ -97,6 +97,19 @@ def test_exit_segment_gets_fresh_budget_after_long_spawn_wait(door_mesh, tmp_pat
     assert command.outcome != 'nav3d_budget_exhausted' and command.tap
 
 
+def test_explicit_outdoor_handoff_accepts_one_mesh_surface(door_mesh, tmp_path):
+    rt, _, start, goal = coordinator(door_mesh, tmp_path)
+    with pytest.raises(NavigationError, match="exit_goal_on_mesh"):
+        rt.begin_exit(goal[:2], now=0)
+    rt.begin_exit(goal[:2], now=0, handoff=goal[:2])
+    assert len(rt.exit_candidates) == 1
+    command = rt.step(.1, exit_sample(start, goal[:2], 2), exit_nav(2))
+    assert command.outcome is None and rt.route is not None
+    assert rt.route.requested_goal[:2] == goal[:2]
+    with pytest.raises(NavigationError, match="handoff_support_unconfirmed"):
+        rt.begin_exit(goal[:2], now=0, handoff=(150., 100.))
+
+
 def test_exit_keeps_world_and_build_checks_strict(door_mesh, tmp_path):
     rt, events, start, goal = coordinator(door_mesh, tmp_path)
     rt.begin_exit((100, 8.5), now=0)

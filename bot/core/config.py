@@ -94,6 +94,8 @@ class Nav3DConfig:
     # completes, Nav3D walks to a mesh exit and hands open-field travel back
     # to the legacy straight-line stack. False restores the stop-at-kill run end.
     legacy_handoff: bool = True
+    forever_goldshire_mesh: str = ""
+    forever_goldshire_mesh_id: str = ""
 
 
 @dataclass

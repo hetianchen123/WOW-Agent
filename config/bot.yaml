@@ -83,6 +83,8 @@ notify:
 nav3d:
   mode: visual
   mesh: data/nav3d/forever-northshire-abbey/mesh
+  forever_goldshire_mesh: data/nav3d/forever-goldshire-inn/mesh
+  forever_goldshire_mesh_id: "7ce37fb637a6d2cc4af63937af4910e8e294a360913e4fe25f33483e79775551"
   alignment_file: ""
   supervised_trial_mesh_id: "b69495894320899859b0ea418c6010c16577ad074fd4b37bb7657d0f3d912088"
   budget_s: 120

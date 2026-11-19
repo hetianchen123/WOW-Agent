@@ -216,9 +216,11 @@ def tap_combat_key(backend, status, key):
 class QuestHunt:
     """Select quest creatures at a waypoint and wait for quest credit."""
 
-    def __init__(self, targets: frozenset[int], *, resource: bool = False):
+    def __init__(self, targets: frozenset[int], *, resource: bool = False, counted_drop: bool = False):
         self.targets = targets
         self.resource = resource
+        self.counted_drop = counted_drop
+        self.requires_loot = resource or counted_drop
         self.uncredited_kills = 0
         self.resource_best = -1
         self.fight: Fight | None = None
@@ -289,7 +291,7 @@ class QuestHunt:
             return "action_binding_changed", None
         self.binding = binding
 
-        if self.resource and progress > self.resource_best:
+        if self.requires_loot and progress > self.resource_best:
             self.resource_best, self.uncredited_kills = progress, 0
         if self.credit_deadline is not None:
             if progress > self.baseline:
@@ -306,6 +308,13 @@ class QuestHunt:
                     self.reset_search(now)
                     return "resource_try_next", None
                 return "resource_no_progress", None
+            if self.counted_drop and not in_combat:
+                self.uncredited_kills += 1
+                if self.uncredited_kills >= 12:
+                    return "no_quest_credit", None
+                self.credit_deadline, self.fight = None, None
+                self.reset_search(now)
+                return "drop_try_next", None
             if (not in_combat and client_edition(sample.build) == "forever" and self.fight
                     and sample.target_id == self.fight.target_id and sample.target_dead):
                 self.uncredited_kills += 1
@@ -337,7 +346,7 @@ class QuestHunt:
         if now - self.started_at >= 60 or (now - self.started_at >= 20
                                             and now - last_damage >= 8):
             return "fight_timeout", None
-        locked_resource_target = (self.resource and self.fight.state_epoch is not None
+        locked_resource_target = (self.requires_loot and self.fight.state_epoch is not None
                                   and sample.state_epoch == self.fight.state_epoch)
         if (sample.target_id == self.fight.target_id and not sample.target_dead
                 and not matches and not locked_resource_target):

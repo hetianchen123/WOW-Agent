@@ -10,11 +10,17 @@ WowAgent.Forever = forever
 -- confirm the giver, dialogue quest ID and acceptance or reward outcome.
 forever.questData = {
     map = 1429,
-    npcs = {[823] = {48.2, 42.9}, [197] = {48.9, 41.6}, [240] = {42.2, 65.9}},
+    npcs = {
+        [823] = {48.2, 42.9}, [197] = {48.9, 41.6}, [240] = {42.2, 65.9},
+        [241] = {42.1, 67.2}, [253] = {43.3, 65.8}, [261] = {74.0, 72.2},
+    },
     npcNames = {
         [823] = {enUS = "Deputy Willem", zhCN = "维里副队长"},
         [197] = {enUS = "Marshal McBride", zhCN = "治安官玛克布莱德"},
         [240] = {enUS = "Marshal Dughan", zhCN = "治安官杜汉"},
+        [241] = {enUS = 'Remy "Two Times"'},
+        [253] = {enUS = "William Pestle", zhCN = "威廉·匹斯特"},
+        [261] = {enUS = "Guard Thomas", zhCN = "卫兵托马斯"},
         [248415] = {enUS = "Tordrin Sternblade"},
         [251507] = {enUS = "Josephine Carson"},
     },
@@ -27,6 +33,12 @@ forever.questData = {
         [21] = {level = 1, after = {[15] = true}, pickup = 197, turnIn = 197,
             objectivePoint = {48.4, 29}, combatNPC = 80},
         [54] = {level = 1, after = {[21] = true}, pickup = 197, turnIn = 240, arrival = true},
+        [47] = {level = 4, after = {[54] = true}, pickup = 241, turnIn = 241,
+            objectivePoint = {40.5, 80.3}, lootNPCs = {[40] = true, [475] = true}},
+        [60] = {level = 3, after = {[54] = true}, pickup = 253, turnIn = 253,
+            objectivePoint = {40.5, 80.3}, lootNPCs = {[40] = true, [475] = true}},
+        [40] = {level = 7, after = {[54] = true}, pickup = 241, turnIn = 240, arrival = true},
+        [35] = {level = 7, after = {[40] = true}, pickup = 240, turnIn = 261, arrival = true},
     },
 }
 

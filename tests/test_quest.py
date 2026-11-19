@@ -1529,6 +1529,54 @@ def test_resource_hunt_continues_after_no_drop_but_has_a_limit(tmp_path, monkeyp
     assert [p["uncredited_kills"] for event, p in events if event == "quest_resource_try_next"] == [1, 1, 2, 3]
 
 
+def test_counted_drop_quest_uses_loot_but_waits_for_native_item_count(tmp_path, monkeypatch):
+    run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
+    run.auto_route = run.require_prepared = True
+    run.steps = [quest.QuestStep(12345, "9", None, None, None, None, frozenset())]
+    base = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+                        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED,
+                        objective_action=ObjectiveAction.COMBAT, objective_target=475, counted_drop=True,
+                        loot_epoch=0)
+    nav = [base]
+    monkeypatch.setattr(quest, "decode_travel", lambda _: replace(nav[0], sequence=ctx.frame_sequence()))
+    events = []
+    ctx.log_event = lambda name, payload: events.append((name, payload))
+    for _ in range(4):
+        tick(QuestState.ACTIVE, target=475, epoch=2, done=2, required=10)
+    assert run.hunt.counted_drop and ctx.input.count("key_down", "4") >= 1
+
+    nav[0] = replace(base, task=base.task | TaskFlags.LOOT_IN_RANGE, corpse_lootable=True)
+    tick(QuestState.ACTIVE, target=475, dead=True, epoch=2, done=2, required=10)
+    assert ctx.input.count("key_down", "f") == 1
+    nav[0] = replace(nav[0], loot_epoch=1, corpse_lootable=False)
+    tick(QuestState.ACTIVE, target=475, dead=True, epoch=2, done=2, required=10)
+    tick(QuestState.ACTIVE, target=475, dead=True, epoch=2, done=2, required=10, elapsed=5.1)
+    assert ("quest_drop_try_next", {"id": 12345, "count": 2, "uncredited_kills": 1}) in events
+    assert not any(name == "quest_combat_credit" for name, _ in events)
+    assert run.hunt.fight is None
+    assert ctx.input.count("key_down", "9") == 0
+
+
+def test_forever_inn_uses_mesh_for_entry_and_keeps_exit_until_handoff(tmp_path, monkeypatch):
+    from bot.core.config import Nav3DConfig
+
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    ctx.cfg.nav3d = Nav3DConfig(forever_goldshire_mesh="local-mesh", forever_goldshire_mesh_id="digest")
+    entry = TravelSample(60, 1429, 1429, (.433, .658), (.422, .659), (3470.8, 2314.6), 0,
+                         QuestState.PENDING, TravelFlags.OUTDOORS, 1)
+    assert run.forever_building_mode(ctx, entry) == ("goldshire", "enter")
+    assert run.forever_building_mode(ctx, replace(entry, quest_id=47)) is None
+    inside = replace(entry, position=entry.destination, phase=QuestState.ACTIVE, destination=(.405, .803),
+                     flags=TravelFlags(0))
+    assert run.forever_building_mode(ctx, inside) == ("goldshire", "exit")
+    run.forever_building_segment = (60, QuestState.ACTIVE, "goldshire", "exit")
+    outside = replace(inside, position=entry.position, flags=TravelFlags.OUTDOORS)
+    assert run.forever_building_mode(ctx, outside) == ("goldshire", "exit")
+    run.forever_building_complete.add((60, QuestState.ACTIVE))
+    assert run.forever_building_mode(ctx, outside) is None
+
+
 @pytest.mark.parametrize("corpse_returns", [True, False])
 def test_lost_corpse_reselects_once_then_tries_fetch(tmp_path, monkeypatch, corpse_returns):
     run, ctx, _ = make_run(tmp_path, monkeypatch)

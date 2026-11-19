@@ -688,6 +688,19 @@ def test_forever_progression_carries_full_node_and_ignores_old_task_row():
     row(-2, 1, 7 * 131072 + 4 * 1024 + int(TaskFlags.PREPARED))
     assert decode_travel(image).forever_step == ForeverStep.NONE
 
+    row(0, 4, 47)
+    row(8, 12, base[8] - 16)
+    row(-2, 1, 131072 + 3 * 1024 + int(TaskFlags.PREPARED))
+    row(-3, 3, 475)
+    row(-20, 12, 3 * 8192 + 1)
+    row(-21, 3, 2 * 1024 + 10)
+    drops = decode_travel(image)
+    assert drops.objective_action == ObjectiveAction.COMBAT and drops.counted_drop
+    assert drops.objective_target == 475 and drops.objective_progress == (2, 10)
+    assert not drops.objective_resource
+    row(-3, 2, 475)
+    assert not decode_travel(image).counted_drop
+
 
 def test_dropped_skyriding_flag_after_landing_dismounts_instead_of_stopping():
     # 20261118T145120: the gliding-derived flag drops mid-dismount while still

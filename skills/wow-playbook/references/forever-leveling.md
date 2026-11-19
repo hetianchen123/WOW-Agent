@@ -26,6 +26,12 @@
 - 猎人暂按兽王开局，从 10 级起先安排致命守护，计划 5 级后加一阶强化复活宠物。依有效配置、候选节点对应技能和可购买状态决定动作。存在其他暂存变更时等原生状态。点数以已生效等级上升且配置没有暂存变更为准，日志记录 `TALENT_SPENT`。 [无限服天赋 API](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/SharedTraitsDocumentation.lua)
 - 猎人输出宏只使用角色技能书已学技能，重复输出用 `!自动射击` 保持自动射击开启。升级刷新动作栏时先核对 WowAgent 宏的原内容，等待写入后重读宏体和 4 键。已有其他动作时保留。
 
+## 从北郡接到闪金镇
+
+- **代码已接入，实机待测**：原生任务 54 完成且满足最低等级后，候选任务包括 47 金砂交易、60 狗头人的蜡烛、40 鱼人的威胁。40 完成后接 35，走到艾尔文森林东桥向卫兵托马斯交付。开任务之前先核对 NPC 和对话任务编号。 [金砂交易](https://bindonforever.com/quest/47) · [狗头人的蜡烛](https://bindonforever.com/quest/60) · [鱼人的威胁](https://bindonforever.com/quest/40) · [进一步的忧虑](https://bindonforever.com/quest/35)
+- **离线回归**：47 和 60 使用原生任务物品计数。只选择已配置的狗头人矿工与地穴工做候选，尸体拾取后看物品计数。拾取普通掉落后计数未变时继续找怪，每次计数上涨会重置连续无掉落预算。 [狗头人矿工](https://bindonforever.com/npc/40) · [狗头人地穴工](https://bindonforever.com/npc/475)
+- **离线网格**：闪金镇旅店已从同版客户端构建。入口从治安官杜汉附近到威廉·匹斯特候选坐标规划 44.52 码路线。出口规划反向回到室外支撑，再交回室外寻路。进门、NPC 对话和交付仍待实机；本地网格复现沿用前述命令，替换为 `--phase quest:60:1 --roi -104 -9516 10 -9429 --output data/nav3d/forever-goldshire-inn`。
+
 ## 验证记录
 
 - **实测**：`20261119T143418-9adceb58` 脚本接取 783，任务日志确认 `ACTIVE`。最初的直线接近撞墙。

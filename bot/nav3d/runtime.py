@@ -130,12 +130,12 @@ class Nav3DCoordinator:
         if self.terminal is None:self.log('nav3d_stop',{'reason':reason,'reached_in_game':False})
         self.terminal=reason;return TravelCommand(outcome=reason)
 
-    def begin_exit(self,goal_xy,*,now,sample=None):
+    def begin_exit(self,goal_xy,*,now,sample=None,handoff=None):
         """Start a fresh bounded segment to a mesh exit toward goal_xy.
 
         The 2026-11-18 split policy keeps Nav3D for mesh-covered scenes and
-        hands open-field travel back to the legacy stack. Exit goals are always
-        off-mesh; the static collision frame is unchanged across quest phases,
+        hands open-field travel back to the legacy stack. An explicit outdoor
+        handoff can be inside mesh coverage. Static geometry spans quest phases,
         so a phase label change no longer stops this segment. Arrival emits
         nav3d_exit_reached instead of waiting for a task receipt.
         """
@@ -143,9 +143,17 @@ class Nav3DCoordinator:
         goal=tuple(map(float,goal_xy))
         if len(goal)!=2 or not all(math.isfinite(v) for v in goal):
             raise NavigationError('nav3d_exit_goal_invalid')
-        if self.tracker.candidates(goal):
-            raise NavigationError('nav3d_exit_goal_on_mesh')
-        candidates=mesh_exit_candidates(self.mesh,goal)
+        if handoff is None:
+            if self.tracker.candidates(goal):
+                raise NavigationError('nav3d_exit_goal_on_mesh')
+            candidates=mesh_exit_candidates(self.mesh,goal)
+        else:
+            point=tuple(map(float,handoff))
+            if len(point)!=2 or not all(math.isfinite(v) for v in point):
+                raise NavigationError('nav3d_exit_handoff_invalid')
+            candidates=self.tracker.candidates(point)
+            if len(candidates)!=1:
+                raise NavigationError('nav3d_exit_handoff_support_unconfirmed')
         if not candidates:raise NavigationError('nav3d_exit_point_unavailable')
         self.exit_goal=goal;self.exit_candidates=tuple(candidates)
         self.terminal=None

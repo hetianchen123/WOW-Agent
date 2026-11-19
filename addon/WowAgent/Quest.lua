@@ -1899,6 +1899,10 @@ local function GenericObjective(id, objectives, objective, index, objectName, kn
         local target = UnitGUID and CreatureID(Public(UnitGUID("target")))
         return 1, target == resourceProfile.combatNPC and target or 0
     end
+    if resourceProfile and resourceProfile.lootNPCs and objective and Public(objective.type) == "item" then
+        local target = UnitGUID and CreatureID(Public(UnitGUID("target")))
+        return 1, target and resourceProfile.lootNPCs[target] and target or 0
+    end
     if IsResourceObjective(id, objectives, index) then
         local target = UnitGUID and CreatureID(Public(UnitGUID("target")))
         if target and UnitCanAttack and Public(UnitCanAttack("player", "target")) == true then
@@ -2269,7 +2273,9 @@ local function UpdateNavigation()
     writeMinimap[2](1, mapSize or 0)
     writeMinimap[3](2, mapInfo and mapInfo + navSequence * 2048 or 0)
     writeSky(0, ascent + halt * 16 + (pitch or 0) * 256 + (dismount or 0) * 16384)
-    writeClick(navigation.foreverProgress and navigation.foreverProgress.code or 2, click)
+    -- Combat action 1 with row kind 3 carries a counted item-drop objective.
+    writeClick(navigation.foreverProgress and navigation.foreverProgress.code
+        or (clickKey == 1 and data and data.lootNPCs and entry and Public(entry.type) == "item" and 3 or 2), click)
     writeTask(1, task + navSequence * 1024 + clickKey * 131072)
     local roundStatus = 0
     if round then
@@ -2304,7 +2310,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 293 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 294 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4

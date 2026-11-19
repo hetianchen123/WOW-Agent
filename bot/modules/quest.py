@@ -59,6 +59,9 @@ FOREVER_TARGET_LEVEL = 15
 NORTHSHIRE_ABBEY_ENTRY = (0.485587, 0.422709)
 NORTHSHIRE_ABBEY_TURN_INS = frozenset({783, 7, 15, 21})
 NORTHSHIRE_ABBEY_PICKUPS = frozenset({7, 15, 21, 54})
+GOLDSHIRE_INN = (0.433, 0.658)
+GOLDSHIRE_INN_EXTERIOR = (0.422, 0.659)
+GOLDSHIRE_HANDOFF_XY = (-70.7, -9464.9)
 NPC_SCAN_ANGLES = tuple(math.radians(angle) for angle in range(0, 360, 30))
 NPC_MARKER_APPROACH_YARDS = 8
 NPC_MARKER_APPROACH_RADIUS = 1.25
@@ -273,8 +276,8 @@ class RunQuests(State):
         self.forever_target_level_verified = False
         self.forever_entry = None
         self.forever_entry_trip = None
-        self.forever_abbey_segment = None
-        self.forever_abbey_complete = set()
+        self.forever_building_segment = None
+        self.forever_building_complete = set()
         self.forever_progress = None
         self.forever_progress_trip = None
         self.forever_progress_since = None
@@ -939,89 +942,110 @@ class RunQuests(State):
 
         return self.travel_to_destination(ctx, now, navigation, heading)
 
-    def forever_abbey_mode(self, ctx, nav):
+    def forever_building_mode(self, ctx, nav):
         if (not nav or ctx.cfg.game_version != "1.60.1" or nav.map_id != 1429 or self.travel_only
                 or not nav.position or not nav.destination or not nav.world_size
-                or (nav.quest_id, nav.phase) in self.forever_abbey_complete):
+                or (nav.quest_id, nav.phase) in self.forever_building_complete):
             return None
         router = GridRouter(*nav.world_size)
+        config = getattr(ctx.cfg, "nav3d", None)
+        if config and config.forever_goldshire_mesh and config.forever_goldshire_mesh_id:
+            inn_target = nav.quest_id == 60 and nav.phase in {QuestState.PENDING, QuestState.READY}
+            inn_exit = (nav.quest_id, nav.phase, "goldshire", "exit") == self.forever_building_segment
+            if inn_target and router.distance(nav.position, GOLDSHIRE_INN) <= 64:
+                return "goldshire", "enter"
+            inside_inn = (not nav.flags & TravelFlags.OUTDOORS
+                          and router.distance(nav.position, GOLDSHIRE_INN) <= 32)
+            if not inn_target and (inn_exit or inside_inn) and router.distance(nav.destination, GOLDSHIRE_INN) > 25:
+                return "goldshire", "exit"
         nearby = router.distance(nav.position, NORTHSHIRE_ABBEY_ENTRY) <= 64
-        indoor = not nav.flags & TravelFlags.OUTDOORS or self.forever_abbey_segment == (nav.quest_id, nav.phase, "exit")
+        indoor = (not nav.flags & TravelFlags.OUTDOORS
+                  or self.forever_building_segment == (nav.quest_id, nav.phase, "abbey", "exit"))
         if nearby and indoor and router.distance(nav.destination, NORTHSHIRE_ABBEY_ENTRY) > 55:
-            return "exit"
+            return "abbey", "exit"
         if nearby and (
                 nav.phase == QuestState.READY and nav.quest_id in NORTHSHIRE_ABBEY_TURN_INS
                 or nav.phase == QuestState.PENDING and nav.quest_id in NORTHSHIRE_ABBEY_PICKUPS):
-            return "enter"
+            return "abbey", "enter"
 
-    def approach_forever_abbey(self, ctx, now, nav, heading):
-        mode = self.forever_abbey_mode(ctx, nav)
-        if not mode:
+    def approach_forever_building(self, ctx, now, nav, heading):
+        choice = self.forever_building_mode(ctx, nav)
+        if not choice:
             return False
+        scene, mode = choice
+        event_prefix = f"forever_{scene}"
         if mode == "enter" and all(nav.task & flag for flag in (
                 TaskFlags.NPC_SELECTED, TaskFlags.NPC_RANGE_KNOWN, TaskFlags.NPC_WITHIN_5_YARDS)):
-            self.forever_abbey_complete.add((nav.quest_id, nav.phase))
+            self.forever_building_complete.add((nav.quest_id, nav.phase))
             return False
         pose = self.nav3d_sample
         if (pose is None or pose.position_xy is None or pose.goal_xy is None or pose.goal_world_id != 0
                 or not pose.grounded or not pose.bindings_verified
                 or (pose.sequence, pose.world_id, pose.ui_map_id, pose.quest_id, pose.phase, pose.client_build)
                 != (nav.sequence, 0, nav.map_id, nav.quest_id, int(nav.phase), 70959)):
-            self.wait_for_data(ctx, now, "forever_abbey_pose_unavailable")
+            self.wait_for_data(ctx, now, event_prefix + "_pose_unavailable")
             return True
         from ..nav3d import NavigationError
         from ..nav3d.runtime import Nav3DCoordinator
-        segment = nav.quest_id, nav.phase, mode
-        if segment != self.forever_abbey_segment:
-            self.camera.cancel(ctx, now, "forever_abbey_mesh")
+        segment = nav.quest_id, nav.phase, scene, mode
+        if segment != self.forever_building_segment:
+            self.camera.cancel(ctx, now, event_prefix + "_mesh")
             previous = self.forever_entry
+            previous_scene = self.forever_building_segment and self.forever_building_segment[2]
             self.forever_entry_trip = None
-            self.forever_abbey_segment = segment
+            self.forever_building_segment = segment
             try:
-                self.forever_entry = Nav3DCoordinator(replace(ctx.cfg.nav3d, mode="nav3d"), now=now,
+                config = replace(ctx.cfg.nav3d, mode="nav3d")
+                if scene == "goldshire":
+                    config = replace(config, mesh=config.forever_goldshire_mesh, alignment_file="",
+                                     supervised_trial_mesh_id=config.forever_goldshire_mesh_id)
+                self.forever_entry = Nav3DCoordinator(config, now=now,
                     log_event=ctx.log_event, resume_runs=DATA_DIR / "runs",
                     scene_phases=(f"quest:{nav.quest_id}:{int(nav.phase)}",) if mode == "enter" else (),
                     edge_tolerance=.14)
                 if mode == "exit":
-                    if previous and previous.tracker.last and math.dist(previous.tracker.last[:2], pose.position_xy) <= 2:
+                    if (previous and previous_scene == scene and previous.tracker.last
+                            and math.dist(previous.tracker.last[:2], pose.position_xy) <= 2):
                         self.forever_entry.tracker.last = previous.tracker.last
-                    self.forever_entry.begin_exit(pose.goal_xy, now=now, sample=pose)
+                    handoff = GOLDSHIRE_HANDOFF_XY if scene == "goldshire" else None
+                    self.forever_entry.begin_exit(pose.goal_xy, now=now, sample=pose, handoff=handoff)
             except (OSError, ValueError, NavigationError) as exc:
-                self.stop(ctx, "forever_abbey_mesh_unavailable:" + str(exc))
+                self.stop(ctx, event_prefix + "_mesh_unavailable:" + str(exc))
                 return True
         coordinator = self.forever_entry
         if mode == "enter" and coordinator.sequence is None:
             tracker = coordinator.tracker
             support = tracker.candidates(pose.position_xy, edge_tolerance=tracker.edge_tolerance)
-            # Exterior starts require a unique surface. The open approach was
-            # checked offline to connect to the abbey's lowest goal surface.
+            # Each mesh has an exterior point with a complete route to the
+            # lowest candidate surface at the indoor quest giver.
             if self.forever_entry_trip is not None or len(support) != 1:
                 if self.forever_entry_trip is None:
-                    self.forever_entry_trip = QuestTrip(nav.world_size, NORTHSHIRE_ABBEY_ENTRY,
+                    exterior = GOLDSHIRE_INN_EXTERIOR if scene == "goldshire" else NORTHSHIRE_ABBEY_ENTRY
+                    self.forever_entry_trip = QuestTrip(nav.world_size, exterior,
                         ctx.cfg.navigation.facing_convention, arrival_radius=.9, walk_only=True,
                         local_travel=True, log_event=ctx.log_event)
-                    ctx.log_event("forever_abbey_mesh_rejoin", {"position": pose.position_xy,
-                                                              "exterior_point": NORTHSHIRE_ABBEY_ENTRY})
+                    ctx.log_event(event_prefix + "_mesh_rejoin", {"position": pose.position_xy,
+                                                                 "exterior_point": exterior})
                 command = self.forever_entry_trip.step(now, nav, heading, heading_age=ctx.heading_age())
                 self.apply_travel_command(ctx, command)
                 if command.outcome != "arrived":
                     if command.outcome:
-                        self.stop(ctx, "forever_abbey_rejoin_" + command.outcome)
+                        self.stop(ctx, event_prefix + "_rejoin_" + command.outcome)
                     return True
                 self.forever_entry_trip = None
                 if len(support) != 1:
-                    self.stop(ctx, "forever_abbey_rejoin_support_unconfirmed")
+                    self.stop(ctx, event_prefix + "_rejoin_support_unconfirmed")
                     return True
         self.unusable_since = self.unusable_reason = None
         command = coordinator.step(now, pose, nav,
             target_receipt=building_target_receipt(nav, self.observation, now), travel_only=True)
         self.apply_travel_command(ctx, command)
         if command.outcome in {"nav3d_route_arrived", "nav3d_target_confirmed", "nav3d_exit_reached"}:
-            self.forever_abbey_complete.add((nav.quest_id, nav.phase))
+            self.forever_building_complete.add((nav.quest_id, nav.phase))
             self.arrived = mode == "enter"
             self.trip = None
-            ctx.log_event("forever_abbey_handoff", {"position": pose.position_xy, "basis": command.outcome,
-                                                   "next": "interaction" if self.arrived else "outdoor_travel"})
+            ctx.log_event(event_prefix + "_handoff", {"position": pose.position_xy, "basis": command.outcome,
+                                                     "next": "interaction" if self.arrived else "outdoor_travel"})
         elif command.outcome:
             self.stop(ctx, command.outcome)
         return True
@@ -1756,6 +1780,7 @@ class RunQuests(State):
         progress = (navigation.objective_progress if objective_index and sample.state == QuestState.ACTIVE
                     else sample.progress)
         resource = navigation.objective_resource if objective_index else sample.objective == Objective.RESOURCE
+        counted_drop = bool(navigation and navigation.phase == sample.state and navigation.counted_drop)
         measurable = progress[1] > 0 if objective_index else sample.objective in {Objective.COUNTED, Objective.RESOURCE}
         if self.accept_only and sample.state in {QuestState.ACTIVE, QuestState.READY}:
             self.set_forward(ctx, False)
@@ -1787,7 +1812,7 @@ class RunQuests(State):
         if (navigation and navigation.map_id == self.map_id and navigation.quest_id == frame.quest_id == step.quest_id
                 and navigation.phase == frame.state and frame.state in {QuestState.PENDING, QuestState.ACTIVE, QuestState.READY}
                 and (not self.require_prepared or navigation.task & TaskFlags.PREPARED)
-                and not self.forever_abbey_mode(ctx, navigation)
+                and not self.forever_building_mode(ctx, navigation)
                 and self.restore_camera(ctx, now, navigation, dialogue_open=frame.dialogue != Dialogue.CLOSED,
                                         in_combat=in_combat)):
             return
@@ -2029,7 +2054,7 @@ class RunQuests(State):
             self.phase_started = self.last_progress = now
             self.planned_phase = None
             self.progress = progress
-            self.hunt = QuestHunt(targets, resource=resource) if hunting else None
+            self.hunt = QuestHunt(targets, resource=resource, counted_drop=counted_drop) if hunting else None
             self.object_probe, self.object_probe_sequence = 0, None
             self.object_points = None
             self.object_target, self.object_targets_tried = None, []
@@ -2050,7 +2075,7 @@ class RunQuests(State):
             if resource and self.phase == QuestState.ACTIVE:
                 ctx.log_event("quest_resource_progress", {"id": step.quest_id, "percent": progress[0] / 10})
         if hunting and self.hunt is None:
-            self.hunt = QuestHunt(targets, resource=resource)
+            self.hunt = QuestHunt(targets, resource=resource, counted_drop=counted_drop)
         elif not hunting:
             self.hunt = None
         if now - self.phase_started > (600 if self.auto_route else 150):
@@ -2138,7 +2163,7 @@ class RunQuests(State):
             if signature != self.action_signature:
                 self.action_signature, self.attempts = signature, 0
             return self.act(ctx, step.dialog_key, now)
-        if navigation and not in_combat and self.approach_forever_abbey(ctx, now, navigation, heading):
+        if navigation and not in_combat and self.approach_forever_building(ctx, now, navigation, heading):
             return
         if (navigation and not in_combat and not mount_tutorial and self.terrain is None
                 and self.process_building_access(ctx,now,navigation,heading)):
@@ -3441,7 +3466,7 @@ class RunQuests(State):
             else:
                 self.loot_attempt = (fight, now, current_loot_epoch,
                                      navigation.corpse_lootable is True, attempts + 1)
-            if self.hunt.resource:
+            if self.hunt.requires_loot:
                 self.hunt.credit_deadline = max(self.hunt.credit_deadline or 0, now + 4)
             ctx.log_event("quest_loot", {"target": fight.target_id})
             ctx.input.tap("f")
@@ -3507,6 +3532,9 @@ class RunQuests(State):
         elif status == "resource_try_next":
             ctx.log_event("quest_resource_try_next", {"id": self.steps[self.index].quest_id,
                 "percent": progress / 10, "uncredited_kills": self.hunt.uncredited_kills})
+        elif status == "drop_try_next":
+            ctx.log_event("quest_drop_try_next", {"id": self.steps[self.index].quest_id,
+                "count": progress, "uncredited_kills": self.hunt.uncredited_kills})
         elif status == "uncredited_target":
             ctx.log_event("quest_combat_uncredited_target", {"id": self.steps[self.index].quest_id,
                 "target": sample.target_id, "progress": progress, "consecutive": self.hunt.uncredited_kills})
