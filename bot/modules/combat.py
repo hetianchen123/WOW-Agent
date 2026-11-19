@@ -23,6 +23,11 @@ def same_combat_character(previous, sample):
             and previous[:-1] == current[:-1] and current[-1] > previous[-1])
 
 
+def same_output_binding(previous_key, sample):
+    return (previous_key == sample.key or client_edition(sample.build) == "forever" and sample.class_id == 3
+            and {previous_key, sample.key} == {4, 5})
+
+
 class Fight:
     def __init__(self, target_id: int, *, approach=False, defense=False, immediate=False):
         self.target_id = target_id
@@ -76,8 +81,12 @@ class Fight:
             return "target_defeated" if self.presses else "target_already_dead", None
         if not sample.key_verified or not 1 <= sample.key <= 9:
             return "unverified_action_binding", None
-        if self.key is not None and sample.key != self.key:
+        if self.key is not None and not same_output_binding(self.key, sample):
             return "action_binding_changed", None
+        if self.key is not None and sample.key != self.key:
+            self.pending_action_at, self.no_receipts = None, 0
+            self.turn_goal, self.facing_probed = None, False
+            self.last_facing_error = sample.facing_error
         starting = self.identity is None
         self.identity, self.state_epoch, self.key = sample.identity, sample.state_epoch, sample.key
         if starting:
@@ -275,7 +284,7 @@ class QuestHunt:
         if not sample.key_verified or not 1 <= sample.key <= 9:
             return "unverified_action_binding", None
         binding = (sample.identity, sample.key)
-        if self.binding is not None and (sample.key != self.binding[1]
+        if self.binding is not None and (not same_output_binding(self.binding[1], sample)
                                          or not same_combat_character(self.binding[0], sample)):
             return "action_binding_changed", None
         self.binding = binding
@@ -285,6 +294,7 @@ class QuestHunt:
         if self.credit_deadline is not None:
             if progress > self.baseline:
                 self.credit_deadline, self.fight = None, None
+                self.uncredited_kills = 0
                 self.reset_search(now)
                 return "credited", None
             if now < self.credit_deadline:
@@ -296,12 +306,19 @@ class QuestHunt:
                     self.reset_search(now)
                     return "resource_try_next", None
                 return "resource_no_progress", None
+            if (not in_combat and client_edition(sample.build) == "forever" and self.fight
+                    and sample.target_id == self.fight.target_id and sample.target_dead):
+                self.uncredited_kills += 1
+                if self.uncredited_kills < 4:
+                    self.credit_deadline, self.fight = None, None
+                    self.reset_search(now)
+                    return "uncredited_target", None
             return "no_quest_credit", None
 
         matches = sample.target_id in self.targets or (not self.targets and verified_target != 0
                                                         and sample.target_id == verified_target)
         if self.fight is None:
-            if matches and not sample.target_dead and not sample.target_danger:
+            if matches and not sample.target_dead and not sample.target_danger and not sample.tap_denied:
                 self.fight = Fight(sample.target_id, approach=True)
                 self.started_at, self.baseline, self.observed_progress = now, progress, progress
             elif in_combat:
@@ -374,7 +391,8 @@ class QuestDefense:
         if not client_edition(sample.build) or not all(sample.identity[:4]):
             return "unknown_client_profile", None
         binding = (sample.identity, sample.key)
-        if self.binding and (sample.key != self.binding[1] or not same_combat_character(self.binding[0], sample)):
+        if self.binding and (not same_output_binding(self.binding[1], sample)
+                             or not same_combat_character(self.binding[0], sample)):
             return "action_binding_changed", None
         self.binding = binding
 

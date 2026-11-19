@@ -13,6 +13,30 @@ from bot.perception import channel_spec as wire
 from bot.perception.combat_channel import CombatSample, decode_combat
 
 
+def test_forever_hunter_can_change_verified_output_at_melee_range():
+    ranged = CombatSample(3, 1, 18, 70959, 1485, 1, 0, 6, False, True, False, 4, 8, 1,
+                         in_range=True)
+    fight = Fight(6, immediate=True)
+    assert fight.step(0, ranged) == ("action", "4")
+    melee = replace(ranged, key=5, sequence=2, level=2)
+    assert fight.step(1, melee) == ("action", "5")
+    assert fight.step(2, replace(melee, key=6, sequence=3))[0] == "action_binding_changed"
+
+
+def test_forever_hunt_resumes_after_verified_dead_target_without_credit():
+    sample = CombatSample(3, 1, 18, 70959, 1485, 1, 0, 6, False, True, False, 4, 8, 1,
+                          in_range=True)
+    hunt = QuestHunt(frozenset({6}))
+    assert hunt.step(0, replace(sample, tap_denied=True), 2, False) == ("select_target", "tab")
+    assert hunt.fight is None
+    assert hunt.step(1, replace(sample, sequence=2), 2, False)[0] == "waiting"
+    assert hunt.step(2, replace(sample, sequence=3), 2, False) == ("action", "4")
+    corpse = replace(sample, sequence=4, target_dead=True)
+    assert hunt.step(3, corpse, 2, False)[0] == "waiting"
+    assert hunt.step(8, replace(corpse, sequence=5), 2, False)[0] == "uncredited_target"
+    assert hunt.fight is None and hunt.uncredited_kills == 1
+
+
 def test_combat_rows_validate_before_using_any_state():
     rows = [8 + 1 * 32 + 1 * 8192, 70783, 63 + 80 * 4096, 87, 12345,
             2 + 5 * 8 + 8 * 128 + 100 * 8192]

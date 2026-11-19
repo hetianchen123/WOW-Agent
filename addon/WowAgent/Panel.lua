@@ -794,7 +794,8 @@ local function BuildPanel()
         return {Choice(0, "只绑定任务道具"), Choice(1, "自动使用无目标道具")}
     end, function() return 0 end)
     Label(navigation, "W/S/方向键/空格移动 · Tab 选敌 · K 选 NPC · F 互动和拾取 · J 任务道具", 0, 277, 595)
-    Label(navigation, "1 输出 · 5–8 坐骑 · 9 对话 · L 拾回 · O 继续拾回。准备后从键鼠菜单启动。", 0, 303, 595)
+    Label(navigation, WowAgent.Forever and "4 远程 · 5 近战 · 9 对话 · F4 职业成长。准备后从键鼠菜单启动。"
+        or "1 输出 · 5–8 坐骑 · 9 对话 · L 拾回 · O 继续拾回。准备后从键鼠菜单启动。", 0, 303, 595)
 
     local visual = NewTab(6, "视觉界面")
     Label(visual, "临时收起遮挡画面的 UI，动作栏快捷键保持可用。", 0, 7, 590)

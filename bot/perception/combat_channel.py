@@ -44,6 +44,7 @@ class CombatSample:
     line_of_sight_blocked: bool = False
     target_danger: TargetDanger = TargetDanger(0)
     cast_epoch: int | None = None
+    tap_denied: bool = False
 
     @property
     def identity(self) -> tuple[int, ...]:
@@ -78,12 +79,14 @@ def decode_combat(img: np.ndarray) -> CombatSample | None:
             facing_error = (frame[1] >> 16) & 7
             turn_verified = bool(frame[1] & 524288)
     in_range, previous_target_epoch = None, None
+    tap_denied = False
     if offset >= 2 * spec.REGION_H:
         frame = spec.decode_frame(spec.sample_nibbles(img, 0, offset - 2 * spec.REGION_H))
         if frame and frame[0] == 8 and frame[1] >> 10 == sequence:
             in_range = {1: True, 2: False}.get(frame[1] & 3)
             epoch = (frame[1] >> 2) & 127
             previous_target_epoch = epoch - 1 if 1 <= epoch <= 64 else None
+            tap_denied = bool(frame[1] & 512)
     target_health, line_of_sight_blocked, target_danger = None, False, TargetDanger(0)
     if offset >= 3 * spec.REGION_H:
         frame = spec.decode_frame(spec.sample_nibbles(img, 0, offset - 3 * spec.REGION_H))
@@ -103,5 +106,5 @@ def decode_combat(img: np.ndarray) -> CombatSample | None:
         bool(status & 1), bool(status & 2), bool(status & 4),
         (status >> 3) & 15, (status >> 7) & 63, sequence, bool(spec_level & 524288),
         facing, facing_error, turn_verified, in_range, previous_target_epoch, target_health, line_of_sight_blocked,
-        target_danger, cast_epoch,
+        target_danger, cast_epoch, tap_denied,
     )

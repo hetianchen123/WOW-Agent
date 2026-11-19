@@ -2304,7 +2304,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 291 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 293 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4
@@ -2388,6 +2388,11 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
             if not spell then
                 WowAgent.StopQuestNavigation()
                 return print("WowAgent：无限服猎人的已学输出技能尚未核对。")
+            end
+            local melee = forever.MeleeSpell(support.LearnedSpells())
+            local meleeSlot = melee and support.BoundSlot(5)
+            if meleeSlot and not select(1, support.ReadAction(meleeSlot)) then
+                actions[#actions + 1] = {kind = "forever_melee", id = melee, key = 5, optional = true}
             end
             actions[#actions + 1] = {kind = "forever", id = spell, key = 4}
         else
@@ -2482,6 +2487,8 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
                 C_Timer.After(.4, function() Prepare(index + 1) end)
             elseif reason == "macro_pending" and (retries or 0) < 2 then
                 C_Timer.After(.8, function() Prepare(index, (retries or 0) + 1) end)
+            elseif action.optional then
+                C_Timer.After(.4, function() Prepare(index + 1) end)
             else
                 print("WowAgent：寻路准备停在数字键 " .. action.key .. "，请查看上一条提示。")
                 WowAgent.StopQuestNavigation()

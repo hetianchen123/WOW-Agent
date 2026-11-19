@@ -2,6 +2,7 @@
 local clock, level, money, combat = 1, 2, 10, false
 local learned, rank, staged, buys, purchases, commits = {}, 0, false, 0, 0, 0
 local trainerVisible, status, target = false, "available", 248415
+local gossipVisible, optionIcon, gossipSelection = false, 132049, nil
 local events
 
 UIParent, SlashCmdList = {}, {}
@@ -32,6 +33,12 @@ function CreateFrame(kind, name)
     return frame
 end
 ClassTrainerFrame = {IsShown = function() return trainerVisible end}
+GossipFrame = {IsShown = function() return gossipVisible end}
+C_GossipInfo = {
+    GetOptions = function() return {{icon = optionIcon, gossipOptionID = 300, status = 0}} end,
+    SelectOption = function(id) gossipSelection = id end,
+}
+Enum = {GossipOptionStatus = {Available = 0}}
 C_Map = {
     GetBestMapForUnit = function() return 1429 end,
     GetPlayerMapPosition = function() return {GetXY = function() return .51, .41 end} end,
@@ -72,6 +79,14 @@ end
 local plan = {foreverTrain = true}
 forever.BindProgression({}, plan)
 assert(Observe(plan) == 1)
+gossipVisible = true
+Click()
+assert(gossipSelection == nil)
+optionIcon, plan.foreverSkipLevel, plan.foreverReceipt = 132058, nil, nil
+assert(Observe(plan) == 3)
+Click()
+assert(gossipSelection == 300 and buys == 0)
+gossipVisible = false
 trainerVisible, target = true, 999
 events:OnEvent("TRAINER_SHOW")
 Click()

@@ -10,10 +10,11 @@ WowAgent.Forever = forever
 -- confirm the giver, dialogue quest ID and acceptance or reward outcome.
 forever.questData = {
     map = 1429,
-    npcs = {[823] = {48.2, 42.9}, [197] = {48.9, 41.6}},
+    npcs = {[823] = {48.2, 42.9}, [197] = {48.9, 41.6}, [240] = {42.2, 65.9}},
     npcNames = {
         [823] = {enUS = "Deputy Willem", zhCN = "维里副队长"},
         [197] = {enUS = "Marshal McBride", zhCN = "治安官玛克布莱德"},
+        [240] = {enUS = "Marshal Dughan", zhCN = "治安官杜汉"},
         [248415] = {enUS = "Tordrin Sternblade"},
         [251507] = {enUS = "Josephine Carson"},
     },
@@ -21,6 +22,11 @@ forever.questData = {
         [783] = {starter = true, level = 1, pickup = 823, turnIn = 197, arrival = true},
         [7] = {level = 1, after = {[783] = true}, pickup = 197, turnIn = 197,
             objectivePoint = {50, 36}, combatNPC = 6},
+        [15] = {level = 1, after = {[7] = true}, pickup = 197, turnIn = 197,
+            objectivePoint = {49, 35.7}, combatNPC = 257},
+        [21] = {level = 1, after = {[15] = true}, pickup = 197, turnIn = 197,
+            objectivePoint = {48.4, 29}, combatNPC = 80},
+        [54] = {level = 1, after = {[21] = true}, pickup = 197, turnIn = 240, arrival = true},
     },
 }
 
@@ -49,6 +55,19 @@ function forever.OutputMacro(primary, spells)
     if auto then body = body .. "\n/cast [harm,nodead] !" .. auto end
     if primary ~= 75 then body = body .. "\n/cast [harm,nodead] " .. spell end
     return #body <= 255 and body or nil
+end
+
+function forever.MeleeSpell(spells)
+    for _, id in ipairs({14260, 2973}) do
+        if spells[id] then return id end
+    end
+end
+
+function forever.MeleeMacro(spell, spells)
+    if spell ~= forever.MeleeSpell(spells) then return end
+    local name = spells[spell]
+    if type(name) ~= "string" or name == "" or name:find("[%z\1-\31\127;%[%]]") then return end
+    return "#showtooltip " .. name .. "\n/startattack [harm,nodead]\n/cast [harm,nodead] " .. name
 end
 
 local function Read(api, ...)
@@ -98,7 +117,7 @@ local function TrainerOption(trainer)
     for _, option in ipairs(Read(C_GossipInfo.GetOptions) or {}) do
         -- The trainer uses Blizzard's trainer gossip icon. Match the option on
         -- the verified NPC and require a unique, current ID.
-        if (option.icon == 132049 or option.icon == 136244)
+        if option.icon == 132058
             and type(option.gossipOptionID) == "number"
             and (not (Enum and Enum.GossipOptionStatus) or option.status == Enum.GossipOptionStatus.Available) then
             if found then return end
@@ -119,6 +138,7 @@ local function TalentChoice()
     local points = Read(UnitCharacterPoints, "player")
     if type(points) == "number" and points <= 0 then return end
     if Read(C_Traits.ConfigHasStagedChanges, config) ~= false then return end
+    if C_Traits.CanEditConfig and Read(C_Traits.CanEditConfig, config) ~= true then return end
     for _, candidate in ipairs(talents) do
         local id, spell, goal = unpack(candidate)
         local node = TalentNode(config, id)

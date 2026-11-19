@@ -270,6 +270,7 @@ class RunQuests(State):
         self.combat_frame = None
         self.last_combat_profile = None
         self.forever_level_receipt = None
+        self.forever_target_level_verified = False
         self.forever_entry = None
         self.forever_entry_trip = None
         self.forever_abbey_segment = None
@@ -1645,14 +1646,11 @@ class RunQuests(State):
             previous = self.forever_level_receipt
             if previous is None or level != previous[0]:
                 ctx.log_event("forever_level_observed", {"level": level, "sequence": sequence})
-            if level >= FOREVER_TARGET_LEVEL:
-                self.set_forward(ctx, False)
-                if previous and previous[0] == level and previous[1] != sequence:
-                    ctx.stats["forever_level"] = level
-                    ctx.log_event("forever_level_reached", {"level": level, "sequence": sequence})
-                    self.OUTCOME = "completed"
-                self.forever_level_receipt = level, sequence
-                return
+            if (level >= FOREVER_TARGET_LEVEL and not self.forever_target_level_verified
+                    and previous and previous[0] == level and previous[1] != sequence):
+                self.forever_target_level_verified = True
+                ctx.stats["forever_level"] = level
+                ctx.log_event("forever_level_reached", {"level": level, "sequence": sequence})
             self.forever_level_receipt = level, sequence
         if navigation and navigation.addon_build != getattr(self, "loaded_addon_build", None):
             self.loaded_addon_build = navigation.addon_build
@@ -1875,6 +1873,10 @@ class RunQuests(State):
             return self.suspend_task(ctx, now, navigation, in_combat)
         if (prepared and not in_combat and self.require_prepared and ctx.cfg.game_version == "1.60.1"
                 and self.maintain_forever_character(ctx, now, navigation, heading, frame.dialogue)):
+            return
+        if self.forever_target_level_verified and prepared and not in_combat:
+            self.set_travel_keys(ctx, frozenset())
+            self.OUTCOME = "completed"
             return
         if self.round_stage != RoundStage.NONE:
             if self.round_stage == RoundStage.DONE:
@@ -3505,6 +3507,9 @@ class RunQuests(State):
         elif status == "resource_try_next":
             ctx.log_event("quest_resource_try_next", {"id": self.steps[self.index].quest_id,
                 "percent": progress / 10, "uncredited_kills": self.hunt.uncredited_kills})
+        elif status == "uncredited_target":
+            ctx.log_event("quest_combat_uncredited_target", {"id": self.steps[self.index].quest_id,
+                "target": sample.target_id, "progress": progress, "consecutive": self.hunt.uncredited_kills})
         elif status == "target_not_found":
             if self.search_quest_area(ctx, navigation):
                 self.hunt.reset_search()

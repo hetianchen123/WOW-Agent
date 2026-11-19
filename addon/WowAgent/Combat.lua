@@ -606,8 +606,16 @@ local function Update()
         and Public(GetBindingAction("RIGHT", true)) == "TURNRIGHT"
     writeFacing(9, angle + sequence * 512 + facingError * 65536 + (turnVerified and 524288 or 0))
     local range = flags % 4 == 2 and target > 0 and not dead and AttackRange() or 0
+    local key = armed and armed.key or 0
+    if range ~= 1 and flags % 4 == 2 and target > 0 and not dead and armed.meleeSpell
+        and ActionMatches(5, nil, armed.meleeBody) then
+        local check = C_Spell and C_Spell.IsSpellInRange or IsSpellInRange
+        local melee = ReadRangeValue(check, armed.meleeSpell, "target")
+        if melee == true or melee == 1 then range, key = 1, 5 end
+    end
     local restoredEpoch = dead and guid and guid == previousTargetGUID and previousTargetEpoch + 1 or 0
-    writeReach(8, range + restoredEpoch * 4 + sequence * 1024)
+    local tapDenied = target > 0 and not dead and UnitIsTapDenied and Public(UnitIsTapDenied("target")) == true
+    writeReach(8, range + restoredEpoch * 4 + (tapDenied and 512 or 0) + sequence * 1024)
     local health, obstructed, danger = 0, 0, 0
     if target > 0 and not dead then
         local current = UnitHealth and Public(UnitHealth("target"))
@@ -620,7 +628,6 @@ local function Update()
     end
     writeFeedback(7, health + obstructed + sequence * 256 + danger * 32768)
     writeReceipt(6, castEpoch + stateEpoch * 128 + sequence * 8192)
-    local key = armed and armed.key or 0
     local info = flags + key * 8 + stateEpoch * 128 + sequence * 8192
     local values = {p.class + p.race * 32 + p.project * 8192, p.build,
         specLevel, p.config, target, info}
@@ -636,6 +643,14 @@ local function ArmAction(key, action, body)
         return
     end
     armed = {key = tonumber(key), spell = action, body = body}
+    if tonumber(key) == 4 and WowAgent.Forever then
+        local spells = Spellbook()
+        local melee = WowAgent.Forever.MeleeSpell(spells)
+        if melee then
+            armed.meleeSpell = melee
+            armed.meleeBody = WowAgent.Forever.MeleeMacro(melee, spells)
+        end
+    end
     screen:Show()
     Update()
     print("WowAgent：战斗绑定已核对，数字键 " .. key)
@@ -659,6 +674,8 @@ local function MacroDefinition(kind, id)
         return "WAS" .. id, MacroBody(id), id
     elseif kind == "forever" and WowAgent.Forever then
         return "WAFHunter", WowAgent.Forever.OutputMacro(id, Spellbook()), id
+    elseif kind == "forever_melee" and WowAgent.Forever then
+        return "WAFMelee" .. id, WowAgent.Forever.MeleeMacro(id, Spellbook())
     end
     return UtilityMacro(kind, id)
 end
@@ -787,7 +804,7 @@ events:SetScript("OnEvent", function(_, event, unit, message, spellID)
         if not armed or Public(unit) ~= "player" then return end
         local spell = Public(spellID)
         if type(spell) ~= "number" then return end
-        local matches = spell == armed.spell
+        local matches = spell == armed.spell or spell == armed.meleeSpell
         local assist = C_AssistedCombat
         if armed.spell == "assist" and assist and assist.GetRotationSpells then
             local ok, spells = pcall(assist.GetRotationSpells)
