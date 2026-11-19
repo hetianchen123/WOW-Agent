@@ -2259,7 +2259,7 @@ local function UpdateNavigation()
         clickKey, click = 7, state.value or state.node or 0
         if click >= 1048576 then click = 0 end
         if state.trainer then navigation.foreverTraining = true end
-        if state.code == 11 or state.code == 12 then navigation.foreverTraining = nil end
+        if state.code == 2 or state.code == 11 or state.code == 12 then navigation.foreverTraining = nil end
     end
     if WowAgent.WriteNav3D then
         WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap,
@@ -2310,7 +2310,7 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 294 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 295 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4

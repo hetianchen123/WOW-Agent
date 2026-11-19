@@ -82,11 +82,14 @@ function forever.MeleeMacro(spell, spells)
     return "#showtooltip " .. name .. "\n/startattack [harm,nodead]\n/cast [harm,nodead] " .. name
 end
 
+local function Public(value)
+    if not issecretvalue or not issecretvalue(value) then return value end
+end
+
 local function Read(api, ...)
     if type(api) ~= "function" then return nil end
     local ok, first, second, third = pcall(api, ...)
-    if not ok or (issecretvalue and issecretvalue(first)) then return nil end
-    return first, second, third
+    if ok then return Public(first), Public(second), Public(third) end
 end
 
 local trainers = {
@@ -94,7 +97,7 @@ local trainers = {
     {id = 251507, map = 1429, x = .411, y = .662},
 }
 local talents = {{104960, 19552, 5}, {104972, 24443, 1}}
-local step = {travel = 1, gossip = 3, learn = 4, wait = 5, talent = 6, macro = 7,
+local step = {travel = 1, funds = 2, gossip = 3, learn = 4, wait = 5, talent = 6, macro = 7,
     learned = 8, spent = 9, updated = 10, done = 11, error = 12, finish = 13, trainerWait = 14}
 local trainerGUID
 
@@ -110,9 +113,18 @@ local function TrainerService(index)
     local name, availability = Read(GetTrainerServiceInfo, index)
     local cost, profession = Read(GetTrainerServiceCost, index)
     local info = C_TooltipInfo and Read(C_TooltipInfo.GetTrainerService, index)
-    local id = info and info.id
-    if type(id) ~= "number" or type(name) ~= "string" then return end
+    local id = type(info) == "table" and (not canaccesstable or canaccesstable(info)) and Public(info.id)
+    if type(id) ~= "number" or type(name) ~= "string" then id = nil end
     return id, availability, cost, profession
+end
+
+local function SaveTrainerCheck(plan, level, copper, confirmed)
+    local check = {level = level, copper = copper}
+    plan.foreverTrainerCheck = check
+    if confirmed and plan.foreverTrainerCharacter and WowAgentDB then
+        WowAgentDB.foreverTrainerChecks = WowAgentDB.foreverTrainerChecks or {}
+        WowAgentDB.foreverTrainerChecks[plan.foreverTrainerCharacter] = check
+    end
 end
 
 local function TrainerPanel(trainer)
@@ -228,8 +240,11 @@ local function State(plan, map)
         local config, node, rank = TalentChoice()
         if config then return {code = step.talent, config = config, node = node, rank = rank} end
     end
-    if level < 2 or not plan.foreverTrain or (plan.foreverCheckedLevel or 0) >= level - level % 2
-        or plan.foreverSkipLevel == level then return end
+    if level < 2 or not plan.foreverTrain or plan.foreverSkipLevel == level then return end
+    local money = Read(GetMoney)
+    local check = plan.foreverTrainerCheck
+    if check and check.level >= level - level % 2
+        and not (check.copper and type(money) == "number" and money >= check.copper) then return end
     local position = C_Map and Read(C_Map.GetPlayerMapPosition, map, "player")
     local x, y
     if position then x, y = Read(position.GetXY, position) end
@@ -237,24 +252,28 @@ local function State(plan, map)
     local trainer = y < .53 and trainers[1] or trainers[2]
     if map ~= trainer.map then return end
     if TrainerPanel(trainer) then
-        if Read(GetTrainerServiceTypeFilter, "available") == false then
+        local filter = Read(GetTrainerServiceTypeFilter, "available")
+        if filter == false or filter == 0 then
             return {code = step.trainerWait, trainer = trainer}
         end
-        local money = Read(GetMoney)
         local count = Read(GetNumTrainerServices)
         if count <= 0 or type(money) ~= "number" then return {code = step.trainerWait, trainer = trainer} end
-        local unavailable = false
+        local unverified, cheapest
         for i = 1, count do
             local id, availability, cost, profession = TrainerService(i)
-            if availability == "available" and not profession then
-                if id and type(cost) == "number" and cost >= 0 and cost <= money and not spells[id] then
+            if availability == nil then
+                unverified = true
+            elseif availability == "available" and not profession and (not id or not spells[id]) then
+                if not id or type(cost) ~= "number" or cost < 0 then
+                    unverified = true
+                elseif cost <= money then
                     return {code = step.learn, value = id, index = i, trainer = trainer}
-                elseif not id or not spells[id] then
-                    unavailable = true
+                else
+                    cheapest = math.min(cheapest or cost, cost)
                 end
             end
         end
-        return {code = step.finish, trainer = trainer, unavailable = unavailable}
+        return {code = step.finish, trainer = trainer, level = level, unverified = unverified, copper = cheapest}
     elseif TrainerOption(trainer) then
         return {code = step.gossip, trainer = trainer}
     end
@@ -288,10 +307,12 @@ function forever.BindProgression(owner, plan)
                 Report(plan, step.error, state.value)
             end
         elseif state.code == step.finish and TrainerPanel(state.trainer) then
-            local level = Read(UnitLevel, "player")
-            plan.foreverCheckedLevel = level
+            local level = state.level
+            SaveTrainerCheck(plan, level, state.copper, not state.unverified)
             pcall(CloseTrainer)
-            Report(plan, state.unavailable and step.error or step.done, level)
+            if state.unverified then Report(plan, step.error, level)
+            elseif state.copper then Report(plan, step.funds, state.copper)
+            else Report(plan, step.done, level) end
         elseif state.code == step.gossip then
             local option = TrainerOption(state.trainer)
             if option then pcall(C_GossipInfo.SelectOption, option) end
@@ -318,6 +339,15 @@ function forever.BindProgression(owner, plan)
             Report(plan, step.error, 0)
         end
     end)
+    local character = Read(UnitGUID, "player")
+    if type(character) == "string" and character:match("^Player%-") then
+        plan.foreverTrainerCharacter = character
+        local saved = WowAgentDB and WowAgentDB.foreverTrainerChecks and WowAgentDB.foreverTrainerChecks[character]
+        if type(saved) == "table" and type(saved.level) == "number"
+            and (saved.copper == nil or type(saved.copper) == "number" and saved.copper >= 0) then
+            plan.foreverTrainerCheck = saved
+        end
+    end
     SetOverrideBindingClick(owner, false, "F4", "WowAgentForeverProgress", "LeftButton")
     plan.foreverEnabled = true
 end

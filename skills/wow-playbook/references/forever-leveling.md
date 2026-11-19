@@ -23,6 +23,7 @@
 ## 职业成长
 
 - 训练师坐标用于接近。选中训练师 GUID、训练窗口事件、技能 ID、可学状态和铜币充足都要核验。发出一次学习后等技能书新技能或同项服务变为已学，再发下一次。日志记录 `SPELL_LEARNED`、`TRAINER_DONE` 或 `ERROR`。初版按偶数等级检查，使用北郡和闪金镇的猎人训练师候选。 [无限服训练师原生界面](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_TrainerUI/Mainline/Blizzard_TrainerUI.lua)
+- **离线回归**：铜币不足时记录最低可学价，回到任务路线并以角色 GUID 记住这次检查。达到价钱或进入下一等级段会再访训练师。若可学服务缺少技能 ID 或无法验证价格，记录 `ERROR` 并保留再次准备后的重试机会。等待资金的回执为 `TRAINER_WAITING_FOR_FUNDS`。
 - 猎人暂按兽王开局，从 10 级起先安排致命守护，计划 5 级后加一阶强化复活宠物。依有效配置、候选节点对应技能和可购买状态决定动作。存在其他暂存变更时等原生状态。点数以已生效等级上升且配置没有暂存变更为准，日志记录 `TALENT_SPENT`。 [无限服天赋 API](https://github.com/Gethe/wow-ui-source/blob/forever/Interface/AddOns/Blizzard_APIDocumentationGenerated/SharedTraitsDocumentation.lua)
 - 猎人输出宏只使用角色技能书已学技能，重复输出用 `!自动射击` 保持自动射击开启。升级刷新动作栏时先核对 WowAgent 宏的原内容，等待写入后重读宏体和 4 键。已有其他动作时保留。
 

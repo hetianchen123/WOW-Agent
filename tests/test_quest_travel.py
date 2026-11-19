@@ -685,6 +685,9 @@ def test_forever_progression_carries_full_node_and_ignores_old_task_row():
     assert progression.phase == QuestState.READY
     assert progression.forever_step == ForeverStep.TALENT_SPENT and progression.forever_value == 104960
     assert progression.objective_action == ObjectiveAction.NONE
+    row(-3, int(ForeverStep.TRAINER_WAITING_FOR_FUNDS), 10)
+    funding = decode_travel(image)
+    assert funding.forever_step == ForeverStep.TRAINER_WAITING_FOR_FUNDS and funding.forever_value == 10
     row(-2, 1, 7 * 131072 + 4 * 1024 + int(TaskFlags.PREPARED))
     assert decode_travel(image).forever_step == ForeverStep.NONE
 

@@ -58,6 +58,7 @@ class ObjectiveAction(IntEnum):
 class ForeverStep(IntEnum):
     NONE = 0
     TRAVEL = 1
+    TRAINER_WAITING_FOR_FUNDS = 2
     TRAINER_GOSSIP = 3
     LEARN = 4
     WAIT = 5

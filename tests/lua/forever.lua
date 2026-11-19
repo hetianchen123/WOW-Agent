@@ -3,9 +3,10 @@ local clock, level, money, combat = 1, 2, 10, false
 local learned, rank, staged, buys, purchases, commits = {}, 0, false, 0, 0, 0
 local trainerVisible, status, target = false, "available", 248415
 local gossipVisible, optionIcon, gossipSelection = false, 132049, nil
+local trainerSpell, character = 2973, "Player-1-001"
 local events
 
-UIParent, SlashCmdList = {}, {}
+UIParent, SlashCmdList, WowAgentDB = {}, {}, {}
 function GetBuildInfo() return "1.60.1", "70959", "", 16001 end
 function GetTime() return clock end
 function UnitClass() return "Hunter", "HUNTER", 3 end
@@ -15,7 +16,10 @@ function UnitIsDead() return false end
 function UnitCanAttack() return false end
 function UnitAffectingCombat() return combat end
 function InCombatLockdown() return combat end
-function UnitGUID() return "Creature-0-1-0-1-" .. target .. "-00000ABC" end
+function UnitGUID(unit)
+    if unit == "player" then return character end
+    return "Creature-0-1-0-1-" .. target .. "-00000ABC"
+end
 function GetBindingAction() return "CLICK WowAgentForeverProgress:LeftButton" end
 function SetOverrideBindingClick() end
 function GetMoney() return money end
@@ -43,7 +47,7 @@ C_Map = {
     GetBestMapForUnit = function() return 1429 end,
     GetPlayerMapPosition = function() return {GetXY = function() return .51, .41 end} end,
 }
-C_TooltipInfo = {GetTrainerService = function() return {id = 2973} end}
+C_TooltipInfo = {GetTrainerService = function() return {id = trainerSpell} end}
 C_SpecializationInfo = {GetActiveSpecGroup = function() return 1 end}
 C_Traits = {
     ConfigHasStagedChanges = function() return staged end,
@@ -96,21 +100,28 @@ target, plan.foreverSkipLevel, plan.foreverReceipt = 248415, nil, nil
 events:OnEvent("TRAINER_SHOW")
 money = 9
 assert(Observe(plan) == 13)
-money = 10
+Click()
+local code, value = Observe(plan)
+assert(code == 2 and value == 10 and buys == 0 and not trainerVisible)
+plan = {foreverTrain = true}
+forever.BindProgression({}, plan)
+assert(Observe(plan) == nil)
+money, trainerVisible, clock = 10, true, 3
+events:OnEvent("TRAINER_SHOW")
 assert(Observe(plan) == 4)
 Click()
 assert(buys == 1 and Observe(plan) == 5)
 Click()
 assert(buys == 1 and Observe(plan) == 5)
 status, learned[2973] = "used", "猛禽一击"
-local code, value = Observe(plan)
+code, value = Observe(plan)
 assert(code == 8 and value == 2973)
-clock = 3
+clock = 5
 assert(Observe(plan) == 13)
 Click()
 assert(Observe(plan) == 11 and not trainerVisible)
 
-clock, level, combat = 5, 10, true
+clock, level, combat = 7, 10, true
 assert(Observe(plan) == nil)
 combat, staged = false, true
 assert(Observe(plan) == 1)
@@ -123,4 +134,14 @@ assert(Observe(plan) == 5)
 staged = false
 code, value = Observe(plan)
 assert(code == 9 and value == 104960)
+
+level, clock, character = 2, 9, "Player-1-002"
+trainerSpell, status, trainerVisible = nil, "available", true
+local secondCharacter = {foreverTrain = true}
+forever.BindProgression({}, secondCharacter)
+events:OnEvent("TRAINER_SHOW")
+assert(Observe(secondCharacter) == 13)
+Click()
+assert(Observe(secondCharacter) == 12 and not trainerVisible and buys == 1)
+assert(WowAgentDB.foreverTrainerChecks[character] == nil)
 print("forever progression ok")
