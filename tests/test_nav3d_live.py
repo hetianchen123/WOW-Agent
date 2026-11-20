@@ -9,14 +9,17 @@ import numpy as np
 import pytest
 from bot.core.config import Nav3DConfig
 from bot.nav3d import Frame, NavMesh, NavigationError
-from bot.nav3d.planner import Agent
+from bot.nav3d.planner import Agent, Query
 from bot.nav3d.demo import Geometry, scene, write_scene
 from bot.nav3d.edge_entry import plan_edge_entry
-from bot.nav3d.extract import ALL_TERRAIN_CELLS, liquid_cells, terrain, placement_matrix, quaternion_matrix
+from bot.nav3d.extract import (ALL_TERRAIN_CELLS, SceneBuilder, liquid_cells, terrain, placement_matrix,
+                               quaternion_matrix, wmo_liquid_cells)
 from bot.nav3d import ground_trial
 from bot.nav3d.runtime import SurfaceTracker, Nav3DCoordinator
+from bot.nav3d.support_checkpoint import SupportCheckpoint
 from bot.nav3d_cli import build_scene
-from bot.perception.nav3d_channel import FastPoseSample, Nav3DSample, decode_fast_pose, decode_nav3d, ROWS, with_fast_pose
+from bot.perception.nav3d_channel import (FastPoseSample, Nav3DSample, decode_fast_pose, decode_nav3d,
+                                          decode_support_identity, ROWS, with_fast_pose)
 from bot.perception import channel_spec as spec
 
 
@@ -43,6 +46,33 @@ def test_liquid_mask_preserves_dry_cells_in_a_partly_wet_chunk():
         assert y * 17 + 9 + x not in triangles
     assert liquid_cells([{**partial, "bitmap": [1]}]) == ALL_TERRAIN_CELLS
     assert liquid_cells([{**partial, "xOffset": 4}]) == ALL_TERRAIN_CELLS
+
+
+@pytest.mark.parametrize('middle_flag', (0x40, 0x3f))
+def test_wmo_liquid_keeps_dry_gap_and_bridge_above_water(middle_flag):
+    frame = Frame('fixture', 0, 'test', 'east_north_up')
+    geometry = Geometry()
+    geometry.floor(0, 0, 24, 12)
+    geometry.floor(0, 4, 24, 8, z=4)
+    builder = SceneBuilder(None, None, [(0, 0), (24, 12)])
+    builder.add(*geometry.arrays(), np.eye(4), {'kind': 'terrain'})
+    liquid = dict(tileX=1, tileY=3, vertX=2, vertY=4, corner=(10, 0, 1),
+                  tiles=[0x40, middle_flag, 0x40], vertices=[{'height': 1}] * 8)
+    builder.wmo_liquids.extend(wmo_liquid_cells(liquid, np.eye(4)))
+    assert builder.remove_submerged_geometry() > 0
+    assert sum(item['triangles'] for item in builder.instances) == len(builder.triangles)
+    mesh = NavMesh.build(builder.vertices, builder.triangles, frame=frame)
+    tracker = SurfaceTracker(mesh)
+    assert not tracker.candidates((12, 2))
+    assert tracker.candidates((3, 2))[0][2] == pytest.approx(0, abs=.15)
+    bridge = mesh.plan(Query(frame, (3, 6, 4), (21, 6, 4)))
+    assert all(point[2] >= 4 for point in bridge.points)
+    lower = Query(frame, (3, 6, 0), (21, 6, 0))
+    if middle_flag == 0x3f:
+        assert mesh.plan(lower).length == pytest.approx(18)
+    else:
+        with pytest.raises(NavigationError, match='no_complete_path'):
+            mesh.plan(lower)
 
 
 def test_prepared_ground_trial_request_is_consumed_once_and_rejects_expiry(tmp_path, monkeypatch):
@@ -300,16 +330,25 @@ def test_travel_can_replan_after_a_short_gap_on_the_same_corridor(
         assert runtime.follower is None and runtime.tracker.last[:2] == position
 
 
-def test_lua_nav3d_packet_round_trip_and_secret_values():
+@pytest.mark.parametrize("forever", [False, True])
+def test_lua_nav3d_packet_round_trip_and_secret_values(forever):
     lupa=pytest.importorskip('lupa.lua51');lua=lupa.LuaRuntime(unpack_returned_tuples=True)
     lua.execute('''
-      WowAgent={};WowAgentChannelFrame={};UIParent={};packets={};fastPackets={};callbacks={}
+      WowAgent={};WowAgentDB={};WowAgentChannelFrame={};UIParent={}
+      packets={};fastPackets={};supportPackets={};callbacks={};eventCallbacks={}
+      clock=100
+      function GetTime()return clock end
+      function time()return 200 end
       function CreateFrame(_,name)
         return {name=name,SetSize=function()end,SetPoint=function()end,SetFrameStrata=function()end,
-          Hide=function()end,Show=function()end,SetScript=function(_,_,fn) callbacks[name]=fn end}
+          Hide=function()end,Show=function()end,RegisterEvent=function()end,
+          SetScript=function(_,script,fn)
+            if script=='OnEvent' then eventCallbacks[name]=fn else callbacks[name]=fn end
+          end}
       end
       function WowAgent.NewPixelRow(f,offset)
-        local rows=f.name=='WowAgentFastPoseFrame' and fastPackets or packets
+        local rows=f.name=='WowAgentFastPoseFrame' and fastPackets
+          or f.name=='WowAgentMeshSupportFrame' and supportPackets or packets
         return function(tag,value) rows[offset/16+1]={tag,value} end
       end
       function UnitPosition()return -888.1,-2100.6,0,2927 end
@@ -326,6 +365,7 @@ def test_lua_nav3d_packet_round_trip_and_secret_values():
              GetBestMapForUnit=function()return 2451 end}
       bit={band=function(a,b) local r,p=0,1 while a>0 and b>0 do if a%2==1 and b%2==1 then r=r+p end a=math.floor(a/2);b=math.floor(b/2);p=p*2 end return r end}
     ''')
+    lua.globals().WowAgent.Forever = forever
     lua.execute(Path('addon/WowAgent/Nav3D.lua').read_text())
     lua.execute('WowAgent.WriteNav3D(7,90896,2,2451,2451,.2,.3,4096)')
     image=np.zeros((416,142,3),np.uint8)
@@ -353,6 +393,45 @@ def test_lua_nav3d_packet_round_trip_and_secret_values():
     assert fast.grounded and fast.bindings_verified and not fast.in_combat
     assert with_fast_pose(s,fast).goal_xy == s.goal_xy
     assert with_fast_pose(s,replace(fast,base_sequence=8)) is None
+    if forever:
+        def support():
+            image = np.zeros((96, 142, 3), np.uint8)
+            for i in range(6):
+                row = lua.globals().supportPackets[i + 1]
+                spec.render_frame(image, 0, i * 16, spec.encode_frame(row[1], row[2]))
+            assert decode_support_identity(image, 8) is None
+            return decode_support_identity(image, 7)
+
+        first = support()
+        lua.execute('clock=100.1; callbacks.WowAgentMeshSupportMonitor()')
+        lua.execute('WowAgent.WriteNav3D(7,90896,2,2451,2451,.2,.3,4096)')
+        moved = support()
+        assert moved == (first[0], first[1] + 1)
+        lua.execute("eventCallbacks.WowAgentMeshSupportMonitor(nil,'PLAYER_LOGOUT'); clock=101")
+        lua.execute("eventCallbacks.WowAgentMeshSupportMonitor(nil,'PLAYER_ENTERING_WORLD',false,true)")
+        lua.execute('WowAgent.WriteNav3D(7,90896,2,2451,2451,.2,.3,4096)')
+        assert support() == moved
+        lua.execute("clock=102; eventCallbacks.WowAgentMeshSupportMonitor(nil,'PLAYER_ENTERING_WORLD',true,false)")
+        lua.execute('WowAgent.WriteNav3D(7,90896,2,2451,2451,.2,.3,4096)')
+        assert support()[0] != moved[0]
+
+
+def test_mesh_support_checkpoint_reloads_only_for_the_same_stationary_game_session(live_mesh, tmp_path):
+    mesh, start, goal = live_mesh
+    pose, _ = samples(start, goal)
+    path = tmp_path / "navigation" / "mesh-support.json"
+    checkpoint = SupportCheckpoint(path)
+    support = SurfaceTracker(mesh).update(start[:2])
+    checkpoint.save((100, 4), mesh.mesh_id, pose, support)
+
+    reopened = SupportCheckpoint(path)
+    assert reopened.restore((100, 4), SurfaceTracker(mesh), pose) == support
+    for identity in ((100, 5), (101, 4)):
+        assert reopened.restore(identity, SurfaceTracker(mesh), pose) is None
+    assert reopened.restore((100, 4), SurfaceTracker(mesh), replace(pose, ui_map_id=99)) is None
+    assert reopened.restore((100, 4), SurfaceTracker(mesh), replace(pose, position_xy=goal[:2])) is None
+    path.write_text("{ incomplete")
+    assert reopened.restore((100, 4), SurfaceTracker(mesh), pose) is None
 
 
 def test_fast_pose_does_not_refresh_an_expired_navigation_frame(live_mesh, tmp_path):
@@ -538,7 +617,7 @@ def edge_tracker():
     triangles=np.array([[[0,0,0],[.8,.6,.9],[.416,1.2,.9]],
         [[-2,-2,17],[3,-2,17],[-2,3,17]],[[3,-2,17],[3,3,17],[-2,3,17]]])
     mesh=SimpleNamespace(debug_triangles=lambda:triangles,frame=Frame('test',0,'test','east_north_up'),
-        agent=Agent(),plan=lambda q:SimpleNamespace(length=math.dist(q.start,q.goal)))
+        agent=Agent(),plan=lambda q:SimpleNamespace(length=math.dist(q.start,q.goal),points=(q.start,q.goal)))
     return SurfaceTracker(mesh)
 
 
@@ -548,6 +627,37 @@ def test_doorway_edge_tolerance_retains_connected_floor_not_roof():
     actual=tracker.update((.7,.5))
     assert actual[:2]==(.7,.5) and actual[2]==pytest.approx(.774)
     assert tracker.update((.7,.5))==actual  # held position remains stable
+
+
+def test_live_corridor_anchors_on_verified_edge_but_brakes_using_observed_pose(tmp_path):
+    geometry = Geometry()
+    geometry.floor(0, 0, 24, 12)
+    geometry.floor(0, 0, 24, 14, z=4)
+    frame = Frame('12.1.5.70961', 2927, 'quest:90896:2', 'east_north_up')
+    mesh = NavMesh.build(*geometry.arrays(), frame=frame)
+    config = Nav3DConfig(mode='nav3d', mesh=str(tmp_path/'mesh'), supervised_trial_mesh_id=mesh.mesh_id)
+    rt = Nav3DCoordinator(config, now=0, mesh=mesh, edge_tolerance=.14, corridor_control=True)
+    start = rt.tracker.candidates((4, 11.35))[0]
+    goal = rt.tracker.candidates((18, 11.35))[0]
+    rt.tracker.last, rt.goals = start, [goal]
+    sample, nav = samples(start, goal)
+    sample = replace(sample, heading=1.5 * math.pi)
+    assert rt.step(0, sample, nav).keys == {'w'}
+    corridor = rt.corridor
+
+    observed = (4.2, 11.5)
+    assert rt.tracker.candidates(observed)[0][2] > 4  # only the roof covers raw XY
+    nav.sequence = 2
+    command = rt.step(.067, replace(sample, sequence=2, position_xy=observed), nav)
+    assert not command.keys and not command.tap and command.outcome is None
+    assert rt.corridor is corridor
+    assert corridor.observed == pytest.approx((4.2, 11.4, start[2]), abs=.001)
+    assert rt.follower.last_pose == (*observed, start[2])
+
+    nav.sequence = 3
+    rt.step(.2, replace(sample, sequence=3, position_xy=(4.3, 11.35)), nav)
+    assert rt.tracker.edge_projection is None
+    assert corridor.observed == pytest.approx((4.3, 11.35, start[2]))
 
 
 def test_short_stair_movement_respects_agent_climb_and_connected_path():
@@ -604,7 +714,8 @@ def test_only_close_connected_edge_projections_can_continue_a_floor(height):
     ])
     mesh = SimpleNamespace(debug_triangles=lambda: triangles, frame=Frame("test", 0, "test", "east_north_up"),
                            agent=Agent(max_climb=.8),
-                           plan=lambda q: SimpleNamespace(length=math.dist(q.start[:2], q.goal[:2])))
+                           plan=lambda q: SimpleNamespace(length=math.dist(q.start[:2], q.goal[:2]),
+                                                          points=(q.start, q.goal)))
     tracker = SurfaceTracker(mesh)
     with pytest.raises(NavigationError, match="ambiguous"):
         tracker.update((0, 0))

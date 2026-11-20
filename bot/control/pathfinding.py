@@ -2,6 +2,8 @@
 import heapq
 import math
 
+from .navigation import advances_toward
+
 KNOWN_PASSAGE_COST = .7
 
 
@@ -40,13 +42,25 @@ class GridRouter:
             if first != second and max(abs(first[0] - second[0]), abs(first[1] - second[1])) == 1:
                 self.passages.add(frozenset((first, second)))
 
-    def route(self, position, destination, *, smooth=False):
+    def route(self, position, destination, *, smooth=False, forward_goal=None):
         if not self.blocked:
-            return [destination]
+            return [destination] if forward_goal is None or advances_toward(
+                self.metric(position), self.metric(destination), self.metric(forward_goal)) else []
         start, goal = self.cell(position), self.cell(destination)
         max_x, max_y = math.floor(self.width / self.cell_size), math.floor(self.height / self.cell_size)
         # A shortest route can use each discounted edge at most once.
         max_discount = (1 - KNOWN_PASSAGE_COST) * math.sqrt(2) * len(self.passages)
+
+        def cell_point(cell):
+            if cell == goal:
+                return destination
+            if cell == start:
+                return position
+            x, y = cell
+            return (min(1., (x + .5) * self.cell_size / self.width),
+                    min(1., (y + .5) * self.cell_size / self.height))
+
+        forward_point = self.metric(forward_goal) if forward_goal is not None else None
 
         def estimate(cell):
             distance = math.dist(cell, goal)
@@ -61,13 +75,15 @@ class GridRouter:
                 continue
             visited += 1
             if current == goal:
+                if forward_point is not None and start == goal and not advances_toward(
+                        self.metric(position), self.metric(destination), forward_point):
+                    return []
                 cells = []
                 while current != start:
                     cells.append(current)
                     current = previous[current]
                 cells.reverse()
-                points = [(min(1.0, (x + .5) * self.cell_size / self.width),
-                           min(1.0, (y + .5) * self.cell_size / self.height)) for x, y in cells[:-1]]
+                points = [cell_point(cell) for cell in cells[:-1]]
                 points.append(destination)
                 return self.smooth_path(position, points) if smooth else points
             x, y = current
@@ -76,6 +92,9 @@ class GridRouter:
                 if not 0 <= neighbor[0] <= max_x or not 0 <= neighbor[1] <= max_y or neighbor in self.blocked:
                     continue
                 if dx and dy and ((x + dx, y) in self.blocked or (x, y + dy) in self.blocked):
+                    continue
+                if forward_point is not None and not advances_toward(
+                        self.metric(cell_point(current)), self.metric(cell_point(neighbor)), forward_point):
                     continue
                 weight = KNOWN_PASSAGE_COST if frozenset((current, neighbor)) in self.passages else 1.0
                 candidate = cost + math.hypot(dx, dy) * weight

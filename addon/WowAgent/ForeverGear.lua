@@ -7,7 +7,8 @@ forever.Gear = gear
 -- Codes above 14 use the extended Forever progression row.
 local step = {equip = 15, equipWait = 16, equipped = 17, equipFailed = 18,
     repairTravel = 19, repairGossip = 20, repair = 21, repairWait = 22,
-    repaired = 23, repairFunds = 24, repairFailed = 25, repairClose = 26, repairCannotPay = 27}
+    repaired = 23, repairFunds = 24, repairFailed = 25, repairClose = 26, repairCannotPay = 27,
+    sell = 28, sellWait = 29, sold = 30}
 
 local slotsByType = {
     INVTYPE_HEAD = {1}, INVTYPE_NECK = {2}, INVTYPE_SHOULDER = {3}, INVTYPE_BODY = {4},
@@ -155,6 +156,69 @@ local function Upgrade(state)
     return best
 end
 
+local function ReadableTable(info)
+    return type(info) == "table" and (not canaccesstable or canaccesstable(info))
+end
+
+local function SellCandidate(npc, slots, bag, index)
+    local info = Read(C_Container.GetContainerItemInfo, bag, index)
+    if not ReadableTable(info) or Public(info.isLocked) ~= false or Public(info.hasNoValue) ~= false
+        or Public(info.hasLoot) ~= false or Public(info.isReadable) ~= false then return end
+    local id, link, count = Public(info.itemID), Public(info.hyperlink), Public(info.stackCount)
+    local quality = Public(info.quality)
+    local key = ItemKey(link)
+    if type(id) ~= "number" or type(count) ~= "number" or count < 1 or not key
+        or (quality ~= 0 and quality ~= 1) or (WowAgent.TRACKED_ITEMS and WowAgent.TRACKED_ITEMS[id]) then return end
+    local quest = Read(C_Container.GetContainerItemQuestInfo, bag, index)
+    if not ReadableTable(quest) or Public(quest.isQuestItem) ~= false or Public(quest.isActive) ~= false
+        or issecretvalue and issecretvalue(quest.questID) or quest.questID then return end
+    local ok, _, _, cachedQuality, _, _, _, _, _, equipType, _, price, classID, _, bindType =
+        pcall(C_Item.GetItemInfo or GetItemInfo, link)
+    price, classID, equipType, bindType = Public(price), Public(classID), Public(equipType), Public(bindType)
+    if not ok or Public(cachedQuality) ~= quality or type(price) ~= "number" or price <= 0
+        or type(classID) ~= "number" or classID == 12 or type(bindType) ~= "number" or bindType == 4 then return end
+
+    local slotList = slotsByType[equipType]
+    if classID == 2 or classID == 4 then
+        if not slotList or equipType == "INVTYPE_TABARD" or equipType == "INVTYPE_BODY" then return end
+        -- Keep enhanced gear. Eligible plain gear can be sold after confirmed upgrades are equipped.
+        local field = 0
+        for token in (key .. ":"):gmatch("(.-):") do
+            field = field + 1
+            if field >= 3 and field <= 7 and token ~= "" and token ~= "0" then return end
+        end
+        local usable = Read(C_Item.IsUsableItem, link)
+        if usable ~= false then
+            local level = ItemLevel(link)
+            if usable ~= true or not level then return end
+            -- Recheck possible upgrades even if equipping one was deferred or failed.
+            for _, slot in ipairs(slotList) do
+                local current = slots[slot]
+                if not current or not current.id or not current.level or current.level < level then return end
+            end
+        end
+    elseif quality ~= 0 or slotList then
+        return
+    end
+    return {code = step.sell, value = price * count, npc = npc, bag = bag, index = index,
+        link = link, key = key, id = id, count = count, quality = quality}
+end
+
+local function FindSale(npc)
+    if not C_Item or not C_Container or type(C_Container.UseContainerItem) ~= "function"
+        or type(GetInventoryItemID) ~= "function" then return end
+    local slots, best = Equipment()
+    for bag = 0, NUM_BAG_SLOTS or 4 do
+        local count = Read(C_Container.GetContainerNumSlots, bag)
+        for index = 1, type(count) == "number" and count or 0 do
+            local item = SellCandidate(npc, slots, bag, index)
+            if item and item.quality == 0 then return item end
+            best = best or item
+        end
+    end
+    return best
+end
+
 local function Durability()
     local damaged, lowest = {}, nil
     for slot = 1, 19 do
@@ -222,7 +286,7 @@ local function VendorOption()
     return found
 end
 
-local function NearestRepairer(state, map)
+local function NearestRepairer(state, map, maxDistance)
     if Read(UnitFactionGroup, "player") ~= "Alliance" or not C_Map then return end
     local pos = Read(C_Map.GetPlayerMapPosition, map, "player")
     local x, y
@@ -234,7 +298,9 @@ local function NearestRepairer(state, map)
     for _, npc in ipairs(repairers) do
         if npc.map == map and (state.repairFailed[npc.id] or 0) <= GetTime() then
             local d = ((npc.x - x) * width)^2 + ((npc.y - y) * height)^2
-            if not distance or d < distance then best, distance = npc, d end
+            if (not maxDistance or d <= maxDistance^2) and (not distance or d < distance) then
+                best, distance = npc, d
+            end
         end
     end
     return best
@@ -261,20 +327,26 @@ local function EndRepair(state, npc, code, value)
     else
         state.repairAttempts = 0
     end
-    state.visit, state.openingUntil = nil, nil
+    state.visit, state.openingUntil, state.saleVisit = nil, nil, nil
     if code then return Report(state, code, value) end
 end
 
 local function RepairState(state, damaged)
     local npc = state.visit
-    if #damaged == 0 then
+    local atMerchant = Merchant(npc)
+    if atMerchant and (state.salesRetryAt or 0) <= GetTime() and MerchantFrame.selectedTab ~= 2
+        and (not CanSellItems or Read(CanSellItems) == true) then
+        local item = FindSale(npc)
+        if item then return item end
+    end
+    if #damaged == 0 and (not state.saleVisit or atMerchant) then
         if Merchant(npc) or VendorGossip(npc) then
             return {code = step.repairClose, value = npc.id, npc = npc}
         end
         state.visit, state.openingUntil = nil, nil
         return
     end
-    if Merchant(npc) then
+    if atMerchant then
         local cost, canRepair = Read(GetRepairAllCost)
         local money = Read(GetMoney)
         if Read(CanMerchantRepair) == true and canRepair == true
@@ -302,6 +374,22 @@ function gear.State(plan, map, refresh)
     end
     local now = GetTime()
     if state.receipt and now < state.receipt.untilTime then return state.receipt end
+    local sale = state.salePending
+    if sale then
+        local money = Read(GetMoney)
+        local ok, info = pcall(C_Container.GetContainerItemInfo, sale.bag, sale.index)
+        local removed = ok and not (issecretvalue and issecretvalue(info))
+            and (info == nil or ReadableTable(info) and type(Public(info.itemID)) == "number"
+                and Public(info.itemID) ~= sale.id)
+        if removed and type(money) == "number" and money - sale.money == sale.value then
+            state.salePending = nil
+            return Report(state, step.sold, sale.value, sale.link)
+        end
+        if now < sale.deadline and Merchant(sale.npc) then return {code = step.sellWait, value = sale.value} end
+        state.salePending = nil
+        state.salesRetryAt = now + 120
+        print("WowAgent 无限服售卖回执未确认", sale.link, sale.count, sale.value)
+    end
     local pending = state.pending
     if pending then
         if pending.npc then
@@ -326,16 +414,25 @@ function gear.State(plan, map, refresh)
         return {code = step.equipWait, value = pending.value}
     end
     if Read(StaticPopup_IsAnyDialogShown) == true then return end
-    if state.visit and map ~= state.visit.map then state.visit, state.openingUntil = nil, nil end
+    if state.visit and map ~= state.visit.map then state.visit, state.openingUntil, state.saleVisit = nil, nil, nil end
     if state.visit then return RepairState(state, Durability()) end
     if Shown(MerchantFrame) or Shown(GossipFrame) then return end
     if refresh or not state.nextScan or now >= state.nextScan then
         state.nextScan = now + .75
         state.upgrade = Upgrade(state)
+        state.saleVendor = nil
+        if not state.upgrade and (state.salesRetryAt or 0) <= now then
+            local vendor = NearestRepairer(state, map, 85)
+            if vendor and FindSale(vendor) then state.saleVendor = vendor end
+        end
     end
     if state.upgrade then return state.upgrade end
 
     local damaged = Durability()
+    if state.saleVendor and state.saleVendor.map == map then
+        state.visit, state.saleVisit = state.saleVendor, true
+        return RepairState(state, damaged)
+    end
     local money = Read(GetMoney)
     if #damaged == 0 then state.cost = nil; return end
     if state.cost and (type(money) ~= "number" or money < state.cost) then return end
@@ -349,6 +446,7 @@ function gear.Run(plan, map, offered)
     local action = gear.State(plan, map, true)
     if not action or action.code ~= offered.code or action.value ~= offered.value
         or action.key ~= offered.key or action.npc ~= offered.npc or action.option ~= offered.option
+        or action.bag ~= offered.bag or action.index ~= offered.index or action.count ~= offered.count
         or (Read(GetUnitSpeed, "player") or 0) > 0 then return end
     local state, npc = plan.foreverGear, action.npc
     if action.code == step.equip then
@@ -357,6 +455,12 @@ function gear.Run(plan, map, offered)
         if not pcall(C_Item.EquipItemByName or EquipItemByName, action.link, action.value) then
             action.deadline = GetTime()
         end
+    elseif action.code == step.sell and Merchant(npc) then
+        local money = Read(GetMoney)
+        if type(money) ~= "number" then return end
+        action.money, action.deadline = money, GetTime() + 3
+        state.salePending = action
+        if not pcall(C_Container.UseContainerItem, action.bag, action.index) then action.deadline = GetTime() end
     elseif action.code == step.repairGossip and VendorGossip(npc) then
         state.openingUntil = GetTime() + 6
         if not pcall(C_GossipInfo.SelectOption, action.option) then state.openingUntil = GetTime() end

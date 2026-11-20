@@ -387,17 +387,23 @@ function WowAgent.CombatHandoff()
     local point, score, count = 0, math.huge, 0
     local plates = C_NamePlate and PublicCall(C_NamePlate.GetNamePlates, false)
     local seen = {}
+    -- Count the selected enemy and hover even when their plates are hidden.
+    local function countAttacker(guid)
+        if not guid or seen[guid] then return false end
+        seen[guid], count = true, count + 1
+        return true
+    end
+    countAttacker(AttackerGUID("target"))
     for _, entry in ipairs(plates or {}) do
         local plate = Public(entry)
         local unit = plate and PlateUnit(plate)
         local guid = unit and AttackerGUID(unit)
-        if guid and guid ~= selected and not seen[guid] then
-            seen[guid] = true
-            count = count + 1
+        if countAttacker(guid) and guid ~= selected then
             local packed, cost = PlatePoint(plate)
             if packed and cost < score then point, score = packed, cost end
         end
     end
+    countAttacker(hover)
     return point, math.min(15, count) + (confirmed and 16 or 0)
 end
 
@@ -626,7 +632,9 @@ local function Update()
         local melee = ReadRangeValue(check, armed.meleeSpell, "target")
         if melee == true or melee == 1 then range, key = 1, 5 end
     end
-    local restoredEpoch = dead and guid and guid == previousTargetGUID and previousTargetEpoch + 1 or 0
+    -- A reselected live unit can disprove a suspected kill. The previous
+    -- epoch is linked by GUID, because multiple units share a creature ID.
+    local restoredEpoch = guid and guid == previousTargetGUID and previousTargetEpoch + 1 or 0
     local tapDenied = target > 0 and not dead and UnitIsTapDenied and Public(UnitIsTapDenied("target")) == true
     writeReach(8, range + restoredEpoch * 4 + (tapDenied and 512 or 0) + sequence * 1024)
     local health, obstructed, danger = 0, 0, 0

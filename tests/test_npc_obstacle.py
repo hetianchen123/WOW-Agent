@@ -105,7 +105,7 @@ def test_npc_same_failed_point_does_not_repeat_model_probe(tmp_path, monkeypatch
     assert sum(name == "quest_npc_visual_probe" for name, _ in events) == 1
 
 
-def test_npc_visual_failure_uses_task_suspend_instead_of_ending_round(tmp_path, monkeypatch):
+def test_npc_visual_failure_retries_the_current_turn_in(tmp_path, monkeypatch):
     from bot.perception.travel_channel import RoundStage
     run, ctx, _, nav, _ = npc(tmp_path, monkeypatch)
     nav = replace(nav, suspend_ready=True, suspend_epoch=0, round_stage=RoundStage.TURN_IN)
@@ -114,7 +114,8 @@ def test_npc_visual_failure_uses_task_suspend_instead_of_ending_round(tmp_path, 
     run.terrain.close()
     run.terrain = SimpleNamespace(step=lambda *_: TravelCommand(outcome="no_passage"), close=lambda: None)
     run.interact_quest_target(ctx, 1, replace(nav, sequence=2), 0)
-    assert run.OUTCOME is None and run.suspend_request[3] == "quest_npc_route_unconfirmed"
+    assert run.OUTCOME is None and run.suspend_request is None
+    assert run.timeout_review.reason == "quest_npc_route_unconfirmed"
     assert not ctx.input._held_keys
 
 
@@ -193,12 +194,12 @@ def test_near_marker_without_npc_range_does_not_walk_past_it(tmp_path, monkeypat
     assert not ctx.input._held_keys and not ctx.input.count('key_down', 'w')
 
 
-def test_range_confirmation_overrides_marker_distance_without_extra_movement(tmp_path, monkeypatch):
+def test_range_confirmation_permits_only_one_attempt_from_a_position(tmp_path, monkeypatch):
     run, ctx, _, nav, _ = npc(tmp_path, monkeypatch)
     nav = replace(nav, destination=(.9, .9), task=nav.task | TaskFlags.NPC_WITHIN_5_YARDS)
     run.interact_quest_target(ctx, 1, nav, 0)
     run.interact_quest_target(ctx, 2.3, replace(nav, sequence=2), 0)
-    assert ctx.input.count('key_down', 'f') == 2
+    assert ctx.input.count('key_down', 'f') == 1
     assert not ctx.input.count('key_down', 'w') and not ctx.input._held_keys
 
 
@@ -236,9 +237,9 @@ def suspend_after_probe(tmp_path, monkeypatch):
     from bot.perception.travel_channel import CameraSample, CameraScene as Scene, CameraResult as Result, RoundStage
     run, ctx, _, nav, events = npc(tmp_path, monkeypatch)
     nav = replace(nav, camera_restore_available=True, suspend_ready=True, suspend_epoch=0,
-        round_stage=RoundStage.TURN_IN,
+        phase=QuestState.PENDING, round_stage=RoundStage.PICKUP,
         camera=CameraSample(24, 2, Scene.INTERACT, Scene.PROBE, 3, Result.DISTANCE_VERIFIED))
-    run.round_stage, run.round_navigation = RoundStage.TURN_IN, nav
+    run.phase, run.round_stage, run.round_navigation = QuestState.PENDING, RoundStage.PICKUP, nav
     run.camera_restore_reason = 'terrain_finished'
     run.stop(ctx, 'quest_npc_camera_composition_unresolved')
     assert run.suspend_camera is not None

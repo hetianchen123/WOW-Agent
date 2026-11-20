@@ -189,6 +189,7 @@ class RoadScanSession:
         self.inference = None
         self.inference_at = None
         self.manual = self.detected = ()
+        self.cached_at = None
         self.checked = set()
         self.first_capture = {}
         self.rescanned = set()
@@ -212,6 +213,7 @@ class RoadScanSession:
         except (ImportError, OSError, ValueError):
             self.installation = None
         self.manual, self.detected = manual_traces(self.installation, identity), ()
+        self.cached_at = None
         self.last_sequence = self.settle_at = None
         try:
             stored, traces, created = load_observation(self.root / identity.key / "roads.json")
@@ -221,6 +223,8 @@ class RoadScanSession:
             self.detected = tuple(RoadTrace(points) for points in traces)
             if time.time() - created <= (3600 * CACHE_HOURS if traces else 900):
                 self.checked.add(identity)
+                if traces:
+                    self.cached_at = created
 
     def finish_inference(self, ctx):
         if not self.inference or not self.inference[0].done():
@@ -263,9 +267,11 @@ class RoadScanSession:
         ctx.log_event("quest_main_road_scan_result", {"map": identity.map_id, "art": identity.art,
             "paths": len(traces), "overlay_for_reload": installed, "evidence": str(folder)})
 
-    def tick(self, ctx, now, status, *, allow, release, position=None, world_size=None):
+    def tick(self, ctx, now, status, *, allow, release, position=None, world_size=None, needs_coverage=False):
         if status is not None and status.identity != self.identity:
             self.reset_identity(status.identity)
+            ctx.log_event("quest_main_road_loaded", {"map": self.identity.map_id, "art": self.identity.art,
+                "manual": len(self.manual), "detected": len(self.detected)})
         if status is not None and status.identity == self.identity:
             self.finish_inference(ctx)
         if self.request_at is not None:
@@ -308,16 +314,18 @@ class RoadScanSession:
             if now - self.inference_at < 12:
                 release()
                 return True
-        if allow and position is not None and self.identity in self.checked and not self.manual and not self.detected:
+        if allow and position is not None and self.identity in self.checked:
             self.first_capture.setdefault(self.identity, (now, position))
         previous = self.first_capture.get(self.identity)
         rescan = False
         if (previous and position is not None and world_size and self.inference is None
-                and not self.manual and not self.detected and self.identity not in self.rescanned):
+                and (needs_coverage or not (self.manual or self.detected)) and self.identity not in self.rescanned):
             captured_at, origin = previous
             distance = math.hypot((position[0] - origin[0]) * world_size[0],
                                   (position[1] - origin[1]) * world_size[1])
-            rescan = now - captured_at >= RESCAN_DELAY_S and distance >= RESCAN_DISTANCE_YARDS
+            older_cache = (needs_coverage and self.cached_at is not None
+                           and time.time() - self.cached_at >= RESCAN_DELAY_S)
+            rescan = older_cache or (now - captured_at >= RESCAN_DELAY_S and distance >= RESCAN_DISTANCE_YARDS)
         if not (allow and status and status.armed and (self.identity not in self.checked or rescan)
                 and local_vision_available()):
             self.last_sequence = self.settle_at = None
@@ -334,10 +342,11 @@ class RoadScanSession:
             self.first_capture.setdefault(self.identity, (now, position))
         self.settle_at, self.last_sequence = None, None
         self.request_at = now
+        self.cached_at = None
         self.capture_state = 0
         self.capture_error = None
         channel = ctx.cfg.channel
-        ctx.input.move_to(*road_capture_button(channel.x, channel.y), jitter_px=0)
+        ctx.input.move_to(*road_capture_button(channel.x, channel.y, raised=status.raised), jitter_px=0)
         ctx.input.click_ui()
         ctx.log_event("quest_main_road_scan_requested", {"map": self.identity.map_id, "art": self.identity.art,
             "rescan_after_travel": rescan})

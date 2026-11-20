@@ -6,6 +6,7 @@ from . import channel_spec as spec
 
 ROWS=26
 FAST_POSE_ROWS = 11
+SUPPORT_ROWS = 6
 
 @dataclass(frozen=True)
 class Nav3DSample:
@@ -33,6 +34,19 @@ class Nav3DSample:
 
 def nav3d_region(x, y, *, raised=False):
     return x + 288, y - ROWS * 16 - (256 if raised else 0), 142, ROWS * 16
+
+
+def support_region(x, y):
+    return x + 288, y - 256, spec.REGION_W, SUPPORT_ROWS * spec.REGION_H
+
+
+def decode_support_identity(image, sequence):
+    decoded = packet(image, SUPPORT_ROWS, 0xD31)
+    if decoded is None or decoded[0] != sequence:
+        return None
+    _, values = decoded
+    session = values[1] | values[2] << 12 | values[3] << 24
+    return (session, values[4] | values[5] << 12) if session else None
 
 
 @dataclass(frozen=True)

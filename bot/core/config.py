@@ -35,6 +35,8 @@ class ChannelConfig:
 class CaptureConfig:
     monitor: int = 1  # mss monitor index (1 = primary)
     control_fps: int = 15  # main control loop frequency
+    screenshot_keep_hours: int = 72
+    screenshot_max_mib: int = 256
 
 
 # ----------------------------------------------------------------- audio ----

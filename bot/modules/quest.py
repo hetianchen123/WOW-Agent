@@ -6,13 +6,14 @@ import math
 import re
 import sys
 import time
+from copy import copy
 from dataclasses import asdict, dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import yaml
 
-from ..control.navigation import Route, RouteFollower, heading_error
+from ..control.navigation import Route, RouteFollower, advances_toward, heading_error
 from ..control.camera import CameraController
 from ..control.pathfinding import GridRouter
 from ..control.ground_trace import GroundTrace
@@ -24,7 +25,7 @@ from ..control.quest_search import QuestAreaSearch, inside_quest_search_area
 from ..control.quest_terrain import (SCENE_BOUNDS, SCENE_ERRORS, SceneRequest, TerrainDetour, capture_scene,
                                      local_vision_available)
 from ..core.statemachine import State
-from ..core.paths import SCREENSHOT_DIR, DATA_DIR
+from ..core.paths import DATA_DIR
 from ..data.combat import client_edition
 from ..data.grail import cached_npc_location
 from ..decision.quest_modes import QUEST_MODE_INSTRUCTIONS, QUEST_MODES, executable_objective_mode
@@ -34,7 +35,7 @@ from ..decision.route_planner import available as cloud_route_available
 from ..perception.capture import CaptureError, ScreenCapture, frontmost_game_bounds, game_ui_bounds
 from ..perception.channel_spec import REGION_H, REGION_W, StatusFlags
 from ..perception.combat_channel import combat_region, decode_combat
-from ..perception.cv import hostile_nameplate_points, minimap_quest_dots, pumpkin_probe_points, save_snapshot
+from ..perception.cv import hostile_nameplate_points, minimap_quest_dots, pumpkin_probe_points
 from ..perception.observation import ObservationTracker
 from ..perception.player_identity import profile_from_sample
 from ..control.approach import ApproachAttempt, ApproachGoal, ApproachObservation, ActionState
@@ -43,7 +44,8 @@ from ..perception.quest_channel import (
     RESOURCE_PROGRESS_MAX, Dialogue, Objective, QuestKind, QuestState, decode_quest, quest_region,
 )
 from ..perception.quest_text import QuestTextStream, decode_quest_text, quest_text_region
-from ..perception.road_map import decode_road_status, road_region
+from ..perception.road_map import ROAD_STRIP_RAISED_BUILD, decode_road_status, road_region
+from ..nav3d.support_checkpoint import SupportCheckpoint
 from ..perception.travel_channel import (CAMERA_BINDING_BUILD, CameraResult, ChoiceStep, CorpseSource, ForeverStep, LifeState,
                                          ObjectiveAction, PetState, RoundStage,
                                          TaskFlags, TravelFlags, camera_binding_key, decode_travel, travel_region)
@@ -62,7 +64,7 @@ CHOICE_HANDOFFS = {(2451, 90911): (85, 91281), (85, 88719): (2432, 88719)}
 CHOICE_HANDOFF_WAIT_S = 600
 CONFIGURED_CHOICE_WAIT_S = 45
 PREPARED_FOCUS_WAIT_S = 45
-TIMEOUT_DECISION_WAIT_S = 36
+TIMEOUT_DECISION_WAIT_S = 8
 QUEST_CONNECTION_LOSSES = frozenset({
     "quest_channel_lost", "quest_channel_stale", "quest_navigation_channel_stale",
     "quest_navigation_channel_unavailable", "quest_player_telemetry_unavailable",
@@ -106,9 +108,21 @@ ECHO_RIDGE_HANDOFF_XY = (123.64, -8684.88)
 ECHO_RIDGE_HUNT = (0.484, 0.29)
 ECHO_RIDGE_HUNT_XY = (144.47, -8610.81)
 ECHO_RIDGE_WALL_REJOIN_XY = (140.15, -8623.45)
+FOREVER_LOCAL_MESHES = (
+    ("fargodeep", FARGODEEP_SOUTH_ENTRY, 245, FARGODEEP_SOUTH_ENTRY_XY),
+    ("echo_ridge", ECHO_RIDGE_EXTERIOR, 160, ECHO_RIDGE_HANDOFF_XY),
+    ("goldshire", GOLDSHIRE_INN, 115, GOLDSHIRE_HANDOFF_XY),
+    ("abbey", NORTHSHIRE_ABBEY_ENTRY, 180, NORTHSHIRE_EXIT_SOUTH),
+)
+MESH_WALK_BLOCKED = (TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING
+                     | TravelFlags.SWIMMING | TravelFlags.IN_COMBAT | TravelFlags.CASTING)
+MINE_EXIT_ROUTE_LIMIT = {"fargodeep": 95}
+NONCOMBAT_OBJECTIVES = {ObjectiveAction.ARRIVE, ObjectiveAction.NPC_TALK,
+                        ObjectiveAction.INTERACT, ObjectiveAction.CHOICE}
 NPC_SCAN_ANGLES = tuple(math.radians(angle) for angle in range(0, 360, 30))
 NPC_MARKER_APPROACH_YARDS = 8
 NPC_MARKER_APPROACH_RADIUS = 1.25
+NPC_INTERACTION_STANCE_YARDS = 1.25
 OBJECT_APPROACH_YARDS = 2.5
 OBJECT_CLOSE_RECHECK_YARDS = 16
 OBJECT_REFINE_YARDS = 1.25
@@ -134,7 +148,8 @@ TASK_FAILURES = {
     "quest_mode_unconfirmed",
     "quest_offer_not_open", "quest_phase_timeout",
     "quest_pickup_dialogue_not_open", "quest_pickup_npc_not_found", "quest_pickup_npc_selection_unconfirmed",
-    "quest_ready_state_unconfirmed", "quest_resource_search_area_exhausted", "quest_reward_choice_required",
+    "quest_ready_state_unconfirmed", "quest_turn_in_receipt_unconfirmed", "quest_heading_turn_unconfirmed",
+    "quest_resource_search_area_exhausted", "quest_reward_choice_required",
     "quest_route_blocked", "quest_turn_in_approach_blocked", "quest_turn_in_approach_exhausted",
     "quest_turn_in_npc_selection_unconfirmed", "quest_turn_in_npc_not_in_interact_range",
     "quest_turn_in_npc_lost", "quest_flight_route_blocked",
@@ -166,6 +181,25 @@ class TimeoutReview:
     attempt: int
     started_at: float
     poll_after: float
+    waited_in_combat: bool | None = None
+    local_fallback: bool = False
+
+
+@dataclass
+class TaskTransit:
+    identity: tuple
+    position: tuple[float, float]
+    last_progress: float
+    trip: QuestTrip | None = None
+
+
+@dataclass
+class CombatEscape:
+    stage: str = "waiting_for_ground"
+    trip: QuestTrip | None = None
+    retry_route_at: float = 0.
+    dismount_at: float = float("-inf")
+    dismount_attempts: int = 0
 
 
 def load_quest_plan(path: Path) -> tuple[int, list[QuestStep]]:
@@ -269,8 +303,15 @@ class RunQuests(State):
         self.status_wire_at = None
         self.status_wire_failed = False
         self.status_wire_code = None
+        self.status_wire_packet = None
+        self.last_camera_image = {}
         self.continuous = False
         self.timeout_review = None
+        self.timeout_rechecks = set()
+        self.mesh_retry_location = None
+        self.timeout_corpse_scan = None
+        self.timeout_corpse_select_until = None
+        self.timeout_corpse_next_scan = 0.
         self.timeout_attempts = {}
         self.defense_restore_until = None
         self.planned_phase = None
@@ -314,7 +355,7 @@ class RunQuests(State):
         self.npc_alignment = None
         self.npc_alignment_sequence = None
         self.npc_direction_retries = {}
-        self.npc_interaction_attempts = {}
+        self.npc_interaction_positions = {}
         self.mouse_turn_at = float("-inf")
         self.npc_select_attempted = False
         self.npc_dialogue_retries = 0
@@ -360,8 +401,20 @@ class RunQuests(State):
         self.forever_exit_rejoins = set()
         self.forever_building_segment = None
         self.forever_building_complete = set()
-        self.forever_corpse_goal = None
-        self.cave_retreat_failed = False
+        self.covered_meshes = {}
+        self.covered_route = None
+        self.covered_wait = None
+        self.covered_exit = None
+        self.covered_road_rejoin = None
+        self.covered_search = None
+        self.covered_search_points = []
+        self.covered_support = None
+        self.support_checkpoint = SupportCheckpoint(DATA_DIR / "navigation" / "mesh-support.json")
+        self.mesh_support_identity = None
+        self.mesh_support_session = None
+        self.mesh_checkpoint_at = float("-inf")
+        self.covered_resume_key = None
+        self.task_transit = None
         self.consumables = ConsumableRecovery()
         self.forever_progress = None
         self.forever_progress_trip = None
@@ -384,6 +437,12 @@ class RunQuests(State):
         self.pet_mend_receipt = None
         self.safe_ground = []
         self.ground_trace = GroundTrace()
+        self.escape_trace = GroundTrace()
+        self.escape_outdoors_at = float("-inf")
+        self.combat_escape: CombatEscape | None = None
+        self.escape_health = []
+        self.escape_health_identity = None
+        self.escape_health_sequence = None
         self.danger_zones = []
         self.avoidance_trip = None
         self.patrol_wait_until = None
@@ -414,6 +473,7 @@ class RunQuests(State):
         self.object_minimap_checked = False
         self.object_approach_yards = OBJECT_APPROACH_YARDS
         self.object_click_at: float | None = None
+        self.object_click_full_receipt = None
         self.object_click_target: tuple[float, float] | None = None
         self.object_click_attempts = 0
         self.quest_keys = {key for step in steps for key in (step.dialog_key, step.objective_key) if key}
@@ -425,6 +485,7 @@ class RunQuests(State):
 
     def stop(self, ctx, reason):
         self.ground_trace.clear()
+        self.escape_trace.clear()
         self.cancel_scene_requests()
         self.camera.forget()
         ctx.input.release_all()
@@ -435,24 +496,40 @@ class RunQuests(State):
         ctx.log_event("quest_stop_requested", {"reason": reason, "phase": self.phase.name if self.phase else None,
                                                "id": self.steps[self.index].quest_id})
         nav = self.round_navigation
-        if self.continuous and self.planner is not None and (
+        waiting_to_turn_in = bool(nav and nav.phase == QuestState.READY and nav.task & TaskFlags.PREPARED)
+        if (self.continuous or waiting_to_turn_in) and (
                 reason in TASK_FAILURES or reason == 'quest_loot_unconfirmed'
                 or reason in {'quest_defense_no_cast_or_damage_receipt', 'quest_defense_no_progress',
                               'quest_defense_attacker_unconfirmed', 'quest_defense_landing_unconfirmed',
                               'quest_defense_dismount_unconfirmed'}
-                or reason.endswith(('_timeout', '_time_budget', '_exhausted'))):
+                or reason.startswith('quest_local_mesh_')
+                or self.forever_building_segment is not None and reason.startswith('nav3d_')
+                or reason.endswith(('_timeout', '_time_budget', '_exhausted', '_support_unconfirmed'))):
             self.travel_keys, self.forward = frozenset(), False
             if self.timeout_review is None:
                 task = nav.quest_id if nav else self.steps[self.index].quest_id
                 phase = nav.phase if nav else self.phase
                 key = (task, phase, reason)
+                if (reason == "quest_local_mesh_ground_support_unconfirmed" and nav
+                        and not self.required_loot and nav.position and nav.world_size):
+                    scope = key, nav.map_id, nav.world_size, nav.destination
+                    previous = self.mesh_retry_location
+                    if previous and previous[0] == scope and GridRouter(*nav.world_size).distance(
+                            previous[1], nav.position) < .5:
+                        ctx.log_event("quest_local_mesh_retry_paused", {"id": task, "reason": reason,
+                            "position": nav.position})
+                        self.OUTCOME = f"stopped:{reason}"
+                        return
+                    self.mesh_retry_location = scope, nav.position
                 count = self.timeout_attempts.get(key, 0) + 1
                 self.timeout_attempts[key] = count
                 now = time.monotonic()
-                self.timeout_review = TimeoutReview(task, phase, reason, count, now, now)
+                local = key in self.timeout_rechecks
+                self.timeout_review = TimeoutReview(task, phase, reason, count, now,
+                    now + min(12, count * 2) if local else now, local_fallback=local)
                 ctx.log_event('quest_timeout_review_started', {'id': task, 'reason': reason, 'attempt': count})
             return
-        if (reason in TASK_FAILURES and nav and nav.suspend_ready and self.suspend_request is None
+        if (reason in TASK_FAILURES and nav and not waiting_to_turn_in and nav.suspend_ready and self.suspend_request is None
                 and nav.suspend_epoch is not None
                 and self.round_stage not in {RoundStage.NONE, RoundStage.DONE}):
             self.travel_keys, self.forward = frozenset(), False
@@ -475,17 +552,44 @@ class RunQuests(State):
             return True
         if nav.quest_id != task or phase is not None and nav.phase != phase:
             self.timeout_review = None
+            self.timeout_corpse_scan = self.timeout_corpse_select_until = None
             return False
         if status and status[0] & (StatusFlags.DEAD | StatusFlags.GHOST):
             self.timeout_review = None
             return False  # The normal life-state recovery has priority.
-        if now < review.poll_after:
-            return True
         in_combat = bool(nav.flags & TravelFlags.IN_COMBAT or status and status[0] & StatusFlags.IN_COMBAT)
+        if in_combat and not reason.startswith(("quest_defense_", "quest_combat_")):
+            self.timeout_review = None
+            self.timeout_corpse_scan = self.timeout_corpse_select_until = None
+            return False
         if reason.startswith("quest_defense_") and not in_combat:
             self.timeout_review = None
             ctx.log_event("quest_timeout_review_recovered", {"id": task, "reason": reason})
             return False
+        if (reason == "quest_loot_unconfirmed" and not in_combat and not nav.flags & LOOT_BLOCKED
+                and frame.dialogue == Dialogue.CLOSED and loot_prepared(nav)):
+            for corpse in self.required_loot:
+                same = corpse.matches(combat)
+                basis = None
+                if corpse.still_alive(combat):
+                    basis = "same_target_alive"
+                elif corpse.has_full_receipt(nav):
+                    basis = "corpse_loot_bag_full"
+                elif corpse.has_clear_receipt(nav):
+                    basis = "corpse_receipt"
+                elif same and nav.corpse_loot_denied:
+                    basis = "loot_ownership_denied"
+                elif (same and nav.corpse_lootable is True and nav.task & TaskFlags.LOOT_IN_RANGE
+                      and corpse.presses < 2):
+                    basis = "verified_corpse_in_range"
+                if basis:
+                    self.timeout_review = None
+                    corpse.started, corpse.sequence = now, None
+                    self.timeout_corpse_scan = self.timeout_corpse_select_until = None
+                    ctx.log_event("quest_timeout_review_recovered", {"id": task, "reason": reason, "basis": basis})
+                    return False
+        if now < review.poll_after and review.waited_in_combat in (None, in_combat):
+            return True
         safe_interact = not in_combat and not nav.flags & LOOT_BLOCKED and frame.dialogue == Dialogue.CLOSED
         verified_defense = bool(in_combat and combat and combat.target_id and combat.target_engaged
             and not combat.target_dead and not combat.unsafe and combat.key_verified and combat.in_range is True
@@ -496,19 +600,16 @@ class RunQuests(State):
                       else '重新核对当前目标和路径，重试仍有效的操作'),
             'wait': '当前缺少合适的安全动作，短暂等待新的游戏回执再判断',
         }
-        if (safe_interact and not self.required_loot and self.suspend_request is None and nav.suspend_ready
+        if (safe_interact and nav.phase != QuestState.READY and not self.required_loot
+                and self.suspend_request is None and nav.suspend_ready
                 and nav.suspend_epoch is not None and nav.round_advance):
             criteria['next_task'] = '保留当前任务并转向已核对的下一项任务'
-        retreat = None
-        heading = ctx.heading()
-        if (in_combat and self.defense and self.defense.retreat is None and nav.position and nav.world_size
-                and heading is not None and ctx.heading_age() <= .75 and nav.flags & TravelFlags.KEYS_VERIFIED
-                and not nav.flags & (LOOT_BLOCKED & ~TravelFlags.IN_COMBAT) and frame.dialogue == Dialogue.CLOSED):
-            router = GridRouter(*nav.world_size)
-            retreat = next((point for point in reversed(self.safe_ground)
-                            if 35 <= router.distance(point, nav.position) <= 62), None)
-            if retreat is not None:
-                criteria['retreat'] = '沿已走过的安全地面撤出战斗，脱战后继续原任务和待拾取事项'
+        retreat = bool(in_combat and self.defense and nav.position and nav.world_size and nav.destination
+                       and nav.destination_map == nav.map_id and nav.flags & TravelFlags.KEYS_VERIFIED
+                       and not nav.flags & (LOOT_BLOCKED & ~TravelFlags.IN_COMBAT)
+                       and frame.dialogue == Dialogue.CLOSED)
+        if retreat:
+            criteria['retreat'] = '沿向当前任务目标推进的通路撤离，脱战后继续原任务和待拾取事项'
         signature = ('timeout_recovery', task, nav.map_id, int(nav.phase), reason, review.attempt, in_combat,
                      bool(self.required_loot), verified_defense, tuple(criteria),
                      combat and (combat.target_id, combat.state_epoch))
@@ -519,7 +620,7 @@ class RunQuests(State):
                  'attack_binding_verified': bool(combat and combat.key_verified),
                  'quest_progress': nav.objective_progress, 'position': nav.position, 'health_bucket': status[1] if status else None}
         result = None
-        if now - review.started_at <= TIMEOUT_DECISION_WAIT_S:
+        if self.planner is not None and not review.local_fallback and now - review.started_at <= TIMEOUT_DECISION_WAIT_S:
             try:
                 result = self.planner.poll(signature, state, criteria, max_age_s=TIMEOUT_DECISION_WAIT_S,
                     instructions=('任务步骤超时。选择当前证据支持的下一动作。保留待拾取事项。'
@@ -530,21 +631,41 @@ class RunQuests(State):
             if result is None:
                 return True
         choice = (result or {}).get('recommendation')
-        fallback = choice is None and verified_defense
+        no_decision = choice not in criteria or choice == 'wait'
+        fallback = no_decision and verified_defense
         if fallback:
             choice = 'retry'
-        ctx.log_event('quest_timeout_review_decision', {'id': task, 'reason': reason,
-                      'choice': choice, 'fallback_verified_defense': fallback,
-                      'result': result or {'reason': 'decision_budget'}})
+        if not review.local_fallback:
+            ctx.log_event('quest_timeout_review_decision', {'id': task, 'reason': reason,
+                          'choice': choice, 'fallback_verified_defense': fallback,
+                          'result': result or {'reason': 'model_unavailable' if self.planner is None else 'decision_budget'}})
         if choice not in criteria or choice == 'wait':
-            self.timeout_review = replace(review, started_at=now + 3, poll_after=now + 3)
-            return True
+            cancel = getattr(self.planner, "discard_pending", None)
+            if cancel and not review.local_fallback:
+                cancel()
+            if retreat:
+                choice = 'retreat'
+            elif safe_interact and nav.flags & TravelFlags.KEYS_VERIFIED and nav.position and nav.world_size:
+                if self.required_loot and self.recheck_pending_corpses(ctx, now, frame, nav, combat, status):
+                    self.timeout_review = replace(review, local_fallback=True, waited_in_combat=False)
+                    return True
+                choice = 'retry'
+                self.timeout_rechecks.add((task, phase, reason))
+                ctx.log_event("quest_timeout_fallback_current", {"id": task, "reason": reason,
+                                                                 "position": nav.position})
+                if nav.forever_step in {ForeverStep.TRAVEL, ForeverStep.TRAINER_WAIT}:
+                    ctx.input.tap("f4")  # The observed trainer step advertises its existing skip action.
+                    ctx.log_event("quest_timeout_main_quest_requested", {"id": task, "service": nav.forever_step.name})
+            else:
+                self.timeout_review = replace(review, poll_after=now + 4,
+                                              local_fallback=True, waited_in_combat=in_combat)
+                return True
         self.timeout_review = None
         if choice == 'next_task':
             self.suspend_request = (task, nav.phase, nav.suspend_epoch, reason, now, 'pending')
             return True
         elif choice == 'retreat':
-            self.start_defense_retreat(ctx, now, nav, retreat, combat, reason)
+            self.begin_combat_escape(ctx, now, nav, reason)
             return True
         for corpse in self.required_loot:
             corpse.started = now
@@ -555,7 +676,6 @@ class RunQuests(State):
             if self.defense is not None:
                 self.defense.grounded_at = now
                 self.defense.last_progress_at = now
-                self.defense.retreat_at = now if self.defense.retreat else None
                 self.defense.select_started_at, self.defense.selects = None, 0
             if self.hunt is not None and self.hunt.fight is not None:
                 self.hunt.started_at = now
@@ -567,6 +687,58 @@ class RunQuests(State):
         elif not self.required_loot and self.suspend_request is None:
             self.phase, self.trip, self.defense = None, None, None
             self.unusable_since = None
+            self.forever_entry = self.forever_building_segment = self.forever_entry_trip = None
+            self.forever_scene_wait_at = None
+            self.covered_route = self.covered_wait = None
+        return True
+
+    def recheck_pending_corpses(self, ctx, now, frame, nav, combat, status):
+        """Recover in place using only the verified loot selector and native facing."""
+        if not loot_prepared(nav) or not combat or combat.unsafe or combat.facing is None or not combat.turn_verified:
+            return True
+        if (combat.target_id and combat.target_dead and nav.corpse_lootable is True
+                and nav.task & TaskFlags.LOOT_IN_RANGE
+                and not any(item.matches(combat) for item in self.required_loot)):
+            epoch = combat.previous_target_epoch
+            self.required_loot.append(RequiredCorpseLoot(combat.target_id,
+                epoch if epoch is not None else combat.state_epoch, allow_approach=False))
+        corpse = next((item for item in self.required_loot if item.matches(combat)), None)
+        if corpse and (nav.corpse_loot_denied or corpse.has_clear_receipt(nav) or corpse.has_full_receipt(nav)
+                       or nav.corpse_lootable is True and corpse.presses < 2):
+            if corpse.started is None or now - corpse.started > 18:
+                corpse.started, corpse.sequence = now, None
+            return self.process_required_loot(ctx, now, frame, nav, combat, status)
+        if self.timeout_corpse_scan is None:
+            if now < self.timeout_corpse_next_scan and not nav.nearby_lootable_corpse:
+                return True
+            self.timeout_corpse_scan = NearbyCorpseScan(now, nav, combat)
+        if self.timeout_corpse_select_until is not None:
+            if now < self.timeout_corpse_select_until:
+                return True
+            self.timeout_corpse_scan.view += 1
+            self.timeout_corpse_select_until = None
+        scan = self.timeout_corpse_scan
+        command = scan.step(now, nav, combat)
+        if command.outcome == "view_reached":
+            if nav.nearby_lootable_corpse:
+                ctx.input.tap("k")
+                self.timeout_corpse_select_until = now + 1.2
+            else:
+                scan.view += 1
+        elif command.outcome == "views_checked":
+            unverified = [corpse for corpse in self.required_loot if not corpse.death_verified]
+            self.required_loot[:] = [corpse for corpse in self.required_loot if corpse.death_verified]
+            self.timeout_corpse_scan = None
+            self.timeout_corpse_next_scan = now + 15
+            ctx.log_event("quest_timeout_corpse_scan", {"views": scan.view,
+                "no_death_receipt": [(corpse.target, corpse.epoch) for corpse in unverified],
+                "confirmed_pending": len(self.required_loot)})
+            return bool(self.required_loot)
+        elif command.outcome:
+            self.timeout_corpse_scan = None
+            self.timeout_corpse_next_scan = now + 4
+        else:
+            self.apply_travel_command(ctx, command)
         return True
 
     def wait_for_choice_handoff(self, ctx, now, frame, navigation):
@@ -651,6 +823,10 @@ class RunQuests(State):
     def suspend_task(self, ctx, now, nav, in_combat):
         task, phase, epoch, reason, started, state = self.suspend_request
         self.set_forward(ctx, False)
+        if nav and nav.quest_id == task and nav.phase == QuestState.READY:
+            self.suspend_request = self.suspend_camera = self.unusable_since = None
+            ctx.log_event("quest_turn_in_kept", {"id": task, "reason": reason})
+            return
         if (not nav or nav.quest_id != task or nav.suspend_epoch is None
                 or not nav.task & TaskFlags.PREPARED):
             return self.stop(ctx, "quest_suspend_identity_lost")
@@ -759,6 +935,7 @@ class RunQuests(State):
                 fight.loot_recorded = True
                 if any((item.target, item.epoch) == (corpse.target, corpse.epoch) for item in self.required_loot):
                     continue
+                corpse.death_verified = bool(death_verified or credit_before_death)
                 self.required_loot.append(corpse)
                 ctx.log_event('quest_required_loot_pending', {'target': corpse.target, 'target_epoch': corpse.epoch,
                     'death_verified': death_verified})
@@ -770,6 +947,19 @@ class RunQuests(State):
             return False
         coherent = (frame and nav and frame.quest_id == nav.quest_id and frame.state == nav.phase
                     and frame.map_id == nav.map_id and nav.map_id == self.map_id and frame.dialogue == Dialogue.CLOSED)
+        if coherent and loot_prepared(nav):
+            cleared = False
+            for corpse in self.required_loot[:]:
+                bag_full = corpse.has_full_receipt(nav)
+                if bag_full or corpse.has_clear_receipt(nav):
+                    self.required_loot.remove(corpse)
+                    cleared = True
+                    if bag_full:
+                        self.nearby_loot_scan = self.nearby_loot_select_until = None
+                    ctx.log_event("quest_required_loot_result", {"target": corpse.target,
+                        "target_epoch": corpse.epoch, "result": "corpse_loot_bag_full" if bag_full else "corpse_cleared"})
+            if cleared:
+                return True
         if not self.required_loot and coherent and (nav.addon_build or 0) >= 325 and loot_prepared(nav):
             if self.check_nearby_loot(ctx, now, nav, combat):
                 return True
@@ -787,7 +977,8 @@ class RunQuests(State):
             ctx.log_event('quest_required_loot_action', dict(details, key=cmd.tap))
         if cmd.outcome:
             ctx.log_event('quest_required_loot_result', dict(details, result=cmd.outcome))
-            if cmd.outcome in {'corpse_cleared', 'corpse_empty'}:
+            if cmd.outcome in {'corpse_cleared', 'corpse_empty', 'same_target_still_alive',
+                               'corpse_loot_not_owned', 'corpse_loot_bag_full'}:
                 self.required_loot.remove(corpse)
             else:
                 self.stop(ctx, 'quest_' + cmd.outcome)
@@ -811,7 +1002,7 @@ class RunQuests(State):
         if self.nearby_loot_select_until is not None and now < self.nearby_loot_select_until:
             self.set_travel_keys(ctx, frozenset())
             return True
-        if combat.target_id and not combat.target_dead:
+        if combat.target_id and not combat.target_dead and not nav.nearby_lootable_corpse:
             self.nearby_loot_scan = self.nearby_loot_select_until = None
             return False
         scan = self.nearby_loot_scan
@@ -894,6 +1085,7 @@ class RunQuests(State):
             ctx.input.cancel_navigation_pulse()
             self.travel_pulse_pending = False
         self.ground_trace.note_input(keys)
+        self.escape_trace.note_input(keys)
         previous = self.travel_keys
         for key in sorted(self.travel_keys - keys):
             ctx.input.up(key)
@@ -924,6 +1116,7 @@ class RunQuests(State):
                 'movement_confirmed':False,'result':'input_sent'})
         if command.tap:
             self.ground_trace.note_input({command.tap})
+            self.escape_trace.note_input({command.tap})
             dispatch = "controller"
             if command.precise:
                 start_pulse = getattr(ctx.input, "start_navigation_pulse", None)
@@ -964,19 +1157,26 @@ class RunQuests(State):
         self.camera.forget()
         self.camera_receipt = self.suspend_camera = None
         self.ground_trace.clear()
+        self.escape_trace.clear()
+        self.escape_health.clear()
         self.travel_keys, self.forward, self.travel_pulse_pending = frozenset(), False, False
         self.trip = self.forever_progress_trip = self.avoidance_trip = None
         self.forever_entry = self.forever_entry_trip = self.forever_building_segment = None
+        self.covered_route = self.covered_wait = None
+        self.task_transit = None
+        self.status_wire_packet = None
         self.arrived = False
         self.object_points = self.object_probe_sequence = self.object_check_pending = None
         self.nearby_loot_scan = self.nearby_loot_select_until = None
         if self.recovery:
             self.recovery.trip = self.recovery.near_probe = self.recovery.hover = None
+            self.recovery.mesh_arrival = None
 
     def resume_online(self, now, elapsed):
         self.sample = self.last_sequence = self.nav_sequence = None
         self.last_frame = self.last_target = now
         self.unusable_since = self.unusable_reason = None
+        self.status_wire_failed = False
         self.phase_started += elapsed
         self.last_progress += elapsed
         if self.round_advance_at is not None:
@@ -1074,7 +1274,7 @@ class RunQuests(State):
                       or self.object_check_pending is not None
                       or self.loot_attempt is not None or self.fetch_attempt is not None
                       or self.npc_ground_wait is not None or self.npc_obstacle_reason is not None
-                      or self.defense and self.defense.retreat
+                      or self.combat_escape is not None
                       or phase and phase.startswith("recover_")
                       or airborne and not flight_window
                       or not airborne and phase in {"mount", "takeoff", "climb", "sky_launch", "sky_align",
@@ -1113,15 +1313,23 @@ class RunQuests(State):
         return waiting
 
     def camera_evidence(self, ctx, nav, stage):
-        if not isinstance(ctx.capture, ScreenCapture):
+        writer = getattr(ctx, "screenshots", None)
+        if not isinstance(ctx.capture, ScreenCapture) or not writer or not writer.available:
+            return
+        now = time.monotonic()
+        scene = nav.camera.scene.name.lower()
+        key = stage, scene
+        if now - self.last_camera_image.get(key, float("-inf")) < 60:
             return
         try:
             bounds = game_ui_bounds(frontmost_game_bounds(), nav.minimap)
             image = ctx.capture.grab(*bounds)
-            path = save_snapshot(image, f"camera_{stage}_{nav.camera.scene.name.lower()}", directory=SCREENSHOT_DIR)
+            path = writer.submit(image, f"camera_{stage}_{scene}")
+            if path:
+                self.last_camera_image[key] = now
             ctx.log_event("quest_camera_evidence", {"stage": stage, "id": nav.quest_id,
                 "scene": nav.camera.scene.name, "zoom": nav.camera.zoom, "sequence": nav.sequence,
-                "position": nav.position, "image": str(path) if path else None,
+                "position": nav.position, "image": str(path) if path else None, "image_queued": path is not None,
                 "composition_verified": False})
         except (CaptureError, ValueError, OSError) as exc:
             ctx.log_event("quest_camera_evidence_unavailable", {"reason": str(exc)})
@@ -1158,8 +1366,8 @@ class RunQuests(State):
         direct outside-mesh release) started; None falls back to the old
         stop-at-kill run end.
         """
-        from ..nav3d import NavigationError
         from ..control.quest_travel import TravelCommand
+        from ..nav3d import NavigationError
         sample = getattr(self, 'nav3d_sample', None)
         position = sample.position_xy if sample is not None else None
         goal = (sample.goal_xy if sample is not None and sample.goal_xy is not None
@@ -1311,6 +1519,335 @@ class RunQuests(State):
 
         return self.travel_to_destination(ctx, now, navigation, heading)
 
+    def coherent_forever_mesh_pose(self, nav):
+        pose = getattr(self, "nav3d_sample", None)
+        if (nav and pose and pose.position_xy is not None and nav.map_id == 1429
+                and (pose.sequence, pose.world_id, pose.ui_map_id, pose.quest_id, pose.phase, pose.client_build)
+                == (nav.sequence, 0, nav.map_id, nav.quest_id, int(nav.phase), 70959)):
+            return pose
+        return None
+
+    def refresh_stationary_mesh_support(self, now, nav):
+        identity = self.mesh_support_identity
+        if identity is not None and identity[0] != self.mesh_support_session:
+            if self.mesh_support_session is not None:
+                self.covered_support = None
+            self.mesh_support_session = identity[0]
+        if self.covered_support is None:
+            return
+        pose = self.coherent_forever_mesh_pose(nav)
+        if pose is None:
+            return
+        if not pose.grounded or nav.flags & (TravelFlags.FLYING | TravelFlags.FALLING | TravelFlags.SWIMMING):
+            self.covered_support = None
+            return
+        mesh_id, previous, observed_at = self.covered_support
+        if now - observed_at <= 6 and math.dist(pose.position_xy, previous[:2]) <= .18:
+            self.covered_support = mesh_id, previous, now
+            if identity is not None and now - self.mesh_checkpoint_at >= .5:
+                self.mesh_checkpoint_at = now
+                try:
+                    self.support_checkpoint.save(identity, mesh_id, pose, previous)
+                except (OSError, ValueError):
+                    log.debug("Unable to save the Nav3D support checkpoint", exc_info=True)
+
+    def remember_mesh_support(self, coordinator, now, previous_sequence, command):
+        if (coordinator.sequence != previous_sequence and coordinator.tracker.last is not None
+                and command.outcome in {None, "nav3d_route_arrived", "nav3d_target_confirmed", "nav3d_exit_reached"}):
+            self.covered_support = coordinator.mesh.mesh_id, coordinator.tracker.last, now
+
+    def covered_mesh_at(self, ctx, nav, *, recovering=False):
+        """Discover static geometry by its world frame and current position."""
+        config = getattr(ctx.cfg, "nav3d", None)
+        if (ctx.cfg.game_version != "1.60.1" or (self.travel_only and not recovering)
+                or config is None or nav.map_id != 1429
+                or not nav.position or not nav.world_size):
+            return None
+        from ..nav3d.local_mesh import LocalMesh
+
+        pose = self.coherent_forever_mesh_pose(nav)
+        router = GridRouter(*nav.world_size)
+        for name, entrance, radius, exit_xy in FOREVER_LOCAL_MESHES:
+            if router.distance(nav.position, entrance) > radius:
+                continue
+            if name == "abbey":
+                mesh_path, mesh_id = config.mesh, config.supervised_trial_mesh_id
+            else:
+                mesh_path = getattr(config, f"forever_{name}_mesh", None)
+                mesh_id = getattr(config, f"forever_{name}_mesh_id", None)
+            if not mesh_path or not mesh_id:
+                continue
+            key = mesh_path, mesh_id
+            if key not in self.covered_meshes:
+                try:
+                    self.covered_meshes[key] = LocalMesh(replace(config, mode="nav3d", mesh=mesh_path,
+                        alignment_file="", supervised_trial_mesh_id=mesh_id))
+                except (OSError, ValueError) as exc:
+                    self.covered_meshes[key] = None
+                    ctx.log_event("quest_local_mesh_unavailable", {"scene": name, "reason": str(exc)})
+            asset = self.covered_meshes[key]
+            if pose and asset and asset.contains(pose.position_xy, padding=.23):
+                return name, asset, pose, exit_xy
+            if not nav.flags & TravelFlags.OUTDOORS and name in {"fargodeep", "echo_ridge"}:
+                # A missing frame inside these mines must not activate the
+                # outdoor waypoint grid. Wait for the native pose to return.
+                return name, asset, None, exit_xy
+        return None
+
+    @staticmethod
+    def covered_world_point(nav, pose, point):
+        return (pose.position_xy[0] + (point[0] - nav.position[0]) * nav.world_size[0],
+                pose.position_xy[1] - (point[1] - nav.position[1]) * nav.world_size[1])
+
+    def wait_for_covered_mesh(self, ctx, now, scene, nav, reason, *, escape=False, recovering=False):
+        self.set_travel_keys(ctx, frozenset())
+        key = (scene, nav.quest_id, nav.phase, reason)
+        if self.covered_wait is None or self.covered_wait[0] != key:
+            self.covered_wait = key, now
+            ctx.log_event("quest_local_mesh_wait", {"scene": scene, "id": nav.quest_id, "reason": reason})
+        elif not escape and now - self.covered_wait[1] > 8:
+            if recovering and nav.flags & TravelFlags.OUTDOORS:
+                self.covered_route = self.covered_wait = None
+                return False
+            self.stop(ctx, "quest_recovery_mesh_unavailable" if recovering else "quest_local_mesh_" + reason)
+        return True
+
+    def approach_covered_mesh(self, ctx, now, nav, *, task_transit=False, escape=False, corpse=None):
+        recovering = corpse is not None
+        blocked = MESH_WALK_BLOCKED & ~TravelFlags.IN_COMBAT if task_transit else MESH_WALK_BLOCKED
+        if nav.flags & blocked:
+            if recovering or self.covered_route is not None:
+                self.set_travel_keys(ctx, frozenset())
+                self.covered_route = self.covered_wait = None
+                return True
+            return False
+        context = self.covered_mesh_at(ctx, nav, recovering=recovering)
+        if context is None:
+            if self.covered_route is not None:
+                key = self.covered_route[0]
+                if key[1:3] == (nav.quest_id, nav.phase):
+                    return self.wait_for_covered_mesh(ctx, now, key[0], nav, "coverage_lost",
+                                                      escape=escape, recovering=recovering)
+            self.covered_route = self.covered_wait = self.covered_exit = None
+            return False
+        name, asset, pose, exit_xy = context
+        indoor = not nav.flags & TravelFlags.OUTDOORS
+        mine = name in {"echo_ridge", "fargodeep"}
+        if task_transit and (not nav.destination or nav.destination_map != nav.map_id):
+            return False
+        if not (escape or recovering) and (self.arrived or nav.destination_map not in {0, nav.map_id}
+                                           or not (nav.destination or self.search_waypoint or self.object_target)):
+            return False
+        if recovering and pose is not None:
+            if pose.in_combat:
+                self.set_travel_keys(ctx, frozenset())
+                self.covered_route = self.covered_wait = None
+                return True
+            # The normal Nav3D ground bit excludes ghosts. Recovery has its own
+            # walking-binding receipt, checked before it enters this branch.
+            pose = replace(pose, grounded=True, bindings_verified=True)
+        if not pose or not pose.grounded or not pose.bindings_verified or pose.heading is None:
+            if indoor or self.covered_route is not None:
+                return self.wait_for_covered_mesh(ctx, now, name, nav, "pose_unavailable",
+                                                  escape=escape, recovering=recovering)
+            self.covered_route = self.covered_wait = None
+            return False
+        from ..nav3d.local_mesh import connected_ground
+        from ..nav3d import NavigationError
+        from ..nav3d.runtime import Nav3DCoordinator
+
+        goal_map = self.object_target or self.search_waypoint or nav.destination
+        scout = False
+        forward_goal = None
+        if task_transit:
+            forward_goal = (pose.goal_xy if pose.goal_world_id == 0 and pose.goal_xy
+                            else self.covered_world_point(nav, pose, nav.destination))
+        if escape:
+            goal_map = nav.destination
+        elif recovering:
+            goal_map = corpse
+        elif name == "fargodeep" and nav.quest_id == 62 and nav.phase == QuestState.ACTIVE:
+            goal_map = FARGODEEP_SOUTH_ENTRY
+            scout = task_transit and (indoor or GridRouter(*nav.world_size).distance(nav.position, goal_map) <= 9)
+        key = name, nav.quest_id, nav.phase, FARGODEEP_SCOUT_XY if scout else goal_map
+        if task_transit:
+            key += (nav.destination,)
+        if not indoor and self.covered_road_rejoin is not None:
+            declined, stopped_at = self.covered_road_rejoin
+            if key == declined and math.dist(pose.position_xy, stopped_at) <= 16:
+                return False
+            self.covered_road_rejoin = None
+        if self.covered_route is not None and self.covered_route[0] != key:
+            self.covered_route = None
+        if self.covered_route is None:
+            xy = pose.position_xy
+            seed = None
+            coordinator = None
+            if self.covered_support and self.covered_support[0] == asset.mesh.mesh_id:
+                _, previous, observed_at = self.covered_support
+                if now - observed_at <= 6 and math.dist(previous[:2], xy) <= 2:
+                    tracker = copy(asset.tracker)
+                    tracker.last = previous
+                    try:
+                        seed = tracker.update(xy)
+                    except NavigationError:
+                        pass
+            resume_key = key, xy
+            exit_finished = (self.covered_exit is not None and self.covered_exit[0] == key
+                             and math.dist(xy, self.covered_exit[1]) <= 6)
+            if exit_finished:
+                return False
+            if escape:
+                goal = forward_goal
+            elif recovering:
+                goal = self.covered_world_point(nav, pose, corpse)
+            elif scout:
+                goal = FARGODEEP_SCOUT_XY
+            elif name == "fargodeep" and goal_map == FARGODEEP_SOUTH_ENTRY:
+                goal = FARGODEEP_SOUTH_ENTRY_XY
+            else:
+                goal = (pose.goal_xy if goal_map == nav.destination and pose.goal_world_id == 0 and pose.goal_xy
+                        else self.covered_world_point(nav, pose, goal_map))
+            on_mesh = asset.contains(goal, padding=.23)
+            identity = self.mesh_support_identity
+            allow_legacy = (on_mesh and indoor and not task_transit and nav.phase == QuestState.READY
+                            and ((nav.addon_build or 0) < 344
+                                 or identity is not None and not self.support_checkpoint.path.exists()))
+            if (seed is None and not (recovering or escape) and resume_key != self.covered_resume_key
+                    and (identity is not None or allow_legacy)):
+                self.covered_resume_key = resume_key
+                if identity is not None:
+                    seed = self.support_checkpoint.restore(identity, copy(asset.tracker), pose)
+                    if seed is not None:
+                        ctx.log_event("quest_mesh_support_restored", {"scene": name, "id": nav.quest_id,
+                                                                      "position": seed})
+                if seed is None and allow_legacy:
+                    coordinator = Nav3DCoordinator(asset.config, now=now, log_event=ctx.log_event,
+                        scene_phases=(f"quest:{nav.quest_id}:{int(nav.phase)}",), mesh=asset.mesh,
+                        edge_tolerance=asset.tracker.edge_tolerance, arrival_radius=.25, corridor_control=True,
+                        resume_runs=DATA_DIR / "runs")
+                    if coordinator.seed_exit_support(pose, interrupted=True, stationary_arrival=nav):
+                        seed = coordinator.tracker.last
+            local_hunt = (not (recovering or escape) and mine and indoor and self.hunt is not None
+                          and on_mesh and self.search_waypoint is None)
+            support = None
+            if local_hunt:
+                support = connected_ground(asset.tracker, xy, exit_xy, start=seed,
+                                           max_length=MINE_EXIT_ROUTE_LIMIT.get(name))
+                if support:
+                    self.set_travel_keys(ctx, frozenset())
+                    self.covered_wait = self.trip = None
+                    self.arrived = True
+                    ctx.log_event("quest_local_mesh_hunt_here", {"scene": name, "id": nav.quest_id,
+                                                               "position": support[0]})
+                    return True
+            search_goal = None if recovering or task_transit else self.covered_search
+            if search_goal and search_goal[:4] == key:
+                floor = connected_ground(asset.tracker, xy, exit_xy, start=seed,
+                                         max_length=MINE_EXIT_ROUTE_LIMIT.get(name))
+                if floor:
+                    support = connected_ground(asset.tracker, xy, search_goal[4][:2], start=floor[0],
+                                               end_height=search_goal[4][2], max_length=48)
+            elif on_mesh and not local_hunt:
+                limit = None if indoor or recovering else min(140, math.dist(xy, goal) * 1.8 + 6)
+                support = connected_ground(asset.tracker, xy, goal, start=seed, max_length=95 if scout else limit,
+                                           end_height=24.48 if scout else None, forward_goal=forward_goal)
+            exiting = False
+            if support is None and indoor and (escape or not on_mesh and (
+                    recovering or not self.search_waypoint and not self.object_target)):
+                if seed is None and resume_key != self.covered_resume_key:
+                    self.covered_resume_key = resume_key
+                    coordinator = Nav3DCoordinator(asset.config, now=now, log_event=ctx.log_event,
+                        scene_phases=(f"quest:{nav.quest_id}:{int(nav.phase)}",), mesh=asset.mesh,
+                        edge_tolerance=asset.tracker.edge_tolerance, arrival_radius=.25, corridor_control=True,
+                        resume_runs=DATA_DIR / "runs", forward_goal=forward_goal)
+                    if coordinator.seed_exit_support(pose, interrupted=True):
+                        seed = coordinator.tracker.last
+                exits = (exit_xy,)
+                if name == "goldshire":
+                    exits += (GOLDSHIRE_SMITHY_APPROACH_XY,)
+                if name == "abbey":
+                    exits += (NORTHSHIRE_EXIT_NORTH, NORTHSHIRE_EXIT_NORTH_EAST, NORTHSHIRE_EXIT_TRAINER)
+                for exterior in sorted(exits, key=lambda point: math.dist(xy, point) + math.dist(point, goal)):
+                    support = connected_ground(asset.tracker, xy, exterior, start=seed,
+                                               max_length=MINE_EXIT_ROUTE_LIMIT.get(name), forward_goal=forward_goal)
+                    if support:
+                        exiting = True
+                        break
+            if support is None:
+                if indoor:
+                    return self.wait_for_covered_mesh(ctx, now, name, nav, "ground_support_unconfirmed",
+                                                      escape=task_transit, recovering=recovering)
+                self.covered_wait = None
+                return False
+            start, end = support
+            if coordinator is None:
+                coordinator = Nav3DCoordinator(asset.config, now=now, log_event=ctx.log_event,
+                    scene_phases=(f"quest:{nav.quest_id}:{int(nav.phase)}",), mesh=asset.mesh,
+                    edge_tolerance=asset.tracker.edge_tolerance, arrival_radius=.25, corridor_control=True,
+                    forward_goal=forward_goal)
+            coordinator.tracker.last = start
+            coordinator.goals = [end]
+            self.cancel_scene_requests()
+            self.camera.cancel(ctx, now, "local_mesh")
+            self.set_travel_keys(ctx, frozenset())
+            self.trip = None
+            if recovering:
+                self.recovery.trip = self.recovery.near_probe = self.recovery.approach_heading = None
+                self.recovery.arrived_at = None
+            self.covered_route = key, coordinator, end, exiting
+            self.covered_wait = None
+            purpose = ("escape_forward" if escape else "exit" if exiting else
+                       "corpse" if recovering else "search" if self.search_waypoint else "goal")
+            ctx.log_event("quest_local_mesh_takeover", {"scene": name, "id": nav.quest_id,
+                "from": start, "to": end, "purpose": purpose})
+        _, coordinator, end, exiting = self.covered_route
+        self.covered_wait = None
+        previous_sequence = coordinator.sequence
+        if math.dist(coordinator.tracker.last[:2], pose.position_xy) <= .18 and math.dist(
+                coordinator.tracker.last, end) <= .18 and coordinator.sequence is None:
+            from ..control.quest_travel import TravelCommand
+            command = TravelCommand(outcome="nav3d_route_arrived")
+        else:
+            # Fast-pose grounded and binding bits describe living characters.
+            fast_pose = None if recovering else getattr(self, "nav3d_fast_pose", None)
+            command = coordinator.step(now, replace(pose, goal_xy=end[:2], goal_world_id=0), nav, travel_only=True,
+                                       fast_pose=fast_pose, task_transit=task_transit)
+        self.apply_travel_command(ctx, command)
+        self.remember_mesh_support(coordinator, now, previous_sequence, command)
+        if command.outcome == "nav3d_route_arrived":
+            self.covered_route = None
+            if recovering:
+                if not exiting:
+                    self.recovery.mesh_arrival = corpse, now
+            else:
+                if not escape:
+                    self.covered_search = self.search_waypoint = None
+                self.arrived = not escape and not exiting and key[3] != FARGODEEP_SOUTH_ENTRY
+            if exiting or escape:
+                self.covered_exit = key, end[:2]
+            next_step = ("escape" if escape else "outdoor_travel" if exiting else
+                         "recovery_dialog" if recovering else "objective")
+            ctx.log_event("quest_local_mesh_handoff", {"scene": name, "id": nav.quest_id,
+                "position": pose.position_xy, "next": next_step})
+        elif command.outcome:
+            self.covered_route = None
+            if task_transit:
+                return False
+            if command.outcome == "nav3d_state_unsafe":
+                # The high-rate pose can see combat or falling one frame
+                # before the task strip. Wait for the normal state handler.
+                return True
+            if (not indoor and (recovering or not self.search_waypoint and not self.object_target)
+                    and command.outcome in {"nav3d_candidates_exhausted", "nav3d_replan_budget_exhausted",
+                                            "nav3d_budget_exhausted", "nav3d_support_missing"}):
+                self.covered_road_rejoin = key, pose.position_xy
+                ctx.log_event("quest_local_mesh_road_replan", {"scene": name, "id": nav.quest_id,
+                    "position": pose.position_xy, "reason": command.outcome})
+            else:
+                self.stop(ctx, "quest_recovery_mesh_unavailable" if recovering else "quest_local_mesh_" + command.outcome)
+        return True
+
     def forever_building_mode(self, ctx, nav):
         if (not nav or ctx.cfg.game_version != "1.60.1" or nav.map_id != 1429 or self.travel_only
                 or not nav.position or not nav.destination or not nav.world_size):
@@ -1392,7 +1929,7 @@ class RunQuests(State):
                 or nav.phase == QuestState.PENDING and nav.quest_id in NORTHSHIRE_ABBEY_PICKUPS):
             return "abbey", "enter"
 
-    def approach_forever_building(self, ctx, now, nav, heading, *, corpse_pose=None, retreating=False):
+    def approach_forever_building(self, ctx, now, nav, heading):
         choice = self.forever_building_mode(ctx, nav)
         if not choice:
             return False
@@ -1411,32 +1948,23 @@ class RunQuests(State):
                 TaskFlags.NPC_SELECTED, TaskFlags.NPC_RANGE_KNOWN, TaskFlags.NPC_WITHIN_5_YARDS)):
             self.forever_building_complete.add((nav.quest_id, nav.phase, scene_key))
             return False
-        pose = corpse_pose if corpse_pose is not None else self.nav3d_sample
+        pose = self.nav3d_sample
         if (pose is None or pose.position_xy is None or pose.goal_xy is None or pose.goal_world_id != 0
                 or not pose.grounded or not pose.bindings_verified
                 or (pose.sequence, pose.world_id, pose.ui_map_id, pose.quest_id, pose.phase, pose.client_build)
                 != (nav.sequence, 0, nav.map_id, nav.quest_id, int(nav.phase), 70959)):
-            if retreating:
-                return False
             self.wait_for_data(ctx, now, event_prefix + "_pose_unavailable")
             return True
-        if scene == "echo_ridge" and mode == "enter" and corpse_pose is None:
+        if scene == "echo_ridge" and mode == "enter":
             # The native hunt pin can be deep in the mine. Enter far enough
             # to search for workers on a connected floor before pursuing it.
             pose = replace(pose, goal_xy=ECHO_RIDGE_HUNT_XY)
-        if scene == "fargodeep" and mode == "enter" and corpse_pose is None:
+        if scene == "fargodeep" and mode == "enter":
             pose = replace(pose, goal_xy=FARGODEEP_SCOUT_XY)
         from ..nav3d import NavigationError, Query
         from ..nav3d.follower import WorldRouteFollower
         from ..nav3d.runtime import Nav3DCoordinator
         segment = nav.quest_id, nav.phase, scene_key, mode
-
-        def decline_retreat(reason):
-            self.cave_retreat_failed = True
-            self.set_travel_keys(ctx, frozenset())
-            self.forever_building_segment = self.forever_entry = None
-            ctx.log_event("forever_echo_ridge_exit_retreat_unconfirmed", {"reason": reason})
-            return False
 
         if segment != self.forever_building_segment:
             self.camera.cancel(ctx, now, event_prefix + "_mesh")
@@ -1456,17 +1984,23 @@ class RunQuests(State):
                 elif scene == "fargodeep":
                     config = replace(config, mesh=config.forever_fargodeep_mesh, alignment_file="",
                                      supervised_trial_mesh_id=config.forever_fargodeep_mesh_id)
-                short_steps = scene in {"echo_ridge", "fargodeep", "abbey"}
                 self.forever_entry = Nav3DCoordinator(config, now=now,
                     log_event=ctx.log_event, resume_runs=DATA_DIR / "runs",
                     scene_phases=(f"quest:{nav.quest_id}:{int(nav.phase)}",) if mode == "enter" else (),
-                    edge_tolerance=.23 if corpse_pose is not None or mode == "exit" and scene in {"abbey", "echo_ridge"}
+                    edge_tolerance=.23 if mode == "exit" and (
+                        scene in {"abbey", "echo_ridge"} or scene_key == "goldshire_smithy_exit")
                     else .14,
-                    short_steps=short_steps)
+                    arrival_radius=.25, corridor_control=True)
+                tracker = self.forever_entry.tracker
+                if self.mesh_support_identity is not None:
+                    restored = self.support_checkpoint.restore(self.mesh_support_identity, tracker, pose)
+                    if restored is not None:
+                        ctx.log_event("quest_mesh_support_restored", {"scene": scene, "id": nav.quest_id,
+                                                                      "position": restored})
                 if mode == "exit":
                     same_surface = (previous_scene == scene_key or
                                     (previous_scene, scene_key) == ("goldshire_repair_enter", "goldshire_smithy_exit"))
-                    if (previous and same_surface and previous.tracker.last
+                    if (tracker.last is None and previous and same_surface and previous.tracker.last
                             and math.dist(previous.tracker.last[:2], pose.position_xy) <= 2):
                         self.forever_entry.tracker.last = previous.tracker.last
                     if scene == "abbey":
@@ -1485,15 +2019,13 @@ class RunQuests(State):
                         handoff = GOLDSHIRE_HANDOFF_XY if scene == "goldshire" else ECHO_RIDGE_HANDOFF_XY
                     self.forever_entry.begin_exit(pose.goal_xy, now=now, sample=pose, handoff=handoff)
             except (OSError, ValueError, NavigationError) as exc:
-                if retreating:
-                    return decline_retreat(str(exc))
                 self.stop(ctx, event_prefix + "_mesh_unavailable:" + str(exc))
                 return True
         coordinator = self.forever_entry
         tracker = coordinator.tracker
         inside_mine = scene in {"echo_ridge", "fargodeep"} and not nav.flags & TravelFlags.OUTDOORS
         at_inn_door = scene == "goldshire" and math.dist(pose.position_xy, GOLDSHIRE_INN_DOOR_XY) <= 8
-        if at_inn_door and not coordinator.short_steps:
+        if at_inn_door and not coordinator.short_steps and not coordinator.corridor_control:
             coordinator.short_steps = True
             coordinator.follower = coordinator.route = None
             self.set_travel_keys(ctx, frozenset())
@@ -1519,10 +2051,7 @@ class RunQuests(State):
             candidates = tracker.candidates(pose.position_xy, edge_tolerance=tracker.edge_tolerance)
             connected = supports_to(coordinator.exit_candidates[0], candidates)
             if len(connected) != 1:
-                if retreating:
-                    return decline_retreat("interior_exit_support_unconfirmed")
-                self.wait_for_data(ctx, now, event_prefix + "_exit_support_unconfirmed")
-                return True
+                return self.wait_for_covered_mesh(ctx, now, scene, nav, "exit_support_unconfirmed")
             tracker.last = connected[0]
             ctx.log_event(event_prefix + "_interior_exit_support", {"position": tracker.last})
         if mode == "exit" and self.forever_entry_trip is not None:
@@ -1535,7 +2064,8 @@ class RunQuests(State):
                 self.stop(ctx, event_prefix + "_exit_rejoin_" + command.outcome)
             return True
         if mode == "enter" and coordinator.sequence is None:
-            support = tracker.candidates(pose.position_xy, edge_tolerance=tracker.edge_tolerance)
+            support = ([tracker.last] if tracker.last is not None else
+                       tracker.candidates(pose.position_xy, edge_tolerance=tracker.edge_tolerance))
             abbey_outside = scene == "abbey" and nav.flags & TravelFlags.OUTDOORS
             abbey_inside = scene == "abbey" and not abbey_outside
             inn_inside = at_inn_door and not nav.flags & TravelFlags.OUTDOORS
@@ -1621,15 +2151,16 @@ class RunQuests(State):
                 self.forever_entry_trip = None
         self.unusable_since = self.unusable_reason = None
         self.forever_scene_wait_at = None
+        self.covered_wait = None
         # A worker can be selected across a tunnel wall. The cave handoff
         # needs actual movement into the chamber, even with a live target.
         target_receipt = (None if scene in {"echo_ridge", "fargodeep"}
                           else building_target_receipt(nav, self.observation, now))
+        previous_sequence = coordinator.sequence
         command = coordinator.step(now, pose, nav, target_receipt=target_receipt, travel_only=True,
-                                   retreating=retreating)
-        if corpse_pose is not None and command.tap == "w" and command.hold_s is not None:
-            command = replace(command, hold_s=min(.055, command.hold_s))
+                                   fast_pose=getattr(self, "nav3d_fast_pose", None))
         self.apply_travel_command(ctx, command)
+        self.remember_mesh_support(coordinator, now, previous_sequence, command)
         if command.outcome in {"nav3d_route_arrived", "nav3d_target_confirmed", "nav3d_exit_reached"}:
             self.forever_building_complete.add((nav.quest_id, nav.phase, scene_key))
             if scene_key == "goldshire_smithy_exit":
@@ -1639,8 +2170,9 @@ class RunQuests(State):
             ctx.log_event(event_prefix + "_handoff", {"position": pose.position_xy, "basis": command.outcome,
                                                      "next": "interaction" if self.arrived else "outdoor_travel"})
         elif command.outcome:
-            if retreating:
-                return decline_retreat(command.outcome)
+            if command.outcome == "nav3d_state_unsafe":
+                self.forever_entry = self.forever_building_segment = self.forever_entry_trip = None
+                return True
             if (scene == "abbey" and mode == "exit"
                     and command.outcome in {"nav3d_exit_unreachable", "nav3d_support_missing",
                                             "nav3d_displacement_discontinuity"}):
@@ -1699,7 +2231,8 @@ class RunQuests(State):
             self.forever_progress_since = now
         if step not in FOREVER_SERVICE_TRAVEL:
             self.set_travel_keys(ctx, frozenset())
-            if (step in {ForeverStep.REPAIR, ForeverStep.REPAIR_CANNOT_PAY, ForeverStep.REPAIR_CLOSE}
+            if (step in {ForeverStep.REPAIR, ForeverStep.REPAIR_CANNOT_PAY, ForeverStep.REPAIR_CLOSE,
+                         ForeverStep.VENDOR_SELL}
                     and nav.destination and nav.position and nav.world_size
                     and ctx.cfg.nav3d.forever_goldshire_mesh_id
                     and GridRouter(*nav.world_size).distance(nav.destination, GOLDSHIRE_SMITHY_APPROACH) <= 25
@@ -1708,7 +2241,7 @@ class RunQuests(State):
             if step in {ForeverStep.TRAINER_GOSSIP, ForeverStep.LEARN, ForeverStep.TALENT, ForeverStep.MACRO,
                         ForeverStep.TRAINER_FINISH, ForeverStep.EQUIP, ForeverStep.REPAIR_GOSSIP,
                         ForeverStep.REPAIR, ForeverStep.REPAIR_CANNOT_PAY,
-                        ForeverStep.REPAIR_CLOSE} and now - self.forever_progress_at >= 1.5:
+                        ForeverStep.REPAIR_CLOSE, ForeverStep.VENDOR_SELL} and now - self.forever_progress_at >= 1.5:
                 self.forever_progress_at = now
                 ctx.input.tap("f4")
             elif (step == ForeverStep.TRAINER_WAIT and now - self.forever_progress_since >= 95
@@ -1888,11 +2421,13 @@ class RunQuests(State):
                       else self.road_scan.traces(self.road_status))
             previous_trip = self.road_trip_identity
             identity_changed = previous_trip is not None and previous_trip[0] is self.trip and previous_trip != scope
-            new_roads = traces and not self.trip.road_traces and not self.trip.road_disabled
+            new_roads = traces and traces != self.trip.road_traces and self.trip.road_origin is None
             if (identity_changed or new_roads) and self.trip.mode in {"walk", "mount"} and self.trip.phase == "cruise":
                 self.trip.enter("choose", now)
-                self.trip.road_origin = None
                 self.set_travel_keys(ctx, frozenset())
+            if identity_changed or new_roads:
+                self.trip.road_origin = None
+                self.trip.road_disabled = self.trip.road_unmatched = False
             self.trip.road_traces = traces
             self.road_trip_identity = scope
         previous = self.trip.mode, self.trip.phase
@@ -2083,7 +2618,8 @@ class RunQuests(State):
             self.forever_building_segment, self.forever_entry, self.forever_entry_trip = None, None, None
             self.forever_building_complete.clear()
             self.forever_exit_rejoins.clear()
-            self.forever_corpse_goal = None
+            self.covered_route = self.covered_wait = self.covered_exit = self.covered_road_rejoin = None
+            self.covered_resume_key = None
             self.consumables = ConsumableRecovery()
         in_combat = bool((status and status[0] & StatusFlags.IN_COMBAT)
                          or navigation and navigation.flags & TravelFlags.IN_COMBAT)
@@ -2098,12 +2634,22 @@ class RunQuests(State):
             self.recovery.life_at += paused
             self.recovery.preparation.started += paused
             self.recovery_deferred_at = None
+        corpse = None
+        if (life == LifeState.GHOST and not sample.dialog and sample.walk_verified is True
+                and sample.corpse_source in {CorpseSource.CURRENT_MAP, CorpseSource.RECORDED_DEATH,
+                                             CorpseSource.PARENT_MAP, CorpseSource.MINIMAP_MAP}):
+            corpse = sample.corpse
+        if corpse is None or self.recovery.map_id not in {None, navigation.map_id}:
+            self.covered_route = self.covered_wait = self.covered_exit = self.covered_road_rejoin = None
         if navigation and navigation.camera is not None:
             self.camera.tick(ctx, now, navigation, background=True,
-                             locked=life != LifeState.GHOST or not sample or sample.dialog)
+                             locked=life != LifeState.GHOST or sample.dialog or self.covered_route is not None)
+        ground_route = None
+        if corpse is not None:
+            ground_route = lambda nav: self.approach_covered_mesh(ctx, now, nav, corpse=corpse)
         result = self.recovery.tick(ctx, now, navigation, ctx.heading(),
             lambda keys: self.set_travel_keys(ctx, keys), frontmost_game_bounds,
-            ground_route=lambda nav, corpse, heading: self.forever_corpse_route(ctx, now, nav, corpse, heading))
+            ground_route=ground_route)
         if result == "done":
             self.recovery = None
             self.camera_restore_reason = "resurrection"
@@ -2119,7 +2665,6 @@ class RunQuests(State):
             self.forever_building_segment, self.forever_entry, self.forever_entry_trip = None, None, None
             self.forever_building_complete.clear()
             self.forever_exit_rejoins.clear()
-            self.forever_corpse_goal = None
             if self.round_advance_at is not None:
                 self.round_advance_at = now
             if self.followup_started is not None:
@@ -2129,30 +2674,6 @@ class RunQuests(State):
         elif result:
             self.stop(ctx, "quest_recovery_" + result)
         return True
-
-    def forever_corpse_route(self, ctx, now, nav, corpse, heading):
-        if (ctx.cfg.game_version != "1.60.1" or nav.quest_id != 21 or nav.map_id != 1429
-                or nav.recovery.corpse_source not in {CorpseSource.CURRENT_MAP, CorpseSource.RECORDED_DEATH}
-                or nav.recovery.walk_verified is not True
-                or GridRouter(*nav.world_size).distance(corpse, ECHO_RIDGE_HUNT) > 60):
-            return False
-        nav = replace(nav, destination=corpse, destination_map=nav.map_id, flags=nav.flags | TravelFlags.KEYS_VERIFIED)
-        if not self.forever_building_mode(ctx, nav):
-            return False
-        pose = getattr(self, "nav3d_sample", None)
-        if (pose is None or pose.world_id != 0 or pose.sequence != nav.sequence
-                or pose.position_xy is None or pose.in_combat
-                or nav.flags & (TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING
-                                | TravelFlags.SWIMMING | TravelFlags.CASTING)):
-            self.wait_for_data(ctx, now, "forever_corpse_mesh_pose_unavailable")
-            return True
-        if self.forever_corpse_goal is None or self.forever_corpse_goal[0] != corpse:
-            dx = (corpse[0] - nav.position[0]) * nav.world_size[0]
-            dy = (nav.position[1] - corpse[1]) * nav.world_size[1]
-            self.forever_corpse_goal = corpse, (pose.position_xy[0] + dx, pose.position_xy[1] + dy)
-        pose = replace(pose, goal_xy=self.forever_corpse_goal[1],
-                       goal_world_id=0, grounded=True, bindings_verified=True)
-        return self.approach_forever_building(ctx, now, nav, heading, corpse_pose=pose)
 
     def maintain_pet(self, ctx, now, navigation, frame, in_combat):
         sample = navigation.recovery if navigation else None
@@ -2344,6 +2865,8 @@ class RunQuests(State):
                 self.patrol_wait_until = now + 8
 
     def activity_reason(self, now, navigation):
+        if self.combat_escape is not None:
+            return "combat_escape_" + self.combat_escape.stage
         encounter = getattr(self, 'nav3d_encounter', None)
         if encounter and encounter.active:
             return 'encounter_' + (encounter.state or 'waiting')
@@ -2351,14 +2874,20 @@ class RunQuests(State):
             return 'building_' + self.building_access.state
         if navigation is None and self.auto_route:
             return "telemetry_wait"
+        if self.timeout_review is not None:
+            if self.timeout_review.local_fallback:
+                return "required_corpse_loot" if self.required_loot else "current_task_recheck_wait"
+            return "timeout_model_wait"
+        if self.covered_wait is not None:
+            return "local_mesh_" + self.covered_wait[0][3]
         if self.unusable_since is not None:
             return self.unusable_reason or "telemetry_wait"
         if self.recovery is not None:
             return "death_recovery"
         if self.pet_preparation is not None:
             return "class_preparation"
-        if self.timeout_review is not None:
-            return "timeout_model_wait"
+        if self.task_transit is not None:
+            return "noncombat_task_transit"
         if navigation and navigation.flags & TravelFlags.IN_COMBAT:
             return "combat"
         if (self.required_loot or self.nearby_loot_scan is not None
@@ -2386,6 +2915,8 @@ class RunQuests(State):
             return "suspend_camera_wait" if self.suspend_camera is not None else "round_receipt_wait"
         if navigation and navigation.flags & TravelFlags.CASTING:
             return "casting"
+        if self.covered_route is not None:
+            return "mesh_exit_travel" if self.covered_route[3] else "mesh_travel"
         if self.travel_keys or self.forward:
             return "travel"
         if self.npc_ground_wait is not None:
@@ -2403,7 +2934,19 @@ class RunQuests(State):
         if (not self.require_prepared or self.travel_only or self.status_wire_failed or not send
                 or ctx.cfg.nav3d.mode == 'nav3d-shadow' or not nav or not nav.run_status_ready):
             return
-        if activity == 'combat' or activity in {'encounter_fighting', 'encounter_defending'}:
+        if activity.startswith('combat_escape_'):
+            code = 15 if (nav.addon_build or 0) >= 337 else 2
+        elif activity == 'mesh_exit_travel' or activity.startswith('local_mesh_') or activity.endswith('_exit_support_unconfirmed'):
+            code = 10
+        elif activity in {'timeout_model_wait', 'model_wait', 'terrain_model_wait'}:
+            code = 11
+        elif activity in {'quest_player_telemetry_unavailable', 'telemetry_wait'}:
+            code = 12
+        elif activity in {'round_receipt_wait', 'round_transition_expected'}:
+            code = 13
+        elif activity == 'camera_receipt_wait':
+            code = 14
+        elif activity == 'combat' or activity in {'encounter_fighting', 'encounter_defending'}:
             code = 9 if self.required_loot else 4
         elif activity == 'required_corpse_loot' or activity == 'loot_receipt_wait':
             code = 5
@@ -2413,11 +2956,34 @@ class RunQuests(State):
             code = 7
         elif activity == 'combat_target_search' or activity.startswith('encounter_'):
             code = 3
-        elif activity == 'travel' or activity.startswith('building_'):
+        elif activity in {'travel', 'mesh_travel', 'noncombat_task_transit'} or activity.startswith('building_'):
             code = 2
         else:
             code = 8 if 'wait' in activity and activity != 'unclassified_wait' else 1
-        if send(code):
+        detailed = getattr(nav, 'run_status_detailed', False)
+        if detailed and (getattr(nav, 'addon_build', 0) or 0) >= 334 and code >= 6:
+            symbols = (6, code - 5) if code <= 10 else (6, 6, code - 10)
+            self.status_wire_packet = (activity, code, symbols, now, now + .85)
+            self.send_activity_packet(ctx, now, nav)
+            return
+        if code >= 7:
+            code = 4 if code == 9 else 1
+        self.record_activity_send(ctx, now, activity, code, nav, send(code))
+
+    def send_activity_packet(self, ctx, now, nav):
+        activity, code, symbols, due, deadline = self.status_wire_packet
+        if now > deadline or not nav or not nav.run_status_ready:
+            self.status_wire_packet = None
+        elif now >= due:
+            sent = ctx.input.publish_run_status(symbols[0])
+            if sent and len(symbols) > 1:
+                self.status_wire_packet = (activity, code, symbols[1:], now + .18, deadline)
+            else:
+                self.status_wire_packet = None
+                self.record_activity_send(ctx, now, activity, code, nav, sent)
+
+    def record_activity_send(self, ctx, now, activity, code, nav, sent):
+        if sent:
             self.status_wire_at = now
             if code != self.status_wire_code:
                 self.status_wire_code = code
@@ -2535,15 +3101,18 @@ class RunQuests(State):
         self.combat_frame = None
         frame_image = nav_image = text_image = None
         self.nav3d_fast_pose = None
+        self.mesh_support_identity = None
         if isinstance(ctx.capture, ScreenCapture):
             quest_rect = quest_region(channel.x, channel.y)
             combat_rect = combat_region(channel.x, channel.y)
             nav_rect = travel_region(channel.x, channel.y, supply_bars=forever_bars)
             if self.auto_route and self.require_prepared:
                 monitors = ctx.capture.monitor_regions()
-                for run_status, corpse_receipts in ((True, True), (False, True), (False, False)):
+                for full, run_status, corpse_receipts in ((True, True, True), (False, True, True),
+                                                          (False, False, True), (False, False, False)):
                     extended = travel_region(channel.x, channel.y, camera_bindings=True,
-                                             corpse_receipts=corpse_receipts, run_status=run_status)
+                                             corpse_receipts=corpse_receipts, run_status=run_status,
+                                             bag_full_receipt=full)
                     if any(x <= extended[0] and extended[0] + extended[2] <= x + w
                            and y <= extended[1] < channel.y <= y + h for x, y, w, h in monitors):
                         nav_rect = extended
@@ -2562,8 +3131,9 @@ class RunQuests(State):
                     pose_rect = candidate
                     top = min(top, pose_rect[1])
             if self.auto_route and self.require_prepared and forever_bars and ctx.input.name == "helper":
-                road_rect = road_region(channel.x, channel.y)
-                right = max(right, road_rect[0] + road_rect[2])
+                road_rects = [road_region(channel.x, channel.y, raised=raised) for raised in (False, True)]
+                x, y, width, _ = road_rects[1]
+                top, right = min(top, y), max(right, x + width)
             read_text = (self.auto_route and self.require_prepared and not self.travel_only and self.planner is not None
                          and self.sample and self.sample.state == QuestState.ACTIVE)
             if read_text:
@@ -2581,13 +3151,17 @@ class RunQuests(State):
                 if read_text:
                     text_image = strip(text_rect)
                 if self.require_prepared and forever_bars and ctx.input.name == "helper":
-                    road_image = strip(road_rect)
+                    road_image = tuple(strip(rect) for rect in road_rects)
                 if read_nav3d:
-                    from ..perception.nav3d_channel import decode_fast_pose, decode_nav3d
+                    from ..perception.nav3d_channel import (decode_fast_pose, decode_nav3d,
+                                                           decode_support_identity, support_region)
                     raised = nav3d_region(channel.x, channel.y, raised=True)
                     self.nav3d_sample = decode_nav3d(strip(xyz_rect))
                     if self.nav3d_sample is None and forever_bars:
                         self.nav3d_sample = decode_nav3d(strip(raised))
+                    if self.nav3d_sample is not None and forever_bars:
+                        self.mesh_support_identity = decode_support_identity(
+                            strip(support_region(channel.x, channel.y)), self.nav3d_sample.sequence)
                     if self.nav3d_sample is not None and pose_rect is not None:
                         self.nav3d_fast_pose = decode_fast_pose(strip(pose_rect))
         status = ctx.channel.status(max_age_s=1.5)
@@ -2597,6 +3171,9 @@ class RunQuests(State):
                 nav_image = ctx.capture.grab(*travel_region(channel.x, channel.y, supply_bars=forever_bars))
             navigation = (decode_travel(nav_image, expect_camera_bindings=True)
                           if self.expect_camera_bindings else decode_travel(nav_image))
+            if self.coherent_forever_mesh_pose(navigation) is None:
+                self.mesh_support_identity = None
+            self.refresh_stationary_mesh_support(now, navigation)
             if self.require_prepared and navigation is not None:
                 if (navigation.addon_build or 0) >= CAMERA_BINDING_BUILD:
                     self.expect_camera_bindings = True
@@ -2611,7 +3188,10 @@ class RunQuests(State):
         observed_combat = decode_combat(self.combat_frame) if self.combat_frame is not None else None
         self.observation = self.observations.snapshot(now, frame, navigation, observed_combat)
         if road_image is not None:
-            road = decode_road_status(road_image)
+            raised = bool(navigation and (navigation.addon_build or 0) >= ROAD_STRIP_RAISED_BUILD)
+            road = decode_road_status(road_image[int(raised)])
+            if road and raised:
+                road = replace(road, raised=True)
             if road and navigation and (navigation.addon_build or 0) >= 307:
                 if road.sequence == navigation.sequence and road.identity.map_id == navigation.map_id:
                     self.road_status = road
@@ -2619,6 +3199,7 @@ class RunQuests(State):
                 self.road_status = road
             safe = bool(self.road_status and navigation and frame and frame.quest_id == navigation.quest_id
                         and frame.dialogue == Dialogue.CLOSED
+                        and not self.combat_escape and not (status and status[0] & StatusFlags.IN_COMBAT)
                         and navigation.task & TaskFlags.PREPARED and navigation.position and navigation.world_size
                         and navigation.flags & TravelFlags.OUTDOORS and not navigation.flags & (
                             TravelFlags.FLYING | TravelFlags.FALLING | TravelFlags.SWIMMING
@@ -2629,6 +3210,7 @@ class RunQuests(State):
             if self.road_scan.tick(ctx, now, self.road_status, allow=safe and not self.required_loot,
                                    position=navigation.position if navigation else None,
                                    world_size=navigation.world_size if navigation else None,
+                                   needs_coverage=bool(self.trip and self.trip.road_unmatched),
                                    release=lambda: self.set_travel_keys(ctx, frozenset())):
                 if self.road_scan.request_at is not None:
                     self.execution_started = True
@@ -2663,10 +3245,14 @@ class RunQuests(State):
             ctx.log_event("quest_addon_loaded", {"build": navigation.addon_build,
                 "protocol": navigation.protocol_version, "sequence": navigation.sequence,
                 "extension_schema": navigation.extension_schema})
+        had_status_packet = self.status_wire_packet is not None
+        if had_status_packet:
+            self.send_activity_packet(ctx, now, navigation)
         if now - self.observation_logged_at >= 1:
             self.observation_logged_at = now
             activity = self.activity_reason(now, navigation)
-            self.publish_activity(ctx, now, activity, navigation, frame)
+            if not had_status_packet:
+                self.publish_activity(ctx, now, activity, navigation, frame)
             ctx.log_event("quest_observation", {
                 "activity": activity,
                 "id": navigation.quest_id if navigation else step.quest_id,
@@ -2687,6 +3273,8 @@ class RunQuests(State):
         loot_combat = observed_combat
         if self.combat_frame is None and navigation and self.strict_loot(ctx, navigation):
             loot_combat = self.read_combat(ctx)
+        if self.handle_combat_escape(ctx, now, frame, navigation, loot_combat, status):
+            return
         if self.review_timeout(ctx, now, frame, navigation, loot_combat, status):
             return
         if self.process_required_loot(ctx, now, frame, navigation, loot_combat, status):
@@ -2803,7 +3391,11 @@ class RunQuests(State):
         in_combat = bool(status[0] & StatusFlags.IN_COMBAT
                          or navigation and navigation.flags & TravelFlags.IN_COMBAT)
         if not in_combat:
-            self.cave_retreat_failed = False
+            if self.task_transit is not None:
+                ctx.log_event("quest_noncombat_transit_resumed", {"id": step.quest_id,
+                    "position": navigation.position if navigation else None})
+                self.task_transit = None
+                self.trip = None
         if self.suspend_request and not in_combat and self.defense is None and self.loot_sweep is None:
             return self.suspend_task(ctx, now, navigation, in_combat)
         prepared = (navigation and navigation.quest_id == frame.quest_id == step.quest_id
@@ -2812,7 +3404,7 @@ class RunQuests(State):
         if prepared:
             self.remember_safe_ground(navigation, in_combat, now)
             if (frame.dialogue == Dialogue.CLOSED and self.loot_sweep is None
-                    and self.object_click_at is None and not (self.defense and self.defense.retreat)
+                    and self.object_click_at is None
                     and self.mend_pet(ctx, now, navigation, in_combat)):
                 return
             if not in_combat and self.avoidance_trip and frame.dialogue == Dialogue.CLOSED:
@@ -2854,11 +3446,14 @@ class RunQuests(State):
                 self.nav_sequence, self.nav_at = navigation.sequence, now
             if now - self.nav_at > 1.2:
                 return self.stop(ctx, "quest_navigation_channel_stale")
-            if (not self.cave_retreat_failed and frame.dialogue == Dialogue.CLOSED
-                    and self.forever_building_mode(ctx, navigation) == ("echo_ridge", "exit")
-                    and self.approach_forever_building(ctx, now, navigation, heading, retreating=True)):
-                self.execution_started = True
+            if self.advance_noncombat_task(ctx, now, navigation, frame, status, heading):
                 return
+            self.task_transit = None
+            self.covered_route = self.covered_wait = None
+            if (frame.dialogue == Dialogue.CLOSED
+                    and self.forever_building_mode(ctx, navigation) == ("echo_ridge", "exit")):
+                escape = self.begin_combat_escape(ctx, now, navigation, "cave_exit")
+                return self.continue_combat_escape(ctx, now, navigation, frame, status[0], escape)
             combat = self.read_combat(ctx)
             fight = self.hunt and self.hunt.fight
             if (self.defense is None and self.arrived and fight and fight.presses
@@ -2880,26 +3475,20 @@ class RunQuests(State):
                                and combat.target_id == fight.target_id
                                and fight.state_epoch in {None, combat.state_epoch})
             if not continuing_hunt:
+                self.forever_entry = self.forever_entry_trip = self.forever_building_segment = None
                 return self.defend(ctx, now, navigation, frame.dialogue, combat)
         elif self.defense is not None:
             if not self.strict_loot(ctx, navigation):
                 self.remember_defense_corpse(self.defense.fight, self.read_combat(ctx))
             ctx.log_event("quest_defense_resumed", {"id": step.quest_id})
-            retreated = self.defense.retreat is not None
             self.phase_started += now - self.defense.started_at
             self.defense, self.unusable_since = None, None
             self.set_forward(ctx, False)
-            if retreated:
-                self.arrived = False
-                if self.hunt:
-                    self.hunt.fight, self.hunt.credit_deadline = None, None
-                    self.hunt.reset_search()
-                    self.search_quest_area(ctx, navigation)
             self.npc_step = self.npc_press_at = self.object_probe_sequence = None
             self.object_probe, self.object_points = 0, None
             if not self.arrived:
                 self.trip = None
-            if (not self.strict_loot(ctx, navigation) and not retreated and self.loot_sweep is None
+            if (not self.strict_loot(ctx, navigation) and self.loot_sweep is None
                     and self.defense_had_output and navigation
                     and navigation.sweep_ready and navigation.fetch_ready):
                 self.defense_had_output = False
@@ -2948,7 +3537,8 @@ class RunQuests(State):
                         RoundStage.TURN_IN: QuestState.READY}[self.round_stage]
             if self.round_stage == RoundStage.PICKUP and navigation.round_immediate:
                 expected = QuestState.READY
-            if sample.state != expected or navigation.round_blocked or navigation.current_suspended:
+            if (sample.state != expected or navigation.round_advance or navigation.round_blocked
+                    or navigation.current_suspended):
                 return self.advance_round(ctx, now, navigation, status[0])
             if (navigation.round_immediate and frame.dialogue != Dialogue.CLOSED
                     and frame.dialogue_id != step.quest_id and not status[0] & StatusFlags.IN_COMBAT):
@@ -3065,6 +3655,9 @@ class RunQuests(State):
             self.follower = RouteFollower(route, ctx.cfg.navigation, loop=False) if route else None
             self.trip, self.search_waypoint, self.searches = None, None, 0
             self.area_search = None
+            self.covered_route = self.covered_wait = self.covered_exit = self.covered_search = None
+            self.covered_road_rejoin = None
+            self.covered_search_points.clear()
             self.loot_for_fight = None
             self.loot_attempt = None
             self.fetch_for_fight, self.fetch_attempt = None, None
@@ -3167,6 +3760,9 @@ class RunQuests(State):
                 self.cancel_scene_requests()
             if frame.quest_id != step.quest_id:
                 return
+            if (navigation and self.npc_press_at is not None
+                    and (frame.dialogue_id == step.quest_id or frame.dialogue == Dialogue.BLOCKED)):
+                self.confirm_npc_interaction_position(navigation)
             if talk_objective:
                 if self.npc_press_at is None:
                     self.npc_press_at = now
@@ -3204,6 +3800,12 @@ class RunQuests(State):
                 self.action_signature, self.attempts = signature, 0
             return self.act(ctx, step.dialog_key, now)
         if navigation and not in_combat and self.approach_forever_building(ctx, now, navigation, heading):
+            self.covered_route = None
+            return
+        if (navigation and not in_combat and not mount_tutorial
+                and not all(navigation.task & flag for flag in
+                            (TaskFlags.NPC_SELECTED, TaskFlags.NPC_RANGE_KNOWN, TaskFlags.NPC_WITHIN_5_YARDS))
+                and self.approach_covered_mesh(ctx, now, navigation)):
             return
         if (navigation and not in_combat and not mount_tutorial and self.terrain is None
                 and self.process_building_access(ctx,now,navigation,heading)):
@@ -3312,7 +3914,8 @@ class RunQuests(State):
                     ctx.log_event("quest_resource_progress", {"id": step.quest_id, "percent": progress[0] / 10})
                 if (resource and not in_combat and navigation and navigation.position and navigation.destination
                         and navigation.world_size and not (self.hunt.fight and self.hunt.fight.presses)
-                        and not inside_quest_search_area(navigation)):
+                        and not inside_quest_search_area(navigation)
+                        and not self.inside_covered_mine(ctx, navigation)):
                     self.hunt.fight = None
                     self.hunt.reset_search()
                     self.set_forward(ctx, False)
@@ -3355,7 +3958,6 @@ class RunQuests(State):
                     return self.begin_npc_detour(ctx, now, navigation, "interaction_unconfirmed")
                 self.attempts = 0
                 self.npc_press_at = None
-                self.npc_interaction_attempts.pop(self.npc_interaction_identity(navigation), None)
                 ctx.log_event("forever_goldshire_npc_repositioned", {"id": navigation.quest_id,
                               "position": navigation.position, "sequence": navigation.sequence})
             return
@@ -3367,6 +3969,7 @@ class RunQuests(State):
             hint = self.npc_location_hint(navigation)
             if hint is not None:
                 navigation = replace(navigation, destination=hint[1])
+        navigation = self.npc_range_after_attempt(navigation)
         range_receipt = TaskFlags.NPC_SELECTED | TaskFlags.NPC_RANGE_KNOWN | TaskFlags.NPC_WITHIN_5_YARDS
         if self.npc_detouring and self.npc_obstacle_reason == "interaction_unconfirmed":
             return self.tick_npc_detour(ctx, now, navigation, heading)
@@ -3400,6 +4003,9 @@ class RunQuests(State):
 
     def advance_round(self, ctx, now, navigation, status):
         self.set_forward(ctx, False)
+        if navigation.phase == QuestState.READY and (navigation.round_stage == RoundStage.TURN_IN
+                or navigation.round_immediate or navigation.current_suspended):
+            return self.wait_for_data(ctx, now, "quest_turn_in_receipt_unconfirmed")
         if navigation.round_blocked:
             return self.stop(ctx, "quest_round_state_changed")
         if not navigation.task & TaskFlags.PREPARED:
@@ -3458,8 +4064,6 @@ class RunQuests(State):
             ctx.log_event("quest_defense_dismount", {"key": key, "attempt": defense.dismount_attempts})
             ctx.input.tap(key)
             return
-        if defense.retreat is not None:
-            return self.defense_retreat(ctx, now, navigation)
         if self.combat_adjusted is not None and self.hunt and self.combat_adjusted is self.hunt.fight:
             if now - self.hunt.fight.last_action < .75:
                 self.set_forward(ctx, False)
@@ -3513,26 +4117,284 @@ class RunQuests(State):
                     or ctx.heading_age() > .75 or not flags & TravelFlags.KEYS_VERIFIED
                     or flags & (TravelFlags.SWIMMING | TravelFlags.CASTING) or dialogue != Dialogue.CLOSED):
                 return self.stop(ctx, "quest_defense_" + status)
-            router = GridRouter(*navigation.world_size)
-            point = next((p for p in reversed(self.safe_ground) if 35 <= router.distance(p, navigation.position) <= 62), None)
-            if point is None:
-                return self.stop(ctx, "quest_defense_" + status)
-            self.start_defense_retreat(ctx, now, navigation, point, combat, status)
-            return self.defense_retreat(ctx, now, navigation)
+            self.begin_combat_escape(ctx, now, navigation, status)
+            return
         elif status != "waiting":
             return self.stop(ctx, "quest_defense_" + status)
 
-    def start_defense_retreat(self, ctx, now, nav, point, combat, reason):
-        defense = self.defense
-        defense.retreat = QuestTrip(nav.world_size, point, ctx.cfg.navigation.facing_convention, walk_only=True)
-        if self.ground_router:
-            defense.retreat.router = self.ground_router[1]
-        defense.retreat_at, defense.retreat_origin = now, nav.position
-        self.danger_zones.append((nav.position, now + 45))
-        if nav.recovery and nav.recovery.follow and nav.recovery.pet == PetState.ALIVE:
+    def player_health(self, ctx, nav, status):
+        if nav.vitals and nav.vitals.health is not None:
+            return nav.vitals.health, "native"
+        if status and not status[0] & StatusFlags.HP_UNKNOWN:
+            return 100 * status[1] / 15, "bucket"
+        if nav.vitals and isinstance(ctx.capture, ScreenCapture):
+            health, _ = self.consumables.read_bars(ctx, nav, nav.vitals)
+            if health is not None:
+                return health, "bar"
+        return None, None
+
+    def combat_health_loss(self, now, nav, health, source):
+        identity = nav.map_id, source
+        if identity != self.escape_health_identity:
+            self.escape_health.clear()
+            self.escape_health_identity, self.escape_health_sequence = identity, None
+        if health is None or nav.sequence == self.escape_health_sequence:
+            return None
+        self.escape_health_sequence = nav.sequence
+        samples = self.escape_health
+        samples[:] = [(at, hp) for at, hp in samples if now - at <= 2.5]
+        if samples and health > samples[-1][1] + 2:
+            samples.clear()
+        minimum_drop = 20 - 1e-6 if source == "bucket" else 14
+        rate = max(((hp - health) / (now - at) for at, hp in samples
+                    if now - at >= .3 and hp - health >= minimum_drop), default=0)
+        samples.append((now, health))
+        if rate >= 8 and (health <= 55 or health / rate <= 5):
+            return rate
+        return None
+
+    def handle_combat_escape(self, ctx, now, frame, nav, combat, status):
+        if (not self.require_prepared or not self.auto_route or self.travel_only
+                or ctx.cfg.nav3d.mode == "nav3d-shadow"):
+            return False
+        status_flags = status[0] if status else StatusFlags(0)
+        dead = (status_flags & (StatusFlags.DEAD | StatusFlags.GHOST)
+                or nav and nav.recovery and nav.recovery.life in {LifeState.DEAD, LifeState.GHOST})
+        escape = self.combat_escape
+        if dead:
+            if escape:
+                self.finish_combat_escape(ctx, now, nav, "death")
+            self.escape_trace.clear()
+            self.escape_health.clear()
+            return False
+        coherent = (frame and frame.tracking and nav and nav.task & TaskFlags.PREPARED
+                    and (frame.quest_id, frame.state, frame.map_id)
+                    == (nav.quest_id, nav.phase, self.map_id) and nav.map_id == self.map_id
+                    and self.observation.navigation.fresh(now, .75))
+        if not coherent:
+            if escape:
+                self.set_travel_keys(ctx, frozenset())
+                escape.stage = "waiting_for_telemetry"
+            return escape is not None
+
+        in_combat = bool(status_flags & StatusFlags.IN_COMBAT or nav.flags & TravelFlags.IN_COMBAT)
+        if not in_combat and escape:
+            self.finish_combat_escape(ctx, now, nav, "combat_cleared")
+            # Kills confirmed before or during escape still need their loot check.
+            return bool(self.required_loot and self.process_required_loot(ctx, now, frame, nav, combat, status))
+        if escape is None:
+            if nav.flags & TravelFlags.OUTDOORS:
+                self.escape_outdoors_at = now
+            if (nav.flags & TravelFlags.OUTDOORS
+                    or self.escape_trace.previous and now - self.escape_outdoors_at <= 30):
+                if not nav.flags & TravelFlags.FALLING:
+                    self.escape_trace.observe(nav, now, self.travel_keys, allow_combat=True)
+            else:
+                self.escape_trace.clear()
+            health, source = self.player_health(ctx, nav, status)
+            loss = self.combat_health_loss(now, nav, health, source)
+            if not in_combat:
+                return False
+            recovery = nav.recovery
+            attackers = recovery.attacker_count if recovery and recovery.attacker_scan_supported else None
+            needs_kills = (nav.phase == QuestState.ACTIVE and nav.objective_action not in NONCOMBAT_OBJECTIVES)
+            attacker_limit = 3 if needs_kills else 2
+            if attackers is not None and attackers >= attacker_limit:
+                reason = "multiple_attackers"
+            elif health is not None and health <= 25:
+                reason = "critical_health"
+            elif loss is not None:
+                reason = "rapid_health_loss"
+            else:
+                return False
+            escape = self.begin_combat_escape(ctx, now, nav, reason, {
+                "known_attackers": attackers, "attacker_limit": attacker_limit,
+                "health": health, "health_source": source,
+                "loss_per_second": round(loss, 1) if loss is not None else None})
+
+        self.process_required_loot(ctx, now, frame, nav, combat, status)
+        self.continue_combat_escape(ctx, now, nav, frame, status_flags, escape)
+        return True
+
+    def begin_combat_escape(self, ctx, now, nav, reason, evidence=None):
+        self.combat_escape = CombatEscape()
+        self.cancel_scene_requests()
+        self.camera.cancel(ctx, now, "combat_escape")
+        self.set_travel_keys(ctx, frozenset())
+        self.timeout_review = self.timeout_corpse_scan = self.timeout_corpse_select_until = None
+        self.task_transit = self.trip = self.avoidance_trip = None
+        self.covered_route = self.covered_wait = self.covered_exit = None
+        self.arrived = False
+        if nav.position:
+            self.danger_zones.append((nav.position, now + 45))
+        recovery = nav.recovery
+        if recovery and recovery.follow and recovery.pet == PetState.ALIVE:
             ctx.input.tap("f9")
-        ctx.log_event("quest_defense_retreat", {"reason": reason, "destination": point,
-                      "target": combat.target_id if combat else None})
+            self.execution_started = True
+        ctx.log_event("quest_combat_escape_started", {"id": nav.quest_id, "reason": reason,
+            "position": nav.position, "destination": nav.destination, "sequence": nav.sequence, **(evidence or {})})
+        return self.combat_escape
+
+    def finish_combat_escape(self, ctx, now, nav, result):
+        self.set_travel_keys(ctx, frozenset())
+        if not self.strict_loot(ctx, nav) and self.defense:
+            self.remember_defense_corpse(self.defense.fight, self.read_combat(ctx))
+        self.defense = self.task_transit = self.combat_escape = None
+        self.covered_route = self.covered_wait = self.covered_exit = self.trip = None
+        self.arrived = False
+        self.escape_trace.clear()
+        self.escape_health.clear()
+        ctx.log_event("quest_combat_escape_finished", {"id": nav.quest_id if nav else None,
+            "result": result, "position": nav.position if nav else None, "at": now})
+
+    def continue_combat_escape(self, ctx, now, nav, frame, status_flags, escape):
+        def report(stage):
+            if escape.stage != stage:
+                escape.stage = stage
+                ctx.log_event("quest_combat_escape_route", {"id": nav.quest_id, "stage": stage,
+                    "position": nav.position, "destination": nav.destination, "sequence": nav.sequence})
+
+        unsafe_status = StatusFlags.FLYING | StatusFlags.FALLING | StatusFlags.SWIMMING | StatusFlags.CASTING
+        unsafe_travel = MESH_WALK_BLOCKED & ~(TravelFlags.IN_COMBAT | TravelFlags.MOUNTED)
+        if (frame.dialogue != Dialogue.CLOSED or not nav.position or not nav.world_size
+                or not nav.flags & TravelFlags.KEYS_VERIFIED or nav.flags & unsafe_travel
+                or status_flags & unsafe_status):
+            self.set_travel_keys(ctx, frozenset())
+            report("waiting_for_ground")
+            return
+        if nav.flags & TravelFlags.MOUNTED:
+            self.set_travel_keys(ctx, frozenset())
+            key = nav.sky_dismount_key or ("8" if not nav.flags & TravelFlags.SKYRIDING else None)
+            if key and escape.dismount_attempts < 2 and now - escape.dismount_at >= 1.3:
+                ctx.input.tap(key)
+                escape.dismount_at = now
+                escape.dismount_attempts += 1
+                self.execution_started = True
+            report("waiting_for_dismount")
+            return
+        if ctx.cfg.game_version == "1.60.1" and self.consumables.tick(
+                ctx, now, nav, in_combat=True, can_start=True, release=lambda: None):
+            self.execution_started = True
+        outdoors = bool(nav.flags & TravelFlags.OUTDOORS)
+        goal = nav.destination if nav.destination_map == nav.map_id else None
+        if goal is None:
+            self.set_travel_keys(ctx, frozenset())
+            report("waiting_for_objective")
+            return
+        if escape.trip and (escape.trip.forward_goal != goal or escape.trip.verified_retreat == outdoors):
+            escape.trip = None
+        if escape.trip is None:
+            if now < escape.retry_route_at:
+                self.set_travel_keys(ctx, frozenset())
+                return
+            if self.approach_covered_mesh(ctx, now, nav, task_transit=True, escape=True) and not self.covered_wait:
+                report("mesh_forward")
+                self.execution_started = True
+                return
+            scope = nav.map_id, nav.world_size
+            if not self.ground_router or self.ground_router[0] != scope:
+                self.ground_router = scope, GridRouter(*nav.world_size)
+            router = self.ground_router[1]
+            if outdoors:
+                escape.trip = QuestTrip(nav.world_size, goal, ctx.cfg.navigation.facing_convention,
+                                        arrival_radius=1, walk_only=True, outdoor_detour=True, forward_goal=goal)
+                escape.trip.router = router
+                escape.trip.road_traces = self.road_scan.traces(self.road_status)
+            elif now - self.escape_outdoors_at <= 30:
+                points = self.escape_trace.backtrack(nav, now, router, allow_combat=True, max_distance=70)
+                path, current, target = [], router.metric(nav.position), router.metric(goal)
+                for point in points:
+                    following = router.metric(point.position)
+                    if not advances_toward(current, following, target):
+                        break
+                    path.append(point.position)
+                    current = following
+                if path and router.distance(nav.position, path[-1]) >= 2:
+                    escape.trip = QuestTrip(nav.world_size, path[-1], ctx.cfg.navigation.facing_convention,
+                                            arrival_radius=1, walk_only=True, forward_goal=goal)
+                    escape.trip.router = router
+                    escape.trip.follow_verified_retreat(now, nav.position, path)
+            if escape.trip is None:
+                self.set_travel_keys(ctx, frozenset())
+                escape.retry_route_at = now + .75
+                report("waiting_for_forward_route")
+                return
+        self.covered_route = self.covered_wait = None
+        heading = ctx.heading()
+        if heading is None or ctx.heading_age() > .75:
+            self.set_travel_keys(ctx, frozenset())
+            report("waiting_for_heading")
+            return
+        command = escape.trip.step(now, nav, heading, heading_age=ctx.heading_age(), retreating=True)
+        self.apply_travel_command(ctx, command)
+        if command.outcome:
+            escape.trip = None
+            escape.retry_route_at = now + .75
+            report("route_end" if command.outcome == "arrived" else "waiting_for_forward_route")
+        else:
+            self.execution_started = True
+            report("outdoor_forward" if outdoors else "known_ground_forward")
+
+    def advance_noncombat_task(self, ctx, now, nav, frame, status, heading):
+        """Keep the current grounded route when combat is incidental."""
+        if (self.defense is not None or self.suspend_request or self.required_loot
+                or frame.dialogue != Dialogue.CLOSED or not nav.position or not nav.world_size
+                or not nav.flags & TravelFlags.KEYS_VERIFIED or nav.destination_map != nav.map_id
+                or not nav.destination
+                or nav.flags & (MESH_WALK_BLOCKED & ~(TravelFlags.IN_COMBAT | TravelFlags.FALLING))):
+            return False
+        scout = (ctx.cfg.game_version == "1.60.1" and nav.map_id == 1429 and nav.quest_id == 62
+                 and nav.phase == QuestState.ACTIVE and bool(ctx.cfg.nav3d.forever_fargodeep_mesh_id))
+        identity = nav.map_id, nav.quest_id, nav.phase, nav.objective_index
+        action = nav.objective_action
+        if (self.quest_mode_identity and self.quest_mode_identity[:3] == (nav.map_id, nav.quest_id, nav.objective_index)
+                and self.quest_mode_result is not None):
+            action = self.quest_mode_result[0]
+        if (nav.phase not in {QuestState.PENDING, QuestState.READY}
+                and (nav.phase != QuestState.ACTIVE or not scout and action not in NONCOMBAT_OBJECTIVES
+                     or nav.objective_action == ObjectiveAction.COMBAT)):
+            return False
+
+        health, _ = self.player_health(ctx, nav, status)
+        router = GridRouter(*nav.world_size)
+        transit = self.task_transit
+        if transit is None or transit.identity != identity:
+            self.cancel_scene_requests()
+            self.camera.cancel(ctx, now, "noncombat_task_transit")
+            self.task_transit = transit = TaskTransit(identity, nav.position, now)
+            ctx.log_event("quest_noncombat_transit_started", {"id": nav.quest_id,
+                "phase": nav.phase.name, "position": nav.position, "health": health})
+        if router.distance(nav.position, transit.position) >= .65:
+            transit.position, transit.last_progress = nav.position, now
+        if health is not None and health <= 30 or now - transit.last_progress > 4:
+            ctx.log_event("quest_noncombat_transit_blocked", {"id": nav.quest_id, "health": health,
+                "reason": "low_health" if health is not None and health <= 30 else "no_safe_progress"})
+            self.set_travel_keys(ctx, frozenset())
+            return False
+        if nav.flags & TravelFlags.FALLING:
+            self.set_travel_keys(ctx, frozenset())
+            return True
+        if self.approach_covered_mesh(ctx, now, nav, task_transit=True):
+            self.execution_started = True
+            return True
+        goal = FARGODEEP_SOUTH_ENTRY if scout else self.object_target or nav.destination
+        if not nav.flags & TravelFlags.OUTDOORS:
+            goal = None  # Indoor detours require the verified mesh.
+        if goal is None or heading is None or ctx.heading_age() > .75:
+            self.set_travel_keys(ctx, frozenset())
+            return True
+        if transit.trip is None or (transit.trip.destination, transit.trip.forward_goal) != (goal, nav.destination):
+            transit.trip = QuestTrip(nav.world_size, goal, ctx.cfg.navigation.facing_convention,
+                                     arrival_radius=3, walk_only=True, outdoor_detour=True, forward_goal=nav.destination)
+            if self.ground_router and self.ground_router[0] == (nav.map_id, nav.world_size):
+                transit.trip.router = self.ground_router[1]
+        command = transit.trip.step(now, nav, heading, heading_age=ctx.heading_age(), retreating=True)
+        if command.outcome:
+            self.set_travel_keys(ctx, frozenset())
+        else:
+            self.execution_started = True
+            self.apply_travel_command(ctx, command)
+        return True
 
     def handoff_attacker(self, ctx, now, nav, defense):
         sample = nav.recovery
@@ -3610,32 +4472,6 @@ class RunQuests(State):
         ctx.log_event("quest_attacker_handoff_probe", {"id": nav.quest_id, "source": source,
                       "point": point, "known_attackers": sample.attacker_count})
         return True
-
-    def defense_retreat(self, ctx, now, navigation):
-        if now - self.defense.retreat_at >= 24:
-            return self.stop(ctx, "quest_defense_retreat_unconfirmed")
-        heading = ctx.heading()
-        if heading is None or navigation.flags & (TravelFlags.CASTING | TravelFlags.FALLING):
-            self.set_forward(ctx, False)
-            return
-        command = self.defense.retreat.step(now, navigation, heading, heading_age=ctx.heading_age(), retreating=True)
-        if command.outcome == "arrived":
-            route = self.defense.retreat
-            origin = self.defense.retreat_origin
-            distance = route.router.distance(navigation.position, origin)
-            if distance < 1:
-                return self.stop(ctx, "quest_defense_retreat_no_displacement")
-            point = next((past for past in reversed(self.safe_ground)
-                          if distance + 6 < route.router.distance(past, origin)
-                          and route.router.distance(past, navigation.position) <= 25), None)
-            if point is not None:
-                route.destination = point
-                route.enter("choose", now)
-                ctx.log_event("quest_defense_retreat_extend", {"id": navigation.quest_id, "destination": point})
-        elif command.outcome:
-            return self.stop(ctx, "quest_defense_retreat_" + command.outcome)
-        self.execution_started = True
-        self.apply_travel_command(ctx, command)
 
     def click_tutorial_mount(self, ctx, now, navigation, sample):
         flags = navigation.flags
@@ -3909,7 +4745,6 @@ class RunQuests(State):
         self.trip.enter("choose", now)
         self.arrived, self.npc_rejoin = False, True
         self.npc_step = self.npc_press_at = None
-        self.npc_interaction_attempts.pop(self.npc_interaction_identity(nav), None)
         self.npc_steps = self.npc_scan_direction = 0
         self.npc_scan_started = self.npc_scan_aligned_at = self.npc_range_wait_since = None
         self.action_signature, self.attempts = None, 0
@@ -3975,7 +4810,33 @@ class RunQuests(State):
         return (navigation.quest_id, navigation.map_id, int(navigation.phase), "npc",
                 bool(navigation.task & TaskFlags.NPC_SELECTED), navigation.destination)
 
+    def npc_interaction_positions_for(self, nav):
+        return self.npc_interaction_positions.setdefault((nav.quest_id, nav.map_id, nav.phase), [])
+
+    def confirm_npc_interaction_position(self, nav):
+        positions = self.npc_interaction_positions_for(nav)
+        if positions and (positions[-1] is None or nav.position and nav.world_size
+                and GridRouter(*nav.world_size).distance(positions[-1], nav.position) < NPC_INTERACTION_STANCE_YARDS):
+            positions.pop()
+
+    def npc_range_after_attempt(self, nav):
+        if not nav.task & TaskFlags.NPC_WITHIN_5_YARDS:
+            return nav
+        points = self.npc_interaction_positions_for(nav)
+        if not points:
+            return nav
+        if nav.position and nav.world_size:
+            if points[-1] is None:
+                points[-1] = nav.position
+            router = GridRouter(*nav.world_size)
+            if all(router.distance(nav.position, point) >= NPC_INTERACTION_STANCE_YARDS for point in points):
+                return nav
+        # A positive range bit does not authorize another F from a position
+        # where F already produced no matching dialogue.
+        return replace(nav, task=nav.task & ~TaskFlags.NPC_WITHIN_5_YARDS)
+
     def interact_with_npc(self, ctx, now, navigation, heading):
+        navigation = self.npc_range_after_attempt(navigation)
         selected = bool(navigation.task & TaskFlags.NPC_SELECTED)
         range_known = bool(navigation.task & TaskFlags.NPC_RANGE_KNOWN)
         within_range = range_known and bool(navigation.task & TaskFlags.NPC_WITHIN_5_YARDS)
@@ -4023,26 +4884,38 @@ class RunQuests(State):
         self.set_travel_keys(ctx, frozenset())
         if navigation.flags & TravelFlags.CASTING:
             return
+        if self.npc_press_at is not None:
+            if now - self.npc_press_at < 1.2:
+                return
+            self.npc_press_at = None
+            ctx.log_event("quest_npc_interaction_unconfirmed", {"id": navigation.quest_id,
+                "position": navigation.position, "in_range": within_range, "sequence": navigation.sequence})
         if not range_known and self.npc_steps == 0 and self.npc_press_at is None:
             if self.npc_range_wait_since is None:
                 self.npc_range_wait_since = now
             if now - self.npc_range_wait_since < 1:
                 return
-        if within_range:
-            if self.npc_press_at is None or now - self.npc_press_at >= 1.2:
-                if self.npc_interaction_attempts.get(identity, 0) >= 3:
-                    return self.begin_npc_detour(ctx, now, navigation, "interaction_unconfirmed")
-                self.npc_interaction_attempts[identity] = self.npc_interaction_attempts.get(identity, 0) + 1
-                self.npc_press_at = self.last_action = now
-                ctx.log_event("quest_action", {"id": navigation.quest_id, "key": "f"})
-                ctx.input.tap("f")
-        elif self.npc_press_at is None or now - self.npc_press_at >= 1.2:
+        if within_range and selected:
+            positions = self.npc_interaction_positions_for(navigation)
+            if len(positions) >= 8:
+                return self.stop(ctx, "quest_npc_route_unconfirmed")
+            positions.append(navigation.position if navigation.world_size else None)
+            self.npc_press_at = self.last_action = now
+            self.npc_steps = 0
+            ctx.log_event("quest_action", {"id": navigation.quest_id, "key": "f",
+                "position": navigation.position, "sequence": navigation.sequence})
+            ctx.input.tap("f")
+        else:
+            attempted_here = bool(self.npc_interaction_positions_for(navigation))
+            if (attempted_here and navigation.destination and navigation.destination_map == navigation.map_id
+                    and GridRouter(*navigation.world_size).distance(navigation.position, navigation.destination)
+                    > NPC_MARKER_APPROACH_YARDS):
+                return self.begin_npc_detour(ctx, now, navigation, "interaction_unconfirmed")
             if self.npc_steps >= 3:
                 if not range_known:
                     return self.stop(ctx, "quest_turn_in_range_unknown")
-                if not within_range:
-                    return self.begin_npc_detour(ctx, now, navigation, "range_not_reached")
-                return self.begin_npc_detour(ctx, now, navigation, "interaction_unconfirmed")
+                reason = "interaction_unconfirmed" if attempted_here else "range_not_reached"
+                return self.begin_npc_detour(ctx, now, navigation, reason)
             if not self.align_npc_approach(ctx, now, navigation, heading):
                 return
             self.npc_steps += 1
@@ -4363,6 +5236,17 @@ class RunQuests(State):
         if navigation.flags & busy or now - self.last_action < 2:
             return
         if self.object_click_at is not None:
+            full = navigation.corpse_loot_full_receipt
+            if full and full.target_epoch is None and full != self.object_click_full_receipt:
+                self.object_click_at = None
+                ctx.log_event("quest_object_loot_bag_full", {"id": navigation.quest_id})
+                reason = "quest_object_loot_bag_full"
+                if (navigation.task & TaskFlags.PREPARED and navigation.suspend_ready
+                        and navigation.suspend_epoch is not None and navigation.round_advance):
+                    self.suspend_request = (navigation.quest_id, navigation.phase, navigation.suspend_epoch,
+                                            reason, now, "pending")
+                    return
+                return self.stop(ctx, reason)
             if now - self.object_click_at < 5:
                 return
         pumpkin = navigation.quest_id == 90885
@@ -4447,6 +5331,7 @@ class RunQuests(State):
             if math.dist(cursor, expected) <= .012 and (not precise or nearby):
                 ctx.input.click_world_object()
                 self.object_click_at = self.last_action = now
+                self.object_click_full_receipt = navigation.corpse_loot_full_receipt
                 self.object_click_target = target
                 self.object_click_attempts += 1
                 self.object_probe_sequence = navigation.sequence
@@ -4475,7 +5360,40 @@ class RunQuests(State):
         self.object_probe += 1
         self.object_probe_at, self.object_probe_sequence = now, navigation.sequence
 
+    def inside_covered_mine(self, ctx, nav):
+        if nav.flags & TravelFlags.OUTDOORS:
+            return False
+        context = self.covered_mesh_at(ctx, nav)
+        return context is not None and context[0] in {"fargodeep", "echo_ridge"}
+
     def search_quest_area(self, ctx, navigation):
+        if self.hunt is not None and navigation and self.inside_covered_mine(ctx, navigation):
+            from ..nav3d.local_mesh import connected_ground, connected_search_point
+
+            scene, asset, pose, exit_xy = self.covered_mesh_at(ctx, navigation)
+            if pose is None or pose.heading is None or len(self.covered_search_points) >= 16:
+                return False
+            floor = connected_ground(asset.tracker, pose.position_xy, exit_xy,
+                                     max_length=MINE_EXIT_ROUTE_LIMIT.get(scene))
+            if not floor:
+                return False
+            avoid = tuple(self.covered_world_point(navigation, pose, point) for point, _ in self.danger_zones)
+            point = connected_search_point(asset.tracker, floor[0], pose.heading,
+                                           self.covered_search_points, avoid=avoid)
+            if point is None:
+                ctx.log_event("quest_local_mesh_search_exhausted", {"scene": scene, "id": navigation.quest_id})
+                return False
+            x, y = navigation.position
+            width, height = navigation.world_size
+            waypoint = (x + (point[0] - pose.position_xy[0]) / width,
+                        y - (point[1] - pose.position_xy[1]) / height)
+            self.covered_search_points.append(point[:2])
+            self.covered_search = scene, navigation.quest_id, navigation.phase, waypoint, point
+            self.search_waypoint, self.trip, self.arrived = waypoint, None, False
+            self.searches += 1
+            ctx.log_event("quest_local_mesh_search_point", {"scene": scene, "id": navigation.quest_id,
+                                                           "position": floor[0], "goal": point})
+            return True
         if (navigation and navigation.quest_id == 90895 and navigation.precise_object
                 and navigation.position and navigation.world_size):
             prior = self.area_search
@@ -4710,10 +5628,11 @@ class RunQuests(State):
                 self.hunt.reset_search()
             else:
                 self.stop(ctx, "quest_combat_target_not_found")
-        elif (status in {"no_cast_or_damage_receipt", "approach_timeout", "approach_blocked"}
+        elif (status in {"no_cast_or_damage_receipt", "approach_timeout", "approach_blocked", "line_of_sight_blocked"}
                 and not in_combat and not sample.target_engaged
                 and ctx.cfg.game_version == "1.60.1" and navigation
-                and navigation.flags & TravelFlags.OUTDOORS and self.search_quest_area(ctx, navigation)):
+                and (navigation.flags & TravelFlags.OUTDOORS or self.inside_covered_mine(ctx, navigation))
+                and self.search_quest_area(ctx, navigation)):
             ctx.log_event("quest_combat_reselect_no_receipt", {"id": navigation.quest_id,
                 "target": sample.target_id, "target_epoch": sample.state_epoch, "progress": progress, "reason": status,
                 "waypoint": self.search_waypoint})
@@ -5156,9 +6075,6 @@ class QuestNavigateModule(QuestModule):
     def _finish(self, status, t0):
         state = self.machine.current
         if isinstance(state, NavigateCurrentQuest) and state.runner is not None:
-            if (state.runner.status_wire_at is not None and not state.runner.status_wire_failed
-                    and time.monotonic() - state.runner.status_wire_at < 2 and game_is_frontmost()):
-                self.ctx.input.publish_run_status(0)
             state.runner.cancel_scene_requests()
             state.runner.road_scan.close()
         return super()._finish(status, t0)

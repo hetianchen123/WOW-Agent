@@ -31,6 +31,7 @@ from .building_relocation import TraceRelocation, BuildingBackoffProbe, Turnaway
 from .building_memory import BuildingRouteMemory, PassageLook
 from .stair_trial import StairTrial
 from ..perception.surface_height import bounded_height_change, height_matches
+from ..perception.screenshot_retention import mark_captures_complete
 
 
 _worker=None
@@ -85,11 +86,14 @@ class LocalRouteRequest:
                 raise ValueError('segmentation_capture_encoding_mismatch')
             folder = DATA_DIR / 'terrain' / ('segmented-' + frame.frame_id)
             folder.mkdir(parents=True, exist_ok=False)
-            path = folder / 'image.png'
-            path.write_bytes(png)
-            (folder / 'request.json').write_text(json.dumps(job, indent=2))
-            guard()
-            return local_worker().inspect([path], target=job, guard=guard, timeout=20)[0]
+            try:
+                path = folder / 'image.png'
+                path.write_bytes(png)
+                (folder / 'request.json').write_text(json.dumps(job, indent=2))
+                guard()
+                return local_worker().inspect([path], target=job, guard=guard, timeout=20)[0]
+            finally:
+                mark_captures_complete(folder)
 
         self.future = self.pool.submit(run)
 

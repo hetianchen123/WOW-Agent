@@ -398,9 +398,6 @@ class QuestDefense:
         self.dismount_at = float("-inf")
         self.dismount_attempts = 0
         self.repositioned = False
-        self.retreat = None
-        self.retreat_at = None
-        self.retreat_origin = None
         self.sequence = None
         self.binding = None
         self.fight: Fight | None = None

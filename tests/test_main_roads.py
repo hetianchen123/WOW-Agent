@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 from bot.control import road_scan
 from bot.control.pathfinding import GridRouter
@@ -151,7 +152,8 @@ def test_manual_roads_read_reloaded_profile_and_keep_map_boundary(tmp_path):
     assert road_scan.manual_traces(tmp_path, replace(identity, profile=100)) == ()
 
 
-def test_scan_is_armed_only_after_settling_and_caches_verified_art(monkeypatch, tmp_path):
+@pytest.mark.parametrize("raised,button_y", [(False, 656), (True, 400)])
+def test_scan_is_armed_only_after_settling_and_caches_verified_art(monkeypatch, tmp_path, raised, button_y):
     identity = MapIdentity(1, 70959, 1429, 10)
     controller = road_scan.RoadScanSession(tmp_path)
     monkeypatch.setattr(road_scan, "installed_forever", lambda: None)
@@ -172,18 +174,19 @@ def test_scan_is_armed_only_after_settling_and_caches_verified_art(monkeypatch, 
                           log_event=lambda name, data: events.append(name))
 
     def tick(now, seq, state=0, allow=True):
-        return controller.tick(ctx, now, RoadMapStatus(seq, identity, state == 0, state),
+        return controller.tick(ctx, now, RoadMapStatus(seq, identity, state == 0, state, raised=raised),
                                allow=allow, release=lambda: releases.append(now))
 
     assert tick(0, 10) and not clicks
     assert tick(.3, 10) and not clicks
     assert tick(.4, 11) and clicks == ["click"]
-    assert points == [(543, 656, 0)]
+    assert points == [(543, button_y, 0)]
     assert tick(.8, 12, 2, allow=False) and controller.screenshot is not None
     assert tick(2.9, 13) and clicks == ["click"]
     controller.inference[0].result(timeout=2)
     assert not tick(3.1, 14)
-    assert events == ["quest_main_road_scan_requested", "quest_main_road_canvas_captured", "quest_main_road_scan_result"]
+    assert events == ["quest_main_road_loaded", "quest_main_road_scan_requested",
+                      "quest_main_road_canvas_captured", "quest_main_road_scan_result"]
     assert (tmp_path / identity.key / "marked.png").is_file()
     cache = road_scan.RoadScanSession(tmp_path)
     cache.reset_identity(identity)
@@ -231,3 +234,33 @@ def test_missing_roads_get_one_rescan_after_travel_without_waiting_for_inference
         controller.inference[0].result(timeout=2)
     assert not tick(150, 11, .7)
     assert requested == [False, True]
+
+
+@pytest.mark.parametrize("cache_age,rescan_at,rescan_x", [(120, 2, .2), (10, 71, .45)])
+def test_unmatched_cached_road_allows_one_rescan(monkeypatch, tmp_path, cache_age, rescan_at, rescan_x):
+    identity = MapIdentity(1, 70959, 1429, 10)
+    trace = RoadTrace(((.10, .20), (.25, .20)))
+    controller = road_scan.RoadScanSession(tmp_path)
+    monkeypatch.setattr(road_scan, "installed_forever", lambda: None)
+    monkeypatch.setattr(road_scan, "local_vision_available", lambda: True)
+    monkeypatch.setattr(road_scan, "load_observation",
+                        lambda _: (identity, [trace.points], road_scan.time.time() - cache_age))
+    events = []
+    ctx = SimpleNamespace(input=SimpleNamespace(click_ui=lambda: None, move_to=lambda *a, **k: None),
+                          cfg=SimpleNamespace(channel=SimpleNamespace(x=40, y=830)),
+                          log_event=lambda name, data: events.append((name, data)))
+
+    def tick(now, seq, x, needs_coverage=False):
+        return controller.tick(ctx, now, RoadMapStatus(seq, identity, True, 0), allow=True,
+                               position=(x, .20), world_size=(1000, 1000), release=lambda: None,
+                               needs_coverage=needs_coverage)
+
+    assert not tick(0, 1, .2)
+    assert not tick(1, 2, .45)
+    if cache_age < 60:
+        assert not tick(59, 3, .45, needs_coverage=True)
+    assert tick(rescan_at, 4, rescan_x, needs_coverage=True)
+    assert tick(rescan_at + .4, 5, rescan_x, needs_coverage=True)
+    assert events[-1][0] == "quest_main_road_scan_requested" and events[-1][1]["rescan_after_travel"]
+    assert tick(rescan_at + 4, 6, rescan_x, needs_coverage=True) and controller.request_at is None
+    assert not tick(rescan_at + 74, 7, .72, needs_coverage=True)

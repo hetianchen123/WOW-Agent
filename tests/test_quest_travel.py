@@ -39,6 +39,37 @@ def test_outdoor_contact_replans_without_repeating_forward_or_jumping():
     assert all(trip.router.clear_segment(a, b) for a, b in zip([nav.position] + trip.path, trip.path))
 
 
+def test_outdoor_contact_replan_releases_forward_when_the_trip_drifts_away():
+    nav = sample(flags=Flags.OUTDOORS | Flags.KEYS_VERIFIED, position=(.201, .201), destination=(.201, .1))
+    events = []
+    trip = QuestTrip(nav.world_size, nav.destination, "ccw_west", outdoor_detour=True,
+                     log_event=lambda name, data: events.append((name, data)))
+    for sequence, now in enumerate((0, .4, .8, 1.55), 1):
+        trip.step(now, replace(nav, sequence=sequence), 0)
+    assert trip.contact_replans == 1
+    drifted = replace(nav, position=(.201, .215), sequence=5)
+    command = trip.step(2, drifted, 0)
+    assert command.outcome == "route_blocked" and not command.keys and command.tap is None
+    assert events[-1][0] == "quest_ground_route_drift"
+    assert events[-1][1]["remaining_yards"] - events[-1][1]["best_remaining_yards"] == 7
+
+
+def test_outdoor_contact_budget_is_not_renewed_by_lateral_movement():
+    nav = sample(flags=Flags.OUTDOORS | Flags.KEYS_VERIFIED, position=(.201, .201), destination=(.201, .1))
+    trip = QuestTrip(nav.world_size, nav.destination, "ccw_west", outdoor_detour=True)
+    for sequence, now in enumerate((0, .4, .8, 1.55), 1):
+        trip.step(now, replace(nav, sequence=sequence), 0)
+    assert trip.contact_replans == 1
+    lateral = replace(nav, position=(.216, .201))
+    trip.path = [nav.destination]
+    trip.contact_replans = 3
+    heading = 2 * math.pi + trip.turn_error(lateral.position, nav.destination, 0)
+    for sequence, now in enumerate((2., 2.4, 2.8, 3.55), 5):
+        command = trip.step(now, replace(lateral, sequence=sequence), heading)
+    assert command.outcome == "route_blocked" and not command.keys
+    assert trip.contact_replans == 3
+
+
 def test_ground_stall_tries_jump_turn_jump_and_both_strafes():
     grounded = sample(flags=Flags.KEYS_VERIFIED, strafe_verified=True)
     trip = QuestTrip(grounded.world_size, grounded.destination, "ccw_west")
@@ -600,6 +631,31 @@ def test_v12_loot_receipts_and_blob_mask_share_the_navigation_frame():
     assert hud.run_status_ready and hud.run_status_receipt == 3 and hud.run_status_epoch == 3
     spec.render_frame(status_image, 0, 0, spec.encode_frame(7, (sequence-1)*8192 + 4097))
     assert not decode_travel(status_image).run_status_ready
+    spec.render_frame(status_image, 0, 192, spec.encode_frame(14, 332 + sequence*4096))
+    spec.render_frame(status_image, 0, 0, spec.encode_frame(7, sequence*8192 + 6144 + 3*32 + 11*2 + 1))
+    detailed = decode_travel(status_image)
+    assert detailed.run_status_detailed and detailed.run_status_receipt == 10 and detailed.run_status_epoch == 3
+    spec.render_frame(status_image, 0, 192, spec.encode_frame(14, 337 + sequence*4096))
+    spec.render_frame(status_image, 0, 0, spec.encode_frame(7, sequence*8192 + 6144 + 3*32 + 2 + 1))
+    retreat = decode_travel(status_image)
+    assert retreat.run_status_detailed and retreat.run_status_receipt == 15 and retreat.run_status_epoch == 3
+    spec.render_frame(status_image, 0, 192, spec.encode_frame(14, 332 + sequence*4096))
+    round_row = status_image.shape[0] - (12 + 4) * 16
+    spec.render_frame(status_image, 0, round_row, spec.encode_frame(3, sequence*64 + 16384))
+    assert not decode_travel(status_image).corpse_loot_denied
+    spec.render_frame(status_image, 0, 192, spec.encode_frame(14, 336 + sequence*4096))
+    ownership = decode_travel(status_image)
+    assert ownership.corpse_loot_denied and ownership.corpse_lootable is None
+    full_image = np.vstack((np.zeros((16, 142, 3), np.uint8), status_image))
+    spec.render_frame(full_image, 0, 208, spec.encode_frame(14, 340 + sequence*4096))
+    spec.render_frame(full_image, 0, 0, spec.encode_frame(8, sequence*8192 + 4096 + 2*64 + 4))
+    full = decode_travel(full_image)
+    assert full.corpse_loot_full_receipt == CorpseLootReceipt(2, 4)
+    assert full.corpse_loot_receipt == CorpseLootReceipt(5, 4)
+    spec.render_frame(full_image, 0, 0, spec.encode_frame(8, sequence*8192 + 3*64))
+    assert decode_travel(full_image).corpse_loot_full_receipt == CorpseLootReceipt(3, None)
+    spec.render_frame(full_image, 0, 0, spec.encode_frame(8, (sequence-1)*8192 + 4096 + 2*64 + 4))
+    assert decode_travel(full_image).corpse_loot_full_receipt is None
     spec.render_frame(bars_image, 0, 32, spec.encode_frame(3, 159 + (sequence - 1) * 8192))
     assert decode_travel(bars_image).vitals.bars is None
     spec.render_frame(vitals_image, 0, 0, spec.encode_frame(12, 118 + (sequence - 1) * 8192))
@@ -785,6 +841,12 @@ def test_forever_progression_carries_full_node_and_ignores_old_task_row():
         assert maintenance.objective_action == ObjectiveAction.NONE
     row(-3, 15, 15 * 65536)
     assert decode_travel(image).forever_step == ForeverStep.NONE
+    row(-25, 15, 357888)
+    row(-24, 14, 340 + 3 * 4096)
+    for step in (ForeverStep.VENDOR_SELL, ForeverStep.VENDOR_WAIT, ForeverStep.VENDOR_SOLD):
+        row(-3, 15, (int(step) - 15) * 65536 + 15)
+        current = decode_travel(image)
+        assert (current.forever_step, current.forever_value) == (step, 15)
     row(-2, 1, 7 * 131072 + 4 * 1024 + int(TaskFlags.PREPARED))
     assert decode_travel(image).forever_step == ForeverStep.NONE
 

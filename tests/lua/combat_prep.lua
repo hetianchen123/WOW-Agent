@@ -519,6 +519,14 @@ C_NamePlate = {GetNamePlates = function(includeForbidden)
 end}
 local point, flags = WowAgent.CombatHandoff()
 assert(point == 409 * 1024 + 409 and flags == 17)
+UnitIsDead = function() return false end
+UnitIsUnit = function(unit, other)
+    return other == "player" and (unit == "targettarget" or unit == "nameplate1target"
+        or unit == "nameplate2target" or unit == "mouseovertarget")
+        or other == "pet" and unit == "nameplate3target"
+end
+point, flags = WowAgent.CombatHandoff()
+assert(point == 409 * 1024 + 409 and flags == 19)
 UnitIsUnit = function() return false end
 point, flags = WowAgent.CombatHandoff()
 assert(point == 0 and flags == 0)

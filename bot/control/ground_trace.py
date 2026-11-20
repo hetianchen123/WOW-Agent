@@ -45,8 +45,9 @@ class GroundTrace:
     def note_input(self, keys):
         self.movement_sent |= bool(set(keys) & {"w", "s", "q", "e"})
 
-    def observe(self, nav, now, keys=()):
-        if (nav is None or not nav.position or not nav.world_size or nav.flags & UNSAFE
+    def observe(self, nav, now, keys=(), *, allow_combat=False):
+        unsafe = UNSAFE & ~TravelFlags.IN_COMBAT if allow_combat else UNSAFE
+        if (nav is None or not nav.position or not nav.world_size or nav.flags & unsafe
                 or not nav.flags & TravelFlags.KEYS_VERIFIED
                 or nav.recovery and nav.recovery.life != LifeState.ALIVE):
             self.clear()
@@ -79,9 +80,10 @@ class GroundTrace:
         self.previous = point
         self.movement_sent = False
 
-    def backtrack(self, nav, now, router):
+    def backtrack(self, nav, now, router, *, allow_combat=False, max_distance=6):
+        unsafe = UNSAFE & ~TravelFlags.IN_COMBAT if allow_combat else UNSAFE
         if (not self.previous or self.identity != (nav.map_id, nav.world_size)
-                or now - self.previous.at > 1.2 or nav.flags & UNSAFE
+                or now - self.previous.at > 1.2 or nav.flags & unsafe
                 or router.distance(self.previous.position, nav.position) > .15):
             return []
         path, distance, last = [], 0.0, nav.position
@@ -94,7 +96,7 @@ class GroundTrace:
             if blocked_segment(router, last, point.position):
                 break
             distance += delta
-            if distance > 6:
+            if distance > max_distance:
                 break
             path.append(point)
             last = point.position

@@ -8,7 +8,8 @@ from ..control.pathfinding import GridRouter
 from ..perception.capture import CaptureError, ScreenCapture, frontmost_game_bounds, game_ui_bounds
 from ..perception.cv import minimap_corpse_pin, minimap_corpse_bearing, player_bar_percent
 from ..perception.nav3d_channel import nav3d_region
-from ..perception.travel_channel import LifeState, PetState, SupplyAction, TravelFlags, travel_region
+from ..perception.road_map import ROAD_STRIP_RAISED_BUILD, road_region
+from ..perception.travel_channel import LifeState, PetState, SupplyAction, TaskFlags, TravelFlags, travel_region
 
 
 class CorpseDistanceSearch:
@@ -189,6 +190,7 @@ class QuestRecovery:
         self.route_source = None
         self.map_id = None
         self.arrived_at = None
+        self.mesh_arrival = None
         self.route_missing = ()
         self.route_wait_at = now
         self.hover = None
@@ -226,6 +228,7 @@ class QuestRecovery:
             self.search = None
             self.minimap_tracker = None
             self.arrived_at = None
+            self.mesh_arrival = None
             self.approach_heading = self.near_probe = None
             self.near_steps, self.near_failed = 0, False
             self.route_missing = ()
@@ -255,8 +258,19 @@ class QuestRecovery:
         source = sample.corpse_source.name.lower()
         if self.map_id is not None and self.map_id != nav.map_id:
             self.search = self.trip = self.minimap_tracker = None
+            self.arrived_at = None
+            self.mesh_arrival = None
             self.approach_heading = self.near_probe = None
             self.near_steps, self.near_failed = 0, False
+        self.map_id = nav.map_id
+        if self.mesh_arrival is not None:
+            # A completed mesh route only confirms proximity. The native
+            # resurrection dialog above still owns the life-state transition.
+            point, arrived_at = self.mesh_arrival
+            if destination is None or destination == point:
+                set_keys(frozenset())
+                return "corpse_confirmation_unavailable" if now - arrived_at >= 10 else None
+            self.mesh_arrival = None
         if (destination is None and nav.minimap and nav.position and nav.world_size
                 and heading is not None and walk_verified):
             if self.minimap_tracker is None or self.minimap_tracker.map_id != nav.map_id:
@@ -284,8 +298,7 @@ class QuestRecovery:
                 return "corpse_position_unavailable" if missing == ("corpse_position",) else "corpse_route_unavailable"
             return
         self.route_missing = ()
-        if (ground_route and sample.corpse is not None
-                and ground_route(nav, sample.corpse, heading)):
+        if ground_route and ground_route(nav):
             return
         probing = False
         if destination is None:
@@ -311,12 +324,11 @@ class QuestRecovery:
             ctx.log_event("quest_recovery_near_receipt", {"before": distance, "after": current,
                           "moved": round(moved, 1), "progress": not self.near_failed})
             self.near_probe = None
-        if (self.trip is None or self.map_id != nav.map_id
-                or self.route_source != source or self.trip.router.distance(self.trip.destination, destination) > 2):
+        if (self.trip is None or self.route_source != source
+                or self.trip.router.distance(self.trip.destination, destination) > 2):
             radius = 1.5 if probing else 4 if source in ("minimap_pin", "minimap_arrow") else 2
             self.trip = QuestTrip(nav.world_size, destination, ctx.cfg.navigation.facing_convention,
                                   arrival_radius=radius, walk_only=True)
-            self.map_id = nav.map_id
             self.route_source = source
             self.arrived_at = None
             ctx.log_event("quest_recovery_route", {"map": nav.map_id, "destination": destination, "source": source})
@@ -441,6 +453,8 @@ class ConsumableRecovery:
         left, right, hp_y, mana_y = sample.bars
         width = right - left
         strips = (travel_region(x, y, supply_bars=True), nav3d_region(x, y, raised=True))
+        if nav.task & TaskFlags.PREPARED:
+            strips += (road_region(x, y, raised=(nav.addon_build or 0) >= ROAD_STRIP_RAISED_BUILD),)
         try:
             wx, wy, ww, wh = frontmost_game_bounds()
             results = [sample.health, sample.mana]

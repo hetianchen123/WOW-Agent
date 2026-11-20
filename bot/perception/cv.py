@@ -282,12 +282,12 @@ def minimap_corpse_bearing(frame_rgb: np.ndarray) -> tuple[float, float] | None:
     return x / radius, y / radius
 
 
-def save_snapshot(img_rgb: np.ndarray, tag: str, directory: Path = SCREENSHOT_DIR) -> Optional[Path]:
+def save_snapshot(img_rgb: np.ndarray, tag: str, directory: Path = SCREENSHOT_DIR, *,
+                  path: Path | None = None) -> Optional[Path]:
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{time.strftime('%Y%m%d_%H%M%S')}_{tag}.png"
-        cv2.imwrite(str(path), img_rgb[:, :, ::-1])  # RGB -> BGR
-        return path
+        path = path or directory / f"{time.strftime('%Y%m%d_%H%M%S')}_{tag}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path if cv2.imwrite(str(path), img_rgb[:, :, ::-1]) else None
     except Exception:  # noqa: BLE001
         log.exception("snapshot save failed")
         return None

@@ -97,7 +97,7 @@
 运行 `20261116T083803-bec1f854`，构建 265/schema 3，主控 `7e95803f803c5e29e80e97bc4822a1c08c65374b88fc0d7e55807e295e388dca` 与发布一致。80.2 秒，90893 挂起 `quest_npc_player_origin_unresolved`，零交付；正常 `completed_with_pending`，本次没有失焦退出。
 
 - **局部实机通过**：F6 可用，PROBE 请求/释放与 23.5 码距离回执存在；接近距离 10.26→8.19→6.75 码，第三步零位移后才进入视觉。Qwen 三批六图使用同一 worker PID 29571，请求 1/2/3，证明本场景复用有效。
-- **P0 镜头实际构图失败**：探路前截图 `data/screenshots/20261116_163818_camera_after_interact.png` 可见地面和人物；探路后 `data/terrain/20261116_163827_d713cbe6/retreat.png` 及后续图明显仰视，出现巨大人物/宠物模型、树叶遮挡，地面脚点不可确认。插件仍回报 23.5 码、DISTANCE_VERIFIED、calibrated=false。代码 PROBE 无校准也加载视角 2 并做固定 MoveViewDown 相对动作，距离成功不能说明角度或无遮挡成功；俯仰方向/速度与恢复基准需单独核验，不能凭函数名断言正确。
+- **P0 镜头实际构图失败**：探路前截图 `data/terrain/navigation-camera-evidence/20261116_163818_camera_after_interact.png` 可见地面和人物；探路后 `data/terrain/20261116_163827_d713cbe6/retreat.png` 及后续图明显仰视，出现巨大人物/宠物模型、树叶遮挡，地面脚点不可确认。插件仍回报 23.5 码、DISTANCE_VERIFIED、calibrated=false。代码 PROBE 无校准也加载视角 2 并做固定 MoveViewDown 相对动作，距离成功不能说明角度或无遮挡成功；俯仰方向/速度与恢复基准需单独核验，不能凭函数名断言正确。
 - **P1 缺少坏取景恢复**：六图均 feet=null，退避零次、零码；仍继续侧向/后方扫描，没有先恢复可用基准或判断构图再重试。两次选择都是规则 no_open_view，StartLux 未进入排序。总探路 58.02 秒，模型等待取样 39.08 秒；不能归因于 StartLux 未启动。
 - **P1 挂起绕过镜头收尾**：代码设置 terrain_finished 后直接进入 suspend_task；该分支早于 restore_camera。退出前最后状态仍 applied=PROBE、zoom=23.5，无恢复请求/回执。正常任务挂起需要有界镜头收尾，失焦/急停仍不得追加输入。
 - **P2 镜头切换开销**：约 10 码短距离接近先 32→38.5，再 38.5→32，两次等待取样约 10.42 秒；应把邻近 NPC 的接近作为稳定场景，避免短途反复重置槽位/缩放。

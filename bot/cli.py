@@ -622,6 +622,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "stopped:quest_mount_button_unavailable": "未核对到原生驭空坐骑图标。请关闭插件面板和地图，并确认动作栏上有原生驭空坐骑图标。",
                 "stopped:quest_mount_not_confirmed": "已尝试使用原生驭空坐骑，游戏尚未确认骑乘任务进度。请查看游戏内提示及任务运行日志。",
                 "stopped:quest_object_interaction_unconfirmed": "已点击确认的任务物品，但任务进度尚未增加。角色已停在当前物品附近，请查看游戏内距离或互动提示。",
+                "stopped:quest_object_loot_bag_full": "任务物件的掉落因背包容量不足未拾取。当前没有已核对的下一项任务，已停止重复点击。",
                 "stopped:game_not_frontmost": "魔兽未保持前台，脚本已停止。点击游戏窗口后让游戏保持在前台。",
                 "stopped:capture_unavailable": "游戏窗口位置、尺寸或截图状态发生变化，已停止输入。请核对任务运行日志。",
                 "stopped:input_session_stopped": "键鼠助手已结束会话。切回魔兽并重新从「WoW 键鼠」启动任务。",
@@ -630,6 +631,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "stopped:quest_loot_addon_required": "控制器需要支持强制拾取的新版插件和已核对的拾取键位，战斗已停止。",
                 "stopped:quest_loot_unconfirmed": "有一具击杀后的尸体仍未确认拾取完毕，脚本已停在当前任务。",
                 "stopped:quest_recovery_corpse_route_unavailable": "已识别到灵魂状态，但未取得跑尸所需的坐标、朝向或步行键位。请查看 quest_recovery_route_wait 日志中的缺失项。",
+                "stopped:quest_recovery_mesh_unavailable": "跑尸无法确认可用的网格路线，移动已停止。请查看 quest_local_mesh_wait 和 Nav3D 日志。",
                 "stopped:quest_recovery_corpse_position_unavailable": "未读到尸体坐标、原生导航距离，也未能从小地图核对墓碑或红色方向箭头；已停止移动，请查看小地图识别日志。",
                 "stopped:quest_recovery_corpse_distance_search_unconfirmed": "已尝试根据游戏的尸体追踪距离定位，但读数未能确认前进方向。",
                 "stopped:quest_recovery_confirmation_unacknowledged": "已点击复活确认按钮，但游戏未报告角色存活。",
@@ -696,6 +698,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         estop.stop()
         wd.stop()
         ctx.audio.stop()
+        ctx.screenshots.close()
         ctx.db.close()
         if caf:
             caf.terminate()

@@ -29,7 +29,8 @@ local clicks = {
     {"food", "F3", "WowAgentRecoveryFood", "LeftButton", "forever", {TARGETPARTYMEMBER2 = true}},
     {"controller_prepare", "CTRL-ALT-SHIFT-F5", "WowAgentControllerPrepare", "LeftButton"},
 }
-for code = 0, 7 do
+-- macOS F13 reaches this client as Print Screen. Use F14–F19 only.
+for code = 1, 6 do
     clicks[#clicks + 1] = {"run_status_" .. code, "F" .. (13 + code),
         "WowAgentRunStatus" .. code, "LeftButton"}
 end

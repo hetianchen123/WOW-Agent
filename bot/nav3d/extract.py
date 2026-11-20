@@ -128,6 +128,68 @@ def terrain(chunk, wet=0):
     return np.array(v),np.array(t,dtype=int).reshape(-1,3)
 
 
+def wmo_liquid_cells(liquid, placement):
+    """Yield the world-space surface of each active MLIQ cell."""
+    if not isinstance(liquid, dict):
+        raise NavigationError('wmo_liquid_shape_invalid')
+    width, height = (liquid.get(key) for key in ('tileX', 'tileY'))
+    flags, vertices = liquid.get('tiles'), liquid.get('vertices')
+    if (type(width) is not int or type(height) is not int or not 1 <= width <= 256 or not 1 <= height <= 256
+            or liquid.get('vertX') != width + 1 or liquid.get('vertY') != height + 1
+            or not isinstance(flags, list) or len(flags) != width * height
+            or any(type(flag) is not int or not 0 <= flag <= 255 for flag in flags)
+            or not isinstance(vertices, list) or len(vertices) != (width + 1) * (height + 1)):
+        raise NavigationError('wmo_liquid_shape_invalid')
+    corner = np.asarray(liquid.get('corner'), dtype=float)
+    if corner.shape != (3,) or not np.isfinite(corner).all():
+        raise NavigationError('wmo_liquid_corner_invalid')
+    offsets = np.array(((0, 0), (1, 0), (1, 1), (0, 1)))
+    for index, flag in enumerate(flags):
+        if flag & 0x0F == 0x0F:
+            continue
+        y, x = divmod(index, width)
+        grid = offsets + (x, y)
+        corners = [vertices[col + row * (width + 1)] for col, row in grid]
+        heights = [vertex.get('height') if isinstance(vertex, dict) else None for vertex in corners]
+        if not all(type(z) in (float, int) and math.isfinite(z) for z in heights):
+            raise NavigationError('wmo_liquid_height_invalid')
+        points = np.c_[corner[:2] + grid * (TILE / 128), heights, np.ones(4)]
+        yield (points @ placement.T)[:, :3]
+
+
+def split_polygon(polygon, signed):
+    """Return polygon pieces on the positive and negative sides of a plane."""
+    inside, outside = [], []
+    for index, vertex in enumerate(polygon):
+        previous, current = signed[index - 1], signed[index]
+        if previous * current < 0:
+            start = polygon[index - 1]
+            crossing = start + (vertex - start) * (previous / (previous - current))
+            inside.append(crossing)
+            outside.append(crossing)
+        if current >= 0:
+            inside.append(vertex)
+        if current <= 0:
+            outside.append(vertex)
+    return np.asarray(inside), np.asarray(outside)
+
+
+def subtract_submerged(polygon, planes):
+    """Keep convex fragments outside the vertical volume under one liquid face."""
+    dry = []
+    for normal, anchor in planes:
+        signed = (polygon - anchor) @ normal
+        lower = signed.min()
+        if lower >= 0:
+            continue
+        if signed.max() <= 0:
+            return [*dry, polygon]
+        polygon, outside = split_polygon(polygon, signed)
+        if len(outside) >= 3:
+            dry.append(outside)
+    return dry
+
+
 class SceneBuilder:
     def __init__(self, casc, decoder, roi, names=None, *, tiled=False):
         self.casc,self.decoder,self.roi=casc,decoder,np.asarray(roi,float)
@@ -136,6 +198,8 @@ class SceneBuilder:
             raise NavigationError('invalid_local_roi')
         self.names=names or {};self.vertices=[];self.triangles=[];self.instances=[];self.seen=set()
         self.excluded_liquid_chunks=[];self.excluded_liquid_cells=[];self.excluded_wmo_groups=[]
+        self.wmo_liquids = []
+        self.wmo_liquid_cells = []
 
     def read(self,kind,fdid):return self.decoder.decode(kind,self.casc.read(fdid))
 
@@ -186,11 +250,13 @@ class SceneBuilder:
                     flags=group.get('flags',0),name=name,reason='non_physical_group'))
                 continue
             if group.get('liquid'):
-                liquid=group['liquid'];corner=np.array(liquid['corner'])
-                corners=np.array([corner+[x*TILE/128,y*TILE/128,0] for x in (0,liquid['tileX']) for y in (0,liquid['tileY'])])
-                world=(np.c_[corners,np.ones(4)]@m.T)[:,:2]
-                if (world.max(axis=0)>=self.roi[0]).all() and (world.min(axis=0)<=self.roi[1]).all():
-                    raise NavigationError('wmo_liquid_in_roi_unsupported')
+                cells = [cell for cell in wmo_liquid_cells(group['liquid'], m)
+                         if (cell[:, :2].max(axis=0) >= self.roi[0]).all()
+                         and (cell[:, :2].min(axis=0) <= self.roi[1]).all()]
+                if cells:
+                    self.wmo_liquids.extend(cells)
+                    self.wmo_liquid_cells.append(dict(parent=fdid, file_id=gid, uid=entry['uniqueId'],
+                                                      wet_cells=len(cells)))
             indices=np.array(group.get('indices',[]),int).reshape(-1,3);materials=group.get('materialInfo',[])
             if len(materials)!=len(indices):raise NavigationError('wmo_collision_flags_missing')
             flags=np.array([r['flags'] for r in materials],dtype=np.uint32)
@@ -208,6 +274,51 @@ class SceneBuilder:
                 else:fid=self.names.get(root.get('doodadNames',{}).get(str(d['offset']),'').lower())
                 if not fid:raise NavigationError('wmo_doodad_file_missing')
                 self.m2(fid,m@quaternion_matrix(d['rotation'],d['position'],d['scale']),dict(parent=fdid,doodad=i))
+
+    def remove_submerged_geometry(self):
+        if not self.wmo_liquids or not self.triangles:
+            return 0
+        triangles = np.asarray(self.vertices).reshape(-1, 3, 3)
+        lo, hi = triangles.min(axis=1), triangles.max(axis=1)
+        changed = {}
+        for cell in self.wmo_liquids:
+            # Subdivide along the MLIQ height interpolation diagonal.
+            for face in (cell[[0, 1, 2]], cell[[0, 2, 3]]):
+                normal = np.cross(face[1] - face[0], face[2] - face[0])
+                if normal[2] <= 1e-8:
+                    raise NavigationError('wmo_liquid_orientation_invalid')
+                face_lo, face_hi = face.min(axis=0), face.max(axis=0)
+                intersecting = np.flatnonzero((lo[:, 2] <= face_hi[2])
+                    & np.all(lo[:, :2] < face_hi[:2], axis=1) & np.all(hi[:, :2] > face_lo[:2], axis=1))
+                edges = np.roll(face, -1, axis=0) - face
+                inward = np.c_[-edges[:, 1], edges[:, 0], np.zeros(3)]
+                planes = (*zip(inward, face), (-normal, face[0]))
+                for index in intersecting:
+                    dry = []
+                    for polygon in changed.get(index, (triangles[index],)):
+                        dry.extend(subtract_submerged(polygon, planes))
+                    changed[index] = dry
+        if not changed:
+            return 0
+        self.vertices, self.triangles = [], []
+        first = 0
+        for instance in self.instances:
+            stop = first + instance['triangles']
+            emitted = len(self.triangles)
+            for index in range(first, stop):
+                for polygon in changed.get(index, (triangles[index],)):
+                    for second, third in zip(polygon[1:], polygon[2:]):
+                        anchor = polygon[0]
+                        if index in changed and np.linalg.norm(np.cross(second - anchor, third - anchor)) < 1e-9:
+                            continue
+                        if len(self.vertices) + 3 > 2000000:
+                            raise NavigationError('scene_geometry_limit')
+                        start = len(self.vertices)
+                        self.vertices.extend((anchor, second, third))
+                        self.triangles.append((start, start + 1, start + 2))
+            instance['triangles'] = len(self.triangles) - emitted
+            first = stop
+        return len(changed)
 
     def extract(self,world_id,dbd,output,phase_id,*,wdt_file=None):
         if wdt_file is None:
@@ -254,6 +365,7 @@ class SceneBuilder:
                         fid=self.file_id(model,obj,iswmo)
                         if iswmo:self.wmo(fid,m,model)
                         else:self.m2(fid,m,dict(uid=model['uniqueId']))
+        cut_candidates = self.remove_submerged_geometry()
         if not self.triangles:raise NavigationError('empty_roi_collision')
         output=Path(output);output.mkdir(parents=True,exist_ok=False)
         with (output/'collision.obj').open('w') as f:
@@ -267,6 +379,7 @@ class SceneBuilder:
             dependencies=dict(casclib=CASC_COMMIT,wow_export=EXPORT_COMMIT,casclib_patch_sha256=hashlib.sha256((ROOT/'native/nav3d/casc/readonly.patch').read_bytes()).hexdigest(),map_dbd_sha256=hashlib.sha256(Path(dbd).read_bytes()).hexdigest()),
             resources=list(self.casc.records.values()),instances=self.instances,excluded_liquid_chunks=self.excluded_liquid_chunks,
             excluded_liquid_cells=self.excluded_liquid_cells,
+            wmo_liquid_cells=self.wmo_liquid_cells, wmo_liquid_candidate_triangles=cut_candidates,
             excluded_wmo_groups=self.excluded_wmo_groups,
             alignment_verified=False,phase_verified=False,dynamic_objects_included=False,reached_in_game=False)
         (output/'extraction.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2))

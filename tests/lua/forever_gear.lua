@@ -4,6 +4,7 @@ local equipped, bags = {}, {}
 local wear, repairCalls, equipCalls = {}, 0, 0
 local targetID, npcID, merchantRepairs, cost = 2046, nil, true, 35
 local vendorIcon, optionSelected = 132049, nil
+local mapX, mapY = .415, .67
 local frames = {}
 
 WowAgent, UIParent, SlashCmdList = {}, {}, {}
@@ -48,7 +49,7 @@ Enum = {GossipOptionStatus = {Available = 0}}
 C_Map = {
     GetBestMapForUnit = function() return 1429 end,
     GetMapWorldSize = function() return 3470.8, 2314.6 end,
-    GetPlayerMapPosition = function() return {GetXY = function() return .415, .67 end} end,
+    GetPlayerMapPosition = function() return {GetXY = function() return mapX, mapY end} end,
 }
 function CanMerchantRepair() return merchantRepairs end
 function GetRepairAllCost() return cost, true end
@@ -226,3 +227,114 @@ Click()
 clock = 32
 Observe(plan, 25)
 assert(repairCalls == 2 and not merchant)
+
+-- Town service runs with healthy equipment and sells only eligible bag slots.
+local function BagItem(id, equipType, itemLevel, quality, class, price)
+    local item = Item(id, equipType, itemLevel)
+    item.quality, item.classID, item.price, item.stackCount = quality, class, price, 1
+    item.hasNoValue, item.hasLoot, item.isReadable = false, false, false
+    item.usable = false
+    return item
+end
+local obsolete = BagItem(201, "INVTYPE_CHEST", 2, 1, 4, 7)
+local shield = BagItem(208, "INVTYPE_SHIELD", 10, 1, 4, 15)
+local gray = BagItem(202, "", 1, 0, 15, 5)
+gray.stackCount = 3
+local questItem = BagItem(203, "", 1, 0, 15, 20)
+questItem.quest = 42
+local better = BagItem(204, "INVTYPE_CHEST", 55, 1, 4, 10)
+better.usable, obsolete.usable = true, true
+local uncommon = BagItem(205, "INVTYPE_CHEST", 1, 2, 4, 40)
+local locked = BagItem(206, "", 1, 0, 15, 5)
+locked.isLocked = true
+local supplies = BagItem(207, "", 1, 1, 0, 1)
+local saleCalls = 0
+bags = {shield, gray, questItem, better, uncommon, locked, supplies}
+equipped[5] = obsolete
+wear[5] = 30
+C_Item.GetItemInfo = function(link)
+    local item = items[link]
+    return "gear", link, item.quality, item.level, item.required, "type", "subtype", 20,
+        item.equipType, 100, item.price, item.classID, 0, 0
+end
+C_Container.GetContainerNumSlots = function(bag) return bag == 0 and 7 or 0 end
+C_Container.GetContainerItemQuestInfo = function(bag, index)
+    return {isQuestItem = bags[index].quest ~= nil, isActive = false, questID = bags[index].quest}
+end
+local saleIndex
+C_Container.UseContainerItem = function(bag, index)
+    assert(bag == 0 and merchant)
+    saleCalls, saleIndex = saleCalls + 1, index
+end
+clock, mapX = 40, .415
+plan = Plan()
+assert(Observe(plan, 15).id == better.itemID)
+Click()
+Observe(plan, 16)
+equipped[5], bags[4] = better, obsolete
+Observe(plan, 17)
+clock = 42
+trip = Observe(plan, 19)
+targetID, npcID, merchant = trip.npc.id, trip.npc.id, true
+merchantEvents:OnEvent("MERCHANT_SHOW")
+assert(Observe(plan, 28).value == 15) -- Gray stack before white gear.
+bags[2], bags[3] = questItem, gray
+Click()
+assert(saleCalls == 0) -- Same item moved to a different slot after the offer.
+bags[2], bags[3] = gray, questItem
+Click()
+assert(saleCalls == 1 and saleIndex == 2)
+Observe(plan, 29)
+Click()
+assert(saleCalls == 1)
+bags[2] = nil
+Observe(plan, 29) -- Slot change alone is not proof of a sale.
+money = money + 15
+assert(Observe(plan, 30).value == 15)
+clock = 44
+assert(Observe(plan, 28).link == shield.hyperlink) -- Ineligible shield with an empty off hand.
+Click()
+assert(saleCalls == 2 and saleIndex == 1)
+bags[1], money = nil, money + 15
+assert(Observe(plan, 30).value == 15)
+clock = 46
+assert(Observe(plan, 28).link == obsolete.hyperlink) -- The replaced, still usable white item.
+Click()
+assert(saleCalls == 3 and saleIndex == 4)
+bags[4], money = nil, money + 7
+assert(Observe(plan, 30).value == 7)
+clock = 48
+Observe(plan, 26)
+Click()
+assert(not merchant and saleCalls == 3 and bags[3] == questItem and equipped[5] == better
+    and bags[5] == uncommon and bags[6] == locked and bags[7] == supplies)
+Observe(plan, nil)
+
+-- Sell before quoting a repair that the initial balance cannot afford.
+clock, money, wear[5] = 49, 10, 0
+gray.stackCount, bags[2] = 5, gray
+plan = Plan()
+trip = Observe(plan, 19)
+targetID, npcID, merchant = trip.npc.id, trip.npc.id, true
+merchantEvents:OnEvent("MERCHANT_SHOW")
+assert(Observe(plan, 28).value == 25)
+Click()
+assert(saleCalls == 4 and repairCalls == 2)
+bags[2], money = nil, 35
+Observe(plan, 30)
+clock = 51
+Observe(plan, 21)
+Click()
+assert(repairCalls == 3)
+
+-- An equip timeout leaves a viable upgrade in the bag instead of selling it.
+merchant, wear[5], clock = false, 30, 56
+equipped[5], bags[4] = obsolete, better
+plan = Plan()
+Observe(plan, 15)
+Click()
+clock = 61
+Observe(plan, 18)
+clock = 63
+Observe(plan, nil)
+assert(saleCalls == 4 and bags[4] == better)

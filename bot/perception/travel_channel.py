@@ -21,6 +21,7 @@ RECOVERY_BINDING_BUILD = 320
 RECOVERY_F7_BUILD = 322
 RECOVERY_DIALOG_KEYS = (None, *"uyhgbnm", "f7")
 CORPSE_LOOT_RECEIPT_BUILD = 324
+INVENTORY_MAINTENANCE_BUILD = 340
 
 
 class TravelFlags(IntFlag):
@@ -108,6 +109,9 @@ class ForeverStep(IntEnum):
     REPAIR_FAILED = 25
     REPAIR_CLOSE = 26
     REPAIR_CANNOT_PAY = 27
+    VENDOR_SELL = 28
+    VENDOR_WAIT = 29
+    VENDOR_SOLD = 30
 
 
 class ChoiceStep(IntEnum):
@@ -252,7 +256,7 @@ class CameraBindings:
 @dataclass(frozen=True)
 class CorpseLootReceipt:
     serial: int
-    target_epoch: int
+    target_epoch: int | None
 
 
 @dataclass(frozen=True)
@@ -329,6 +333,9 @@ class TravelSample:
     run_status_ready: bool = False
     run_status_receipt: int | None = None
     run_status_epoch: int | None = None
+    run_status_detailed: bool = False
+    corpse_loot_denied: bool = False
+    corpse_loot_full_receipt: CorpseLootReceipt | None = None
 
 
 def camera_binding_key(navigation, *, probe=False):
@@ -341,8 +348,9 @@ def camera_binding_key(navigation, *, probe=False):
 
 def travel_region(x: int, y: int, *, supply_bars: bool = False,
                   camera_bindings: bool = False, corpse_receipts: bool = False,
-                  run_status: bool = False) -> tuple[int, int, int, int]:
-    extra = 36 if run_status else 35 if corpse_receipts else 34 if camera_bindings else 33 if supply_bars else 28
+                  run_status: bool = False, bag_full_receipt: bool = False) -> tuple[int, int, int, int]:
+    extra = (37 if bag_full_receipt else 36 if run_status else 35 if corpse_receipts
+             else 34 if camera_bindings else 33 if supply_bars else 28)
     height = (TRAVEL_ROWS + extra) * spec.REGION_H
     return x + TRAVEL_OFFSET_X, y - height, spec.REGION_W, height
 
@@ -350,7 +358,7 @@ def travel_region(x: int, y: int, *, supply_bars: bool = False,
 def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) -> TravelSample | None:
     row_height = spec.REGION_H
     if image.shape[1:] != (spec.REGION_W, 3) or image.shape[0] not in {
-        (TRAVEL_ROWS + extra) * row_height for extra in range(37)
+        (TRAVEL_ROWS + extra) * row_height for extra in range(38)
     }:
         return None
     offset = image.shape[0] - TRAVEL_ROWS * row_height
@@ -438,6 +446,7 @@ def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) ->
                     choice_step = ChoiceStep(value)
     round_stage, round_advance, round_blocked, round_immediate = RoundStage.NONE, False, False, False
     corpse_lootable, fetch_ready, precise_object, apr_waypoint, strafe_verified = None, False, False, False, False
+    corpse_loot_denied = False
     last_target_verified = False
     if version >= 9:
         if offset < 4 * row_height:
@@ -450,6 +459,8 @@ def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) ->
         round_immediate = bool(row[1] & 32)
         if row[1] & 8192:
             corpse_lootable = bool(row[1] & 16384)
+        else:
+            corpse_loot_denied = bool(row[1] & 16384)
         fetch_ready = bool(row[1] & 32768)
         precise_object = bool(row[1] & 65536) and action == ObjectiveAction.INTERACT
         apr_waypoint = precise_object and not objective_pin and bool(row[1] & 131072)
@@ -622,6 +633,8 @@ def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) ->
                                          and bool(schema[1] & 524288))
             calibration_orbit_available = bool(automatic_schema and overhead_camera_available and schema_version & 1)
             calibration_orbit_active = bool(calibration_orbit_available and schema_version & 2)
+    if forever_step >= ForeverStep.VENDOR_SELL and (addon_build or 0) < INVENTORY_MAINTENANCE_BUILD:
+        forever_step, forever_value = ForeverStep.NONE, 0
     if recovery is not None and recovery.dialog and (addon_build or 0) >= RECOVERY_F7_BUILD:
         if recovery_f7:
             recovery_dialog_key = RECOVERY_DIALOG_KEYS[8]
@@ -682,6 +695,7 @@ def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) ->
     corpse_loot_receipt = None
     nearby_lootable_corpse = False
     run_status_ready = False
+    run_status_detailed = False
     run_status_receipt = run_status_epoch = None
     if (addon_build or 0) >= CORPSE_LOOT_RECEIPT_BUILD and offset >= 35 * row_height:
         cleared = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 35 * row_height))
@@ -697,9 +711,18 @@ def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) ->
         state = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 36 * row_height))
         if state and state[0] == 7 and state[1] >> 13 == sequence and state[1] & 4096:
             run_status_ready = bool(state[1] & 1)
+            run_status_detailed = addon_build >= 332 and bool(state[1] & 2048)
             code = (state[1] >> 1) & 15
-            if 1 <= code <= 10:
-                run_status_receipt, run_status_epoch = code - 1, (state[1] >> 5) & 127
+            if 1 <= code <= (15 if run_status_detailed else 10):
+                run_status_receipt = 15 if code == 1 and run_status_detailed and addon_build >= 337 else code - 1
+                run_status_epoch = (state[1] >> 5) & (63 if run_status_detailed else 127)
+    corpse_loot_full_receipt = None
+    if (addon_build or 0) >= INVENTORY_MAINTENANCE_BUILD and offset >= 37 * row_height:
+        full = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 37 * row_height))
+        if full and full[0] == 8 and full[1] >> 13 == sequence:
+            serial, target_epoch = divmod(full[1] & 4095, 64)
+            if serial:
+                corpse_loot_full_receipt = CorpseLootReceipt(serial, target_epoch if full[1] & 4096 else None)
     return TravelSample(
         quest, map_id, goal_map,
         (gx / 1048575, gy / 1048575) if meta & 128 and goal_map else None,
@@ -717,5 +740,7 @@ def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) ->
         calibration_orbit_available,calibration_orbit_active,
         round_pending_count, extension_schema, visual_ui_hidden,
         choice_step, forever_step, forever_value, counted_drop, vitals, camera_bindings, corpse_loot_receipt,
-        nearby_lootable_corpse, run_status_ready, run_status_receipt, run_status_epoch,
+        nearby_lootable_corpse, run_status_ready, run_status_receipt, run_status_epoch, run_status_detailed,
+        corpse_loot_denied and (addon_build or 0) >= 336,
+        corpse_loot_full_receipt,
     )

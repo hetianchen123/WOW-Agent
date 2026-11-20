@@ -13,6 +13,8 @@ channel:
 capture:
   monitor: 1
   control_fps: 15
+  screenshot_keep_hours: 72
+  screenshot_max_mib: 256
 
 audio:
   enabled: true

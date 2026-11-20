@@ -19,6 +19,7 @@ from uuid import uuid4
 import cv2
 
 from ..core.paths import DATA_DIR, ROOT
+from ..perception.screenshot_retention import mark_captures_complete
 from .route_geometry import simple_polygon, image_metric_error, clearance_error
 from .route_render import save_route
 from .grounded_route import staged_plan, GroundingError
@@ -257,6 +258,7 @@ class RouteRequest:
         save()
         def run():
             if not self.future.set_running_or_notify_cancel():
+                mark_captures_complete(self.evidence_dir)
                 return
             started = time.monotonic()
             try:
@@ -392,6 +394,8 @@ class RouteRequest:
                                                        for s in report['stages'])}
                 save()
                 self.future.set_exception(PlannerError(error))
+            finally:
+                mark_captures_complete(self.evidence_dir)
         Thread(target=run,name='deepseek-route',daemon=True).start()
 
     def close(self):

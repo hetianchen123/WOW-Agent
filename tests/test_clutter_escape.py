@@ -259,10 +259,11 @@ def test_npc_owns_escape_and_increasing_target_distance_does_not_replan(tmp_path
 
 
 @pytest.mark.parametrize('reason', ['escape_evidence_insufficient', 'escape_time_budget'])
-def test_escape_exhaustion_suspends_only_current_task(tmp_path, monkeypatch, reason):
+def test_escape_exhaustion_keeps_the_current_turn_in(tmp_path, monkeypatch, reason):
     run, ctx, _, nav, _ = npc(tmp_path, monkeypatch)
     nav = replace(nav, suspend_ready=True, suspend_epoch=0, round_stage=RoundStage.TURN_IN)
     run.round_stage, run.round_navigation = RoundStage.TURN_IN, nav
     run.stop(ctx, 'quest_npc_' + reason)
-    assert run.OUTCOME is None and run.suspend_request[3] == 'quest_npc_' + reason
+    assert run.OUTCOME is None and run.suspend_request is None
+    assert run.timeout_review.reason == 'quest_npc_' + reason
     assert not ctx.input._held_keys

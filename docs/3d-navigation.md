@@ -133,6 +133,8 @@ Recast 固定源码提交 `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`。收录的
 
 分块静态网格的 `nav3d` 模式同时保留 Detour 多边形路廊。通过支撑面和连续位移核对后，用 `moveAlongSurface` 更新路廊起点，只在附近与原路廊相交的多边形处接续。跟随者偏出路段时可重建同一路廊的剩余路点，保持原目标、转向间隔和原运行预算。操作先释放输入，下一帧再启程。若路廊断开或动态障碍改变，则沿用原有完整重算。 [Detour 路廊参考实现](https://github.com/recastnavigation/recastnavigation/blob/6dc1667f580357e8a2154c28b7867bea7e8ad3a7/DetourCrowd/Source/DetourPathCorridor.cpp)
 
+**闪金镇旅店入口修复，历史位姿回放通过，待实走。** 原始 XY 略微越过网格边缘时，支撑检查已经找到从上一帧可达的同层网格点。路廊沿用这个短路径的终点，角色位移和到达仍使用原始 XY。只有角色重新进入确切网格支撑时，前向射线才可批准持续前进。构建 342 的正反两段实机位姿共 986 帧，旧行为复现两次 `corridor_support_mismatch`，修复后零次。投影最大约 0.139 码。新运行在 `nav3d_control` 中记录实际采用的 `corridor_edge_projection`。 [同版网格和历史位姿对照](../data/terrain/nav-optimization-20261120/goldshire-corridor-edge-replay.json)
+
 高频位姿配合分块静态路廊时，持续跟随从最近一次已核对的支撑多边形，沿角色当前朝向做一次短程 Detour `raycast`。预估距离按当前速度和输入回执间隔保留制动空间。前方支撑不足时，先松开前进键并等待延后位移停稳，再按当前航点执行原有有界短按；直道维持前进长按。射线只检查由当前多边形出发的平面通行距离。高度、动态障碍和实际位移继续使用各自回执。 [Detour 查询说明](https://recastnav.com/classdtNavMeshQuery.html) · [Nav2 前向校验参考](https://api.nav2.org/nav2-rolling/html/regulated__pure__pursuit__controller_8cpp_source.html#l00284)
 
 可用 `build --tile-cells 160 --with-clearance` 为分块网格同批生成 `clearance/`，在相同碰撞源上多留一格障碍余量。高频位姿下，6–35 码的持续跟随路线出现 45° 以上转角时，会尝试替换路线中段。两端沿原路线选接点，保留原起终点，用原网格独立复核同层支撑和原路廊的接续。基础网格与辅助网格须匹配客户端、场景、碰撞摘要及构建参数。缺接点、复核失败或超出试跑范围时走原路线。 [Recast 的障碍余量](https://recastnav.com/structrcConfig.html) · [真网格模拟对照](../data/terrain/nav-optimization-20261120/sharp-corners-planning-clearance-ab.json)

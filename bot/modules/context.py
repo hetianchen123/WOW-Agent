@@ -23,6 +23,7 @@ from ..perception.channel import ChannelReader
 from ..perception.channel_spec import MSG_BAGSUM, MSG_FASTEV, MSG_HDG, MSG_POS, MSG_STATUS
 from ..perception.cv import save_snapshot
 from ..perception import cv as cvmod
+from ..perception.screenshot_retention import ScreenshotWriter
 
 Rect = Tuple[int, int, int, int]
 
@@ -51,6 +52,7 @@ class ModuleContext:
         self.notifier = notifier
         self.log = logging.getLogger("module")
         self._frame_cache: Dict[Tuple[int, int, int, int], Tuple[float, np.ndarray]] = {}
+        self.screenshots = ScreenshotWriter(cfg.capture.screenshot_keep_hours, cfg.capture.screenshot_max_mib)
         self.stats: Dict[str, float] = {}
         self.gold_last_logged = 0.0
         self._fastev_cursor = 0
@@ -78,6 +80,8 @@ class ModuleContext:
     def begin_tick(self) -> None:
         # drop frames older than 0.2 s so each ROI is grabbed at most ~5 Hz
         now = time.time()
+        if isinstance(self.capture, ScreenCapture):
+            self.screenshots.prune(now)
         for k in list(self._frame_cache):
             if now - self._frame_cache[k][0] > 0.2:
                 del self._frame_cache[k]
@@ -92,6 +96,8 @@ class ModuleContext:
         got = self._frame_cache.get(key)
         if got is None:
             img = self.capture.grab(*rect)
+            if len(self._frame_cache) >= 8:
+                del self._frame_cache[next(iter(self._frame_cache))]
             self._frame_cache[key] = (time.time(), img)
             return img
         return got[1]
@@ -149,6 +155,8 @@ class ModuleContext:
         self.notifier.send(title, body, level=level)
 
     def snapshot(self, tag: str) -> Optional[str]:
+        if self.cfg.capture.screenshot_keep_hours <= 0 or self.cfg.capture.screenshot_max_mib <= 0:
+            return None
         try:
             img = self.capture.grab(0, 0, 1920, 1080)
         except Exception:  # noqa: BLE001

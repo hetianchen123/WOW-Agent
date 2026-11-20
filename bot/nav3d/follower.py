@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from ..control.navigation import heading_error
+from ..control.navigation import advances_toward, heading_error
 from ..control.quest_travel import TravelCommand
 from .planner import Frame, NavigationError, Path3D, point3
 
@@ -103,7 +103,7 @@ class WorldRouteFollower:
         return distance
 
     def step(self, now, pose: WorldPose | None, *, mesh_id: str, obstacle_revision: str,
-             cancelled=False, retreating=False, forward_clearance=None) -> TravelCommand:
+             cancelled=False, retreating=False, forward_clearance=None, forward_goal=None) -> TravelCommand:
         if self.terminal:
             return TravelCommand(outcome=self.terminal)
         if cancelled:
@@ -204,14 +204,18 @@ class WorldRouteFollower:
         window = self.route.points[max(0, self.index-4):self.index+8]
         if self.distance_to_route(position, window) > 2.0:
             return self.stop("nav3d_route_deviation")
+        if forward_goal is not None and not advances_toward(position, target, forward_goal):
+            return self.stop("nav3d_route_away_from_objective")
         dx, dy, dz = (b-a for a,b in zip(position,target))
         horizontal_distance = math.hypot(dx, dy)
         if horizontal_distance < .03 and abs(dz) > .3:
             return self.stop("nav3d_floor_mismatch")
         error = heading_error(pose.heading, math.atan2(-dx,dy) % math.tau)
+        facing_goal = (forward_goal is None or abs(heading_error(pose.heading,
+            math.atan2(position[0] - forward_goal[0], forward_goal[1] - position[1]))) < math.pi / 2)
         use_short_step = self.short_steps or self.approaching_goal or corner or near_edge
         turn_tolerance = math.radians(6 if use_short_step else 10)
-        if use_short_step and abs(error) <= turn_tolerance:
+        if use_short_step and facing_goal and abs(error) <= turn_tolerance:
             self.hold_forward = False
             self.commanded_motion = True
             if now < self.short_step_until:
@@ -233,7 +237,9 @@ class WorldRouteFollower:
         # misalignment large enough to drift out of the dense-waypoint corridor
         # releases W to rotate in place; deviation replans and stuck checks
         # below still bound every hold.
-        running = not use_short_step and abs(error) <= math.radians(15)
+        running = not use_short_step and facing_goal and abs(error) <= math.radians(15)
+        if forward_goal is not None and abs(error) > turn_tolerance:
+            running = False
         self.hold_forward = running
         self.commanded_motion = running
         if abs(error) > turn_tolerance:
@@ -250,4 +256,4 @@ class WorldRouteFollower:
             # turned 22.5 deg, i.e. ~190 deg/s (was assumed 240).
             return TravelCommand(keys=frozenset({"w"}) if running else frozenset(),
                 tap=direction, hold_s=min(.12,max(.03,abs(error)/math.radians(190))), precise=True)
-        return TravelCommand(keys=frozenset({"w"}))
+        return TravelCommand(keys=frozenset({"w"}) if facing_goal else frozenset())

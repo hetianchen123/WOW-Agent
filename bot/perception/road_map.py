@@ -9,6 +9,7 @@ import numpy as np
 from . import channel_spec as spec
 
 ROWS = 10
+ROAD_STRIP_RAISED_BUILD = 339
 COLORS = ((255, 0, 255), (0, 255, 255), (255, 255, 0), (0, 0, 255))
 
 
@@ -30,14 +31,16 @@ class RoadMapStatus:
     identity: MapIdentity
     armed: bool
     state: int
+    raised: bool = False
 
 
-def road_region(x, y):
-    return x + 432, y - ROWS * spec.REGION_H, spec.REGION_W, ROWS * spec.REGION_H
+def road_region(x, y, *, raised=False):
+    height = ROWS * spec.REGION_H
+    return x + 432, y - height - (256 if raised else 0), spec.REGION_W, height
 
 
-def road_capture_button(x, y):
-    left, top, width, _ = road_region(x, y)
+def road_capture_button(x, y, *, raised=False):
+    left, top, width, _ = road_region(x, y, raised=raised)
     return left + width // 2, top - 14
 
 

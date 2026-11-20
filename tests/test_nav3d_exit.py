@@ -261,6 +261,26 @@ def test_exit_seeds_start_support_from_recent_tracking_record(tmp_path):
     assert command.outcome != 'nav3d_support_ambiguous' and command.tap
 
 
+def test_interrupted_local_exit_reuses_only_a_continuous_floor(tmp_path):
+    rt, events, mesh = stacked_coordinator(tmp_path)
+    folder = tmp_path / "runs" / "interrupted"
+    folder.mkdir(parents=True)
+    now = time.time()
+    rows = [
+        dict(kind="nav3d_plan", ts=now, data=dict(route=dict(mesh_id=mesh.mesh_id))),
+        dict(kind="nav3d_control", ts=now, data=dict(position=[20.2, 8.1, 4.05])),
+        dict(kind="nav3d_unsafe_state", ts=now, data=dict(position_xy=[20.1, 8.0])),
+    ]
+    history = folder / "events.jsonl"
+    history.write_text("".join(json.dumps(row) + "\n" for row in rows) + '{"kind":')
+    rt.resume_runs = folder.parent
+    assert rt.seed_exit_support(exit_sample((20., 8., 0.), (100, 8), 1), interrupted=True)
+    assert abs(rt.tracker.last[2] - 4) < .5
+    assert "nav3d_exit_support_seeded" in names(events)
+    rt.tracker.last = None
+    assert not rt.seed_exit_support(exit_sample((21.8, 8., 0.), (100, 8), 1), interrupted=True)
+
+
 @pytest.mark.parametrize('encounter_xy', [(5., 5.), (20.1, 8.0)])
 def test_exit_without_seed_evidence_starts_current_state_floor_trials(tmp_path, encounter_xy):
     # 用户要求 2026-11-18：每次启动按当前情况自处理；无历史证据时叠层

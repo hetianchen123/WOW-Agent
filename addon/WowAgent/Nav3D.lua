@@ -8,6 +8,11 @@ if WowAgent.RoadScan then WowAgent.RoadScan.RegisterStrip(frame) end
 frame:Hide()
 local rows = {}
 for i = 1, 26 do rows[i] = WowAgent.NewPixelRow(frame, (i - 1) * 16) end
+local supportFrame = CreateFrame("Frame", "WowAgentMeshSupportFrame", frame)
+supportFrame:SetSize(142, 96)
+supportFrame:SetPoint("TOPLEFT", frame, "BOTTOMLEFT", 0, 0)
+local supportRows = {}
+for i = 1, 6 do supportRows[i] = WowAgent.NewPixelRow(supportFrame, (i - 1) * 16) end
 local poseFrame = CreateFrame("Frame", "WowAgentFastPoseFrame", UIParent)
 poseFrame:SetSize(142, 176)
 poseFrame:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 0, 480)
@@ -37,6 +42,63 @@ local function Motion()
     nx, ny, z, world = Number(nx, 83886), Number(ny, 83886), Number(z, 83886), Number(world, 16777216)
     local heading = GetPlayerFacing and Number(GetPlayerFacing(), math.huge)
     return nx, ny, z, world, heading
+end
+
+local supportSession, supportMotion, supportX, supportY, supportUnsafe, supportAt
+local supportMonitor = CreateFrame("Frame", "WowAgentMeshSupportMonitor")
+local function ResetSupport()
+    local clock = GetTimePreciseSec or GetTime
+    supportSession = math.floor(clock() * 1000000) % 68719476735 + 1
+    supportMotion, supportX, supportY, supportUnsafe, supportAt = 0, nil, nil, nil, nil
+end
+local function TrackSupport(nx, ny, now)
+    local unsafe = not nx or not ny or IsFalling() or IsFlying() or IsSwimming()
+        or Public(UnitIsDeadOrGhost("player")) ~= false
+    if supportUnsafe ~= unsafe or (supportX and nx and ny
+        and ((nx - supportX)^2 + (ny - supportY)^2 > .15^2)) or (supportAt and now - supportAt > .5) then
+        supportMotion = (supportMotion + 1) % 16777216
+        supportX, supportY, supportUnsafe = nx, ny, unsafe
+    end
+    supportAt = now
+end
+if WowAgent.Forever then
+    ResetSupport()
+    supportMonitor:RegisterEvent("PLAYER_ENTERING_WORLD")
+    supportMonitor:RegisterEvent("PLAYER_LOGOUT")
+    supportMonitor:SetScript("OnEvent", function(_, event, _, reloading)
+        local nx, ny, _, world = Motion()
+        local db = WowAgentDB
+        if event == "PLAYER_LOGOUT" then
+            if not db then return end
+            TrackSupport(nx, ny, GetTime())
+            db.meshSupportReload = not supportUnsafe and world and
+                {session=supportSession, revision=supportMotion, x=nx, y=ny, world=world, at=time()} or nil
+            return
+        end
+        ResetSupport()
+        local saved = db and db.meshSupportReload
+        if db then db.meshSupportReload = nil end
+        if reloading and type(saved) == "table" and type(saved.at) == "number"
+            and 0 <= time()-saved.at and time()-saved.at <= 60
+            and Number(saved.session, 68719476736) and Number(saved.revision, 16777216)
+            and Number(saved.x, 83886) and Number(saved.y, 83886)
+            and world and world == saved.world and nx and ny
+            and ((nx-saved.x)^2 + (ny-saved.y)^2 <= .15^2)
+            and not (IsFalling() or IsFlying() or IsSwimming())
+            and Public(UnitIsDeadOrGhost("player")) == false then
+            supportSession, supportMotion = saved.session, saved.revision
+            supportX, supportY, supportUnsafe, supportAt = nx, ny, false, GetTime()
+        end
+    end)
+    supportMonitor:SetScript("OnUpdate", function()
+        local now = GetTime()
+        if not supportAt or now - supportAt >= .067 then
+            local nx, ny = Motion()
+            TrackSupport(nx, ny, now)
+        end
+    end)
+else
+    supportFrame:Hide()
 end
 
 local function WritePose(nx, ny, world, heading, uiMap)
@@ -97,6 +159,14 @@ function WowAgent.WriteNav3D(seq, quest, phase, uiMap, targetMap, gx, gy, travel
     Pair(values, goalWorld or 0); Pair(values, Signed(goalX or 0)); Pair(values, Signed(goalY or 0))
     Pair(values, travelFlags)
     for i, value in ipairs(values) do rows[i]((i - 1) % 16, value + seq * 4096) end
+    if supportSession then
+        TrackSupport(nx, ny, GetTime())
+        local support = {3377}
+        Pair(support, supportSession % 16777216)
+        support[4] = math.floor(supportSession / 16777216)
+        Pair(support, supportMotion)
+        for i, value in ipairs(support) do supportRows[i](i - 1, value + seq * 4096) end
+    end
     frame:Show()
     if motionCheck then
         verifyMotion, poseBase, poseElapsed = motionCheck, seq, 0

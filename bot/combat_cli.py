@@ -239,10 +239,14 @@ def _live(args):
         raise ValueError("急停热键启动失败")
     fight = Fight(args.target)
     nav_region = travel_region(cfg.channel.x, cfg.channel.y, supply_bars=cfg.game_version == '1.60.1')
-    extended = travel_region(cfg.channel.x, cfg.channel.y, corpse_receipts=True)
-    if args.execute and any(x <= extended[0] and extended[0] + extended[2] <= x + w
-            and y <= extended[1] < cfg.channel.y <= y + h for x, y, w, h in cap.monitor_regions()):
-        nav_region = extended
+    if args.execute:
+        monitors = cap.monitor_regions()
+        for full in (True, False):
+            extended = travel_region(cfg.channel.x, cfg.channel.y, corpse_receipts=True, bag_full_receipt=full)
+            if any(x <= extended[0] and extended[0] + extended[2] <= x + w
+                   and y <= extended[1] < cfg.channel.y <= y + h for x, y, w, h in monitors):
+                nav_region = extended
+                break
 
     def read_with_loot():
         left, top = min(region[0], nav_region[0]), min(region[1], nav_region[1])
@@ -263,7 +267,7 @@ def _live(args):
     finally:
         stop.stop()
     print(json.dumps({"status": status, "presses": fight.presses, "dry_run": not args.execute}))
-    return 0 if status in {"target_defeated", "corpse_cleared", "corpse_empty"} else 2
+    return 0 if status in {"target_defeated", "corpse_cleared", "corpse_empty", "corpse_loot_bag_full"} else 2
 
 
 def add_parser(sub):

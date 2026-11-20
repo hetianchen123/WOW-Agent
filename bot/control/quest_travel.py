@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 
 from ..perception.travel_channel import TravelFlags as Flags, TravelSample
-from .navigation import compass_from_delta, heading_error
+from .navigation import compass_from_delta, heading_error, route_advances_toward
 from .pathfinding import GridRouter
 from .road_route import preferred_road, projection
 from .approach import ApproachAttempt, ApproachGoal, ApproachObservation, ActionState, ActionResult
@@ -18,6 +18,8 @@ TURN_INTERVAL = .45  # Same pulse rhythm as combat turning: tap, release, observ
 # Initial keyboard turn speed estimate. Bound each pulse because clients can differ.
 TURN_RATE = math.radians(240)
 FORWARD_TOLERANCE = math.radians(30)  # Keep walking through small heading errors.
+GROUND_REPLAN_PROGRESS_YARDS = 12
+GROUND_REPLAN_DRIFT_YARDS = 6
 
 
 @dataclass(frozen=True)
@@ -34,10 +36,12 @@ class TravelCommand:
 class QuestTrip:
     def __init__(self, world_size, destination, convention, *, arrival_radius=4, walk_only=False,
                  local_travel=False, approach_on_foot=False, prefer_steady=False, log_event=None,
-                 flight_threshold=FINAL_APPROACH_YARDS, outdoor_detour=False, ground_checkpoints=()):
+                 flight_threshold=FINAL_APPROACH_YARDS, outdoor_detour=False, ground_checkpoints=(),
+                 forward_goal=None):
         self.destination, self.convention = destination, convention
         self.arrival_radius = arrival_radius
         self.walk_only = walk_only
+        self.forward_goal = forward_goal
         self.local_travel = local_travel
         self.approach_on_foot = approach_on_foot
         self.flight_threshold = flight_threshold
@@ -50,13 +54,16 @@ class QuestTrip:
         self.road_origin = None
         self.road_sequence = None
         self.road_disabled = False
+        self.road_unmatched = False
+        self.verified_retreat = False
         self.motion_position, self.motion_at = None, 0.0
         self.motion_goal = None
         self.motion_sequence = None
         self.motion_samples = 0
         self.outdoor_detour = outdoor_detour
         self.ground_checkpoints = list(ground_checkpoints)
-        self.detour_origin = None
+        self.contact_goal = None
+        self.contact_distance = self.contact_best_distance = None
         self.contact_replans = 0
         self.altitude = None
         self.climbs = self.detours = 0
@@ -95,6 +102,13 @@ class QuestTrip:
         self.turn_feedback = None
         self.precision_attempt = None
 
+    def follow_verified_retreat(self, now, origin, path):
+        self.mode = "walk"
+        self.path = list(path)
+        self.road_origin = origin
+        self.verified_retreat = True
+        self.enter("cruise", now)
+
     def fail_mode(self, now):
         self.failed_modes.add(self.mode)
         self.enter("choose", now)
@@ -108,7 +122,11 @@ class QuestTrip:
         while self.ground_checkpoints and self.router.distance(position, self.ground_checkpoints[0]) <= 1.8:
             self.ground_checkpoints.pop(0)
         goal = self.ground_checkpoints[0] if self.ground_checkpoints else self.destination
-        return self.router.route(position, goal, smooth=smooth)
+        return self.router.route(position, goal, smooth=smooth, forward_goal=self.forward_goal)
+
+    def path_advances(self, position, path):
+        return self.forward_goal is None or route_advances_toward(
+            self.router.metric(position), map(self.router.metric, path), self.router.metric(self.forward_goal))
 
     def step(self, now: float, sample: TravelSample, heading: float, *,
              walk_verified: bool | None = None, heading_age: float = 0.0,
@@ -161,7 +179,8 @@ class QuestTrip:
             self.enter("choose", now)
         if flags & Flags.FALLING and not flying:
             return TravelCommand()
-        replan_ground = (self.outdoor_detour and bool(flags & Flags.OUTDOORS) and not flying and not retreating
+        replan_ground = (self.outdoor_detour and bool(flags & Flags.OUTDOORS) and not flying
+                         and (not retreating or self.forward_goal is not None)
                          and not flags & Flags.CASTING and distance > 8)
 
         final_road_leg = self.road_origin is None or self.path == [self.destination]
@@ -265,8 +284,18 @@ class QuestTrip:
             self.road_origin = self.road_sequence = None
             if self.road_traces and not self.ground_checkpoints and not self.road_disabled and flags & Flags.OUTDOORS:
                 self.path = preferred_road(self.router, position, self.destination, self.road_traces, self.mode)
+                if not self.path_advances(position, self.path):
+                    self.path = []
+                unmatched = not self.path and self.mode != "fly" and distance >= 65
+                if unmatched and not self.road_unmatched and self.log_event:
+                    self.log_event("quest_main_road_unmatched", {"id": sample.quest_id, "map": sample.map_id,
+                        "position": position, "destination": self.destination, "traces": len(self.road_traces)})
+                self.road_unmatched = unmatched
                 if self.path:
                     self.road_origin = position
+                    self.contact_goal = None
+                    self.contact_distance = self.contact_best_distance = None
+                    self.contact_replans = 0
                     if self.log_event:
                         self.log_event("quest_main_road_selected", {"mode": self.mode, "position": position,
                             "quest": sample.quest_id, "map": sample.map_id, "waypoints": self.path.copy()})
@@ -278,7 +307,7 @@ class QuestTrip:
             return self.fail_mode(now)
         if self.mode == "mount" and not mounted:
             return self.fail_mode(now)
-        if self.road_origin is not None and not flags & Flags.OUTDOORS:
+        if self.road_origin is not None and not self.verified_retreat and not flags & Flags.OUTDOORS:
             return self.leave_road(now, position, "not_outdoors")
         return self.steer(now, position, heading, sample.height, descent_key, sample.sequence,
                           sample.strafe_verified, heading_age, replan_ground)
@@ -286,10 +315,13 @@ class QuestTrip:
     def leave_road(self, now, position, reason):
         if reason == "no_progress":
             self.router.block_ahead(position, self.path[0])
+        if self.verified_retreat:
+            return TravelCommand(outcome="retreat_" + reason)
         if self.log_event:
             self.log_event("quest_main_road_released", {"position": position, "reason": reason})
         self.road_origin = self.road_sequence = None
         self.road_disabled = True
+        self.road_unmatched = True
         self.enter("choose", now)
         return TravelCommand()
 
@@ -564,7 +596,8 @@ class QuestTrip:
         if self.road_origin is not None:
             if sequence != self.road_sequence:
                 self.road_sequence = sequence
-                if self.router.distance(position, self.path[0]) <= 3:
+                waypoint_radius = .9 if self.verified_retreat and len(self.path) > 1 else 3
+                while self.router.distance(position, self.path[0]) <= waypoint_radius:
                     if self.log_event and self.router.distance(self.road_origin, position) > 3:
                         self.log_event("quest_main_road_waypoint_reached", {"position": position,
                             "waypoint": self.path[0], "sequence": sequence, "remaining": len(self.path) - 1})
@@ -572,9 +605,14 @@ class QuestTrip:
                         self.road_origin = self.path.pop(0)
                     elif self.path[0] != self.destination:
                         return self.leave_road(now, position, "mapped_section_complete")
+                    else:
+                        break
+                    if not self.verified_retreat:
+                        break
                 here = self.router.metric(position)
                 projected, _ = projection(here, self.router.metric(self.road_origin), self.router.metric(self.path[0]))
-                if math.dist(projected, here) > 9 or (self.router.blocked
+                corridor = 1.8 if self.verified_retreat else 9
+                if math.dist(projected, here) > corridor or (self.router.blocked
                         and not self.router.clear_segment(position, self.path[0])):
                     return self.leave_road(now, position, "deviation_or_blocked_segment")
         else:
@@ -583,9 +621,28 @@ class QuestTrip:
                     break
                 self.path.pop(0)
         target = self.path[0]
+        if not self.path_advances(position, (target,)):
+            return TravelCommand(outcome="route_away_from_objective")
+        check_ground = replan_ground and self.mode in {"walk", "mount"} and self.road_origin is None
+        if check_ground:
+            goal = self.ground_checkpoints[0] if self.ground_checkpoints else self.destination
+            goal_distance = self.router.distance(position, goal)
+            if goal != self.contact_goal:
+                self.contact_goal = goal
+                self.contact_distance = self.contact_best_distance = None
+                self.contact_replans = 0
+            if self.contact_best_distance is not None:
+                self.contact_best_distance = min(self.contact_best_distance, goal_distance)
+                if goal_distance - self.contact_best_distance > GROUND_REPLAN_DRIFT_YARDS:
+                    if self.log_event:
+                        self.log_event("quest_ground_route_drift", {"position": position, "goal": goal,
+                            "remaining_yards": round(goal_distance, 1),
+                            "best_remaining_yards": round(self.contact_best_distance, 1), "sequence": sequence})
+                    return TravelCommand(outcome="route_blocked")
         turn = self.turn_error(position, target, heading)
         remaining = self.router.distance(position, self.destination)
-        precision = self.mode == "walk" and self.arrival_radius <= 5 and self.path == [self.destination] and remaining <= 8
+        precision = (not self.verified_retreat and self.mode == "walk" and self.arrival_radius <= 5
+                     and self.path == [self.destination] and remaining <= 8)
         identity = ("waypoint", self.destination)
         observation = ApproachObservation(identity, sequence, remaining <= self.arrival_radius,
                                           True, position, (self.router.width, self.router.height))
@@ -625,6 +682,8 @@ class QuestTrip:
                 self.motion_position = None
                 return TravelCommand()
             forward = abs(turn) <= (math.radians(8) if precision else FORWARD_TOLERANCE)
+            if self.forward_goal is not None:
+                forward = forward and abs(self.turn_error(position, self.forward_goal, heading)) < math.pi / 2
             keys = {"w"} if forward else set()
             direction = next(iter(self.turn_keys(turn, math.radians(8 if precision else 12))), None)
             if direction and abs(turn) >= math.radians(170) and self.turn_direction:
@@ -642,6 +701,8 @@ class QuestTrip:
                     return TravelCommand(outcome="heading_turn_unconfirmed")
             elif direction is None:
                 self.turn_feedback = None
+            if turn_tap and self.forward_goal is not None:
+                keys.clear()
         progress = False
         if self.motion_position is not None:
             if self.mode == "fly":
@@ -661,8 +722,11 @@ class QuestTrip:
                 and self.router.distance(position, self.motion_position) <= .75):
             if self.road_origin is not None:
                 return self.leave_road(now, position, "no_progress")
-            if self.detour_origin is None or self.router.distance(position, self.detour_origin) > 12:
-                self.detour_origin, self.contact_replans = position, 0
+            if self.contact_distance is None or self.contact_distance - goal_distance > GROUND_REPLAN_PROGRESS_YARDS:
+                self.contact_distance = goal_distance
+                if self.contact_best_distance is None:
+                    self.contact_best_distance = goal_distance
+                self.contact_replans = 0
             if self.contact_replans < 3:
                 self.contact_replans += 1
                 contact = self.router.block_ahead(position, target)
@@ -682,6 +746,8 @@ class QuestTrip:
                 if not fresh_motion or self.motion_samples < 3:
                     return TravelCommand()
                 return self.leave_road(now, position, "no_progress")
+            if self.forward_goal is not None:
+                return TravelCommand(outcome="route_blocked")
             if self.mode == "fly":
                 if self.climbs >= 3:
                     return TravelCommand(outcome="flight_route_blocked")

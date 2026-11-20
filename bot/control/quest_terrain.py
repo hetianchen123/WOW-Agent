@@ -23,6 +23,7 @@ from .local_bypass import LocalBypass
 from .model_detour import ModelDetour
 from ..perception.player_identity import PlayerIdentityGate
 from ..perception.scene_scale import SCENE_BOUNDS, anchor_profile
+from ..perception.screenshot_retention import mark_captures_complete
 
 DETOUR_PROBE_YARDS = 7
 RETREAT_YARDS = 4
@@ -103,7 +104,10 @@ class SceneRequest:
                 report["error"] = str(exc)
                 raise
             finally:
-                save()
+                try:
+                    save()
+                finally:
+                    mark_captures_complete(self.evidence_dir)
 
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quest-scene")
         self.future = pool.submit(infer)

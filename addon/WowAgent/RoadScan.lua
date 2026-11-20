@@ -5,7 +5,7 @@ local Scan = {}
 WowAgent.RoadScan = Scan
 local status = CreateFrame("Frame", nil, UIParent)
 status:SetSize(142, 160)
-status:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 432, 0)
+status:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 432, 256)
 status:SetFrameStrata("TOOLTIP")
 status:Hide()
 local button = CreateFrame("Button", "WowAgentRoadScanButton", status, "UIPanelButtonTemplate")

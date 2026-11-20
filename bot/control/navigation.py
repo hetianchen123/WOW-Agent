@@ -36,6 +36,20 @@ def heading_error(current: float, target: float) -> float:
     return wrap_pi(target - current)
 
 
+def advances_toward(start, end, goal):
+    """Distance to the goal may not increase anywhere along the segment."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    return dx * (goal[0] - end[0]) + dy * (goal[1] - end[1]) >= -1e-6
+
+
+def route_advances_toward(start, points, goal):
+    for point in points:
+        if not advances_toward(start, point, goal):
+            return False
+        start = point
+    return True
+
+
 def dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return math.hypot(b[0] - a[0], b[1] - a[1])
 

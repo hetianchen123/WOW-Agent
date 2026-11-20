@@ -354,6 +354,19 @@ UnitDistanceSquared = nil
 C_Item = {IsItemInRange = function(id, unit) return id == 1970 and unit == "target" end}
 frames[3].scripts.OnUpdate(nil, .2)
 assert(values[1] % 512 == 39 + 256 + 128)
+local playerMapPosition = C_Map.GetPlayerMapPosition
+local interactionX = .5
+C_Map.GetPlayerMapPosition = function()
+    return {GetXY = function() return interactionX, .5 end}
+end
+ERR_OUT_OF_RANGE = "out of range"
+frames[3].scripts.OnEvent(nil, "UI_ERROR_MESSAGE", 77, ERR_OUT_OF_RANGE)
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[1] % 512 == 39 + 256) -- Native positive does not override a real rejection.
+interactionX = .505
+frames[3].scripts.OnUpdate(nil, .2)
+assert(values[1] % 512 == 39 + 256 + 128) -- Fresh stance can be checked normally.
+C_Map.GetPlayerMapPosition = playerMapPosition
 WowAgent.StopQuestNavigation()
 assert(not next(overrides))
 assert(cvars.SoftTargetInteractRange == "10" and cvars.SoftTargetInteractRangeIsHard == "0")
@@ -670,13 +683,15 @@ WowAgent.RunPreparedQuestAction()
 assert(questState[70002] == 2)
 AdvanceRound(2, 70003)
 questState[70003] = 3
-AdvanceRound(2, 70002)
-questState[70002] = 3
 AdvanceRound(3, 70003)
+questState[70002] = 3
 currentID = 70003
 event("QUEST_COMPLETE")
 WowAgent.RunPreparedQuestAction()
 assert(questState[70003] == 4 and questState[70002] == 3)
+AdvanceRound(1, 70004) -- Collect the newly offered follow-up before the remaining hand-in.
+WowAgent.RunPreparedQuestAction()
+assert(questState[70004] == 2 and questState[70002] == 3)
 C_GossipInfo.GetActiveQuests = function() return {{questID = 70002, isComplete = true}} end
 C_GossipInfo.SelectActiveQuest = function(id)
     assert(id == 70002)
@@ -685,14 +700,14 @@ C_GossipInfo.SelectActiveQuest = function(id)
 end
 event("GOSSIP_SHOW")
 AdvanceRound(3, 70002)
-assert(questState[70004] == nil)
+assert(questState[70004] == 2) -- Acceptance did not start its objectives.
 WowAgent.RunPreparedQuestAction() -- Keeps the list open and selects the exact remaining hand-in.
 assert(currentID == 70002 and questState[70002] == 3)
 WowAgent.RunPreparedQuestAction()
 C_GossipInfo.GetActiveQuests = function() return {} end
-available = {{questID = 70004}}
+available = {}
 event("GOSSIP_SHOW")
-AdvanceRound(1, 70004)
+AdvanceRound(2, 70004)
 WowAgent.StopQuestNavigation()
 
 -- A suspended pickup stays out of all selectors across preparation and
@@ -724,10 +739,14 @@ WowAgent.StopQuestNavigation()
 do
     local map, position, size = C_Map.GetBestMapForUnit, C_Map.GetPlayerMapPosition, C_Map.GetMapWorldSize
     local saved, active = WowAgentDB.questRounds, C_GossipInfo.GetActiveQuests
+    local savedAcceptance = WowAgentDB.questAcceptanceOrder
     local old93, old95, old96 = questState[90893], questState[90895], questState[90896]
     C_Map.GetBestMapForUnit = function() return 2451 end
     C_Map.GetPlayerMapPosition = function() return {GetXY = function() return .2461, .3685 end} end
     C_Map.GetMapWorldSize = function() return 3477.1, 2318.8 end
+    WowAgentDB.questAcceptanceOrder = {}
+    frames[3].scripts.OnEvent(nil, "QUEST_ACCEPTED", 1, 90893)
+    frames[3].scripts.OnEvent(nil, "QUEST_ACCEPTED", 90895)
     local function PrepareSaved(firstCompleted)
         questState[90893], questState[90895], questState[90896] = firstCompleted and 4 or 3, 3, nil
         WowAgentDB.questRounds = {[UnitGUID("player")] = {
@@ -747,7 +766,8 @@ do
         return round
     end
     PrepareSaved(false)
-    AdvanceRound(3, 90893)
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(values[3] % 8 == 3 and values[4] == 90893)
     currentID = 90893
     event("QUEST_COMPLETE")
     WowAgent.RunPreparedQuestAction()
@@ -762,18 +782,18 @@ do
     WowAgent.StopQuestNavigation()
 
     local restarted = PrepareSaved(true)
-    assert(#restarted.jobs == 1 and restarted.jobs[1] == 90895) -- Never repeat the delivered quest.
-    AdvanceRound(3, 90895)
+    assert(restarted.current == 90895) -- Never repeat the delivered quest.
     WowAgent.SuspendPreparedQuest()
     frames[3].scripts.OnUpdate(nil, .2)
     now = now + 6.1
     frames[3].scripts.OnUpdate(nil, .2)
     WowAgent.RunPreparedQuestAction()
     frames[3].scripts.OnUpdate(nil, .2)
-    assert(values[3] % 8 == 4 and math.floor(rowValues[-288] / 4) % 128 == 1)
-    assert(restarted.suspended[90895] == 3) -- No automatic infinite retry within this run.
+    assert(values[3] % 8 == 3 and values[4] == 90895)
+    assert(not restarted.suspended[90895] and math.floor(rowValues[-288] / 4) % 128 == 0)
     WowAgent.StopQuestNavigation()
     WowAgentDB.questRounds, C_GossipInfo.GetActiveQuests = saved, active
+    WowAgentDB.questAcceptanceOrder = savedAcceptance
     C_Map.GetBestMapForUnit, C_Map.GetPlayerMapPosition, C_Map.GetMapWorldSize = map, position, size
     questState[90893], questState[90895], questState[90896] = old93, old95, old96
 end
@@ -1370,6 +1390,7 @@ C_Spell.GetSpellName = function(id) return id == 125050 and "拾回" or spellNam
 function UnitExists(unit) return unit == "pet" end
 function UnitIsDead(unit) return unit == "target" end
 local hasLoot, canLoot = true, true
+function UnitIsTapDenied(unit) return unit == "target" end
 function CanLootUnit(guid)
     assert(guid == selected)
     return hasLoot, canLoot
@@ -1386,7 +1407,8 @@ assert(rowValues[-80] % 256 == 1 and math.floor(rowValues[-80] / 256) % 2 == 1)
 assert(math.floor(values[3] / 8192) % 8 == 7)
 canLoot = false
 frames[3].scripts.OnUpdate(nil, .2)
-assert(math.floor(values[3] / 8192) % 8 == 4)
+assert(math.floor(values[3] / 8192) % 8 == 6)
+UnitIsTapDenied = nil
 hasLoot = false
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[3] / 8192) % 8 == 5)
@@ -1657,7 +1679,7 @@ do
     now = now + 6.1
     frames[3].scripts.OnUpdate(nil, .2)
     WowAgent.RunPreparedQuestAction()
-    assert(round.current == chainID and round.stage == 3) -- Deliver the prerequisite before the side objective.
+    assert(round.current == chainID and round.stage == 3)
 
     questState[chainID] = 4
     frames[3].scripts.OnUpdate(nil, .2)
@@ -1686,4 +1708,21 @@ do
     C_Map.GetPlayerMapPosition = function() return vector(.449, .632) end
     WowAgent.RunPreparedQuestAction()
     assert(emotes == 1)
+
+    -- Recover a ready quest omitted from the saved round while a later
+    -- accepted objective is running, even when its turn-in is outside the hub.
+    questState[chainID], questState[nearID] = 3, 3
+    frames[3].scripts.OnEvent(nil, "QUEST_ACCEPTED", chainID)
+    frames[3].scripts.OnEvent(nil, "QUEST_ACCEPTED", nearID)
+    C_QuestLog.GetNumQuestLogEntries = function() return 2 end
+    C_QuestLog.GetInfo = function(index) return {questID = ({nearID, chainID})[index]} end
+    C_QuestLog.GetNextWaypointForMap = function(id)
+        if id == nearID or id == chainID then return .40, .65 end
+    end
+    round.stage, round.current, round.jobs = 2, followupID, {followupID}
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(math.floor(values[3] / 8) % 2 == 1)
+    WowAgent.RunPreparedQuestAction()
+    assert(round.stage == 3 and round.current == chainID and questState[followupID] == 2)
+    assert(WowAgent.GetQuestRoundResumeID() == chainID)
 end

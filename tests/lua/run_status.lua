@@ -1,4 +1,4 @@
-local frames, bound, text, now = {}, {}, nil, 0
+local frames, bound, text, now, taskLine = {}, {}, nil, 0, nil
 local conflict
 function GetTime() return now end
 function CreateFrame(_, name)
@@ -9,8 +9,11 @@ function CreateFrame(_, name)
     function frame:RegisterForClicks() end
     function frame:RegisterEvent() end
     function frame:CreateTexture() return {SetAllPoints = function() end, SetColorTexture = function() end} end
-    function frame:CreateFontString()
-        return {SetPoint = function() end, SetText = function(_, value) text = value end}
+    function frame:CreateFontString(_, _, font)
+        return {SetPoint = function() end, SetWidth = function() end, SetWordWrap = function() end,
+            SetText = function(_, value)
+                if font == "GameFontHighlight" then taskLine = value else text = value end
+            end}
     end
     function frame:SetScript(event, callback) self.scripts[event] = callback end
     function frame:Show() self.shown = true end
@@ -20,6 +23,7 @@ function CreateFrame(_, name)
     return frame
 end
 local payload
+C_QuestLog = {GetTitleForQuestID = function() return "法戈第矿洞" end}
 WowAgent = {
     NewPixelRow = function(_, offset)
         assert(offset == -464)
@@ -58,21 +62,47 @@ conflict = "run_status_3"
 status.Prepare({})
 assert(next(bound) == nil)
 status.Publish(5, true)
-assert(payload == 5 * 8192 + 4096)
+assert(payload == 5 * 8192 + 6144)
 conflict = nil
 status.Prepare({})
-status.Publish(5, true)
-assert(payload == 5 * 8192 + 4097)
+status.Publish(5, true, 62, 2, 1)
+assert(payload == 5 * 8192 + 6145)
+assert(taskLine:find("#62 法戈第矿洞", 1, true) and taskLine:find("0/1", 1, true))
+status.Publish(5, true, 62, 2, 1, 1)
+assert(taskLine:find("前往训练师", 1, true))
 frames.WowAgentRunStatus3.scripts.OnClick()
 assert(text:find("正在找怪", 1, true))
 status.Publish(5, true)
-assert(payload == 5 * 8192 + 4097 + 32 + 4 * 2)
+assert(payload == 5 * 8192 + 6145 + 32 + 4 * 2)
 now = 4.1
 frames.panel.scripts.OnUpdate()
 assert(text:find("未连接", 1, true))
-frames.WowAgentRunStatus7.scripts.OnClick()
-frames.WowAgentRunStatus2.scripts.OnClick()
+assert(not frames.WowAgentRunStatus0 and not frames.WowAgentRunStatus7)
+frames.WowAgentRunStatus6.scripts.OnClick()
+now = 4.3
+frames.WowAgentRunStatus4.scripts.OnClick()
 assert(text:find("脱战后拾取", 1, true))
+frames.WowAgentRunStatus6.scripts.OnClick()
+now = 4.5
+frames.WowAgentRunStatus5.scripts.OnClick()
+assert(text:find("楼层与出口", 1, true))
+frames.WowAgentRunStatus6.scripts.OnClick()
+now = 4.7
+frames.WowAgentRunStatus6.scripts.OnClick()
+now = 4.9
+frames.WowAgentRunStatus4.scripts.OnClick()
+assert(text:find("镜头角度", 1, true))
+frames.WowAgentRunStatus6.scripts.OnClick()
+now = 9
+frames.panel.scripts.OnUpdate()
+assert(text:find("未连接", 1, true))
 status.Close()
 status.Publish(6, true)
-assert(payload == 6 * 8192 + 4096 + 2 * 32)
+assert(payload == 6 * 8192 + 6144 + 4 * 32)
+status.Prepare({})
+frames.WowAgentRunStatus6.scripts.OnClick()
+frames.WowAgentRunStatus6.scripts.OnClick()
+frames.WowAgentRunStatus5.scripts.OnClick()
+assert(text:find("正在撤离", 1, true))
+status.Publish(6, true)
+assert(payload == 6 * 8192 + 6144 + 5 * 32 + 2 + 1)
