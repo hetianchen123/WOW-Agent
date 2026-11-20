@@ -180,7 +180,9 @@ def _live(args):
     from .control.input import create_input
     from .control.input_helper import has_helper_socket, in_controller_app
     from .modules.combat import Fight, run_fight
+    from .modules.loot import loot_prepared
     from .modules.quest import game_is_frontmost, wait_for_game
+    from .perception.travel_channel import decode_travel, travel_region
 
     cfg = load_config()
     cap = ScreenCapture(cfg.capture)
@@ -236,13 +238,32 @@ def _live(args):
     if args.execute and not stop.start_hotkey():
         raise ValueError("急停热键启动失败")
     fight = Fight(args.target)
+    nav_region = travel_region(cfg.channel.x, cfg.channel.y, supply_bars=cfg.game_version == '1.60.1')
+    extended = travel_region(cfg.channel.x, cfg.channel.y, corpse_receipts=True)
+    if args.execute and any(x <= extended[0] and extended[0] + extended[2] <= x + w
+            and y <= extended[1] < cfg.channel.y <= y + h for x, y, w, h in cap.monitor_regions()):
+        nav_region = extended
+
+    def read_with_loot():
+        left, top = min(region[0], nav_region[0]), min(region[1], nav_region[1])
+        right = max(x + w for x, _, w, _ in (region, nav_region))
+        bottom = max(y + h for _, y, _, h in (region, nav_region))
+        snapshot = cap.grab(left, top, right - left, bottom - top)
+        x, y, w, h = region
+        combat = decode_combat(snapshot[y-top:y-top+h, x-left:x-left+w])
+        x, y, w, h = nav_region
+        return combat, decode_travel(snapshot[y-top:y-top+h, x-left:x-left+w])
+
     try:
+        if args.execute and not loot_prepared(read_with_loot()[1]):
+            raise ValueError('先加载支持强制拾取的插件并准备自动任务，再执行战斗。')
         status = run_fight(fight, read, backend, stop.check,
-                           game_is_frontmost if args.execute else lambda: True, args.duration)
+                           game_is_frontmost if args.execute else lambda: True, args.duration,
+                           read_with_loot=read_with_loot if args.execute else None)
     finally:
         stop.stop()
     print(json.dumps({"status": status, "presses": fight.presses, "dry_run": not args.execute}))
-    return 0 if status == "target_defeated" else 2
+    return 0 if status in {"target_defeated", "corpse_cleared", "corpse_empty"} else 2
 
 
 def add_parser(sub):

@@ -49,7 +49,10 @@ WowAgent = {
     NewPixelRow = function(parent, offset)
         parent.pixelOffsets = rawget(parent, "pixelOffsets") or {}
         parent.pixelOffsets[#parent.pixelOffsets + 1] = offset
-        return function(kind, value) values[kind], rowValues[offset] = value, value end
+        return function(kind, value)
+            rowValues[offset] = value
+            if offset > -320 then values[kind] = value end
+        end
     end,
     LayoutSupport = {SetupAction = function(kind, id, key)
         assert(kind == "quest" and id == 90882 and key == 9)
@@ -73,6 +76,7 @@ do
     assert(retail.NPCPoint(override, 244666, "turnIn")[1] == 69.14)
 end
 dofile("addon/WowAgent/APRQuestData.lua")
+dofile("addon/WowAgent/TaskBindings.lua")
 dofile("addon/WowAgent/Recovery.lua")
 dofile("addon/WowAgent/QuestCamera.lua")
 dofile("addon/WowAgent/QuestEncounter.lua")
@@ -149,6 +153,7 @@ WowAgent.LayoutSupport.SetupAction = function(kind, id, key)
     return true
 end
 WowAgent.LayoutSupport.ActionMatches = function(key, _, body) return preparedKeys[key] == body end
+function IsMounted() return true end
 WowAgent.PrepareQuestNavigation(90882, 0, 0)
 assert(not frames[3]:IsShown())
 while #timers > 0 do table.remove(timers, 1)() end
@@ -158,6 +163,8 @@ assert(preparedKeys[6]:find("飞行坐骑", 1, true) and preparedKeys[7]:find("�
 assert(preparedKeys[8] == "/dismount [mounted,noflying]")
 assert(values[6] == math.floor(.45 * 1048575 + .5) and values[9] == 525288)
 assert(math.floor(values[8] / 4096) % 2 == 1)
+assert(math.floor(values[8] / 4) % 2 == 1)
+function IsMounted() return false end
 assert(math.floor(values[8] / 256) % 2 == 1 and math.floor(values[12] / 8192) == string.byte("C"))
 descent = nil
 frames[3].scripts.OnUpdate(nil, .2)
@@ -169,6 +176,27 @@ WowAgent.PrepareQuestNavigation(90882, 0, 0)
 WowAgent.StopQuestNavigation()
 while #timers > 0 do table.remove(timers, 1)() end
 assert(not frames[3]:IsShown() and rideAttempts == 2)
+
+-- A protected action bar defers preparation until the bar can be configured,
+-- even if the character remains on a ground mount.
+do
+    local normal = false
+    local previous = WowAgent.LayoutSupport.NormalBar
+    WowAgent.LayoutSupport.NormalBar = function() return normal end
+    function IsMounted() return true end
+    WowAgent.PrepareQuestNavigation(90882, 0, 0)
+    assert(not frames[3]:IsShown() and #timers == 0)
+    frames[3].scripts.OnEvent(nil, "PLAYER_REGEN_ENABLED")
+    while #timers > 0 do table.remove(timers, 1)() end
+    assert(not frames[3]:IsShown())
+    normal = true
+    frames[3].scripts.OnEvent(nil, "UPDATE_VEHICLE_ACTIONBAR")
+    while #timers > 0 do table.remove(timers, 1)() end
+    assert(frames[3]:IsShown() and math.floor(values[8] / 4) % 2 == 1)
+    WowAgent.LayoutSupport.NormalBar = previous
+    function IsMounted() return false end
+    WowAgent.StopQuestNavigation()
+end
 
 -- Skyriding changes the main action bar. The temporary keys stay available
 -- while ascent and braking are read from the live bar and its cooldowns.
@@ -264,6 +292,9 @@ slotOccupied = 11
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[8] / 4096) % 2 == 0 and values[0] == 0)
 assert(not next(overrides))
+function GetBindingAction(key, includeOverrides)
+    return includeOverrides ~= false and overrides[key] or baseBinding(key) or ""
+end
 
 -- Only the configured living soft target becomes eligible for F.
 active = true
@@ -364,7 +395,7 @@ assert(WowAgent.QuestCamera.target(1) == 39) -- Old saved distance does not cap 
 zoom = 39
 WowAgent.PrepareQuestNavigation(90882, 0, 0, true)
 while #timers > 0 do table.remove(timers, 1)() end
-assert(overrides.F8 == "CLICK WowAgentTaskCamera:LeftButton" and math.floor(rowValues[-80] / 131072) == 1)
+assert(not overrides.F8 and GetBindingAction("F8") == "USER_BINDING")
 WowAgent.StopQuestNavigation()
 assert(GetBindingAction("F8") == "USER_BINDING" and not overrides.F8)
 f8Conflict = false
@@ -1073,7 +1104,7 @@ do
     WowAgent.PrepareQuestNavigation(id, 0, 0, true, true, nil, nil, true)
     while #timers > 0 do table.remove(timers, 1)() end
     assert(round.current == 90911 and values[4] == 90911)
-    assert(messages[#messages]:find("授权并运行已准备任务", 1, true))
+    assert(messages[#messages]:find("启动任务主控", 1, true))
     assert(math.floor(values[1] / 131072) == 6 and values[2] == 3) -- Approach Thrall, never hunt.
     local map, choiceAPI, guid = C_Map.GetBestMapForUnit, C_PlayerChoice, UnitGUID
     local getOptions, selectOption = C_GossipInfo.GetOptions, C_GossipInfo.SelectOption
@@ -1338,10 +1369,10 @@ local spellName = C_Spell.GetSpellName
 C_Spell.GetSpellName = function(id) return id == 125050 and "拾回" or spellName(id) end
 function UnitExists(unit) return unit == "pet" end
 function UnitIsDead(unit) return unit == "target" end
-local canLoot = true
+local hasLoot, canLoot = true, true
 function CanLootUnit(guid)
     assert(guid == selected)
-    return true, canLoot
+    return hasLoot, canLoot
 end
 WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
 while #timers > 0 do table.remove(timers, 1)() end
@@ -1355,12 +1386,24 @@ assert(rowValues[-80] % 256 == 1 and math.floor(rowValues[-80] / 256) % 2 == 1)
 assert(math.floor(values[3] / 8192) % 8 == 7)
 canLoot = false
 frames[3].scripts.OnUpdate(nil, .2)
+assert(math.floor(values[3] / 8192) % 8 == 4)
+hasLoot = false
+frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[3] / 8192) % 8 == 5)
 selected = nil
 frames[3].scripts.OnUpdate(nil, .2)
 assert(math.floor(values[3] / 8192) % 8 == 4)
 WowAgent.StopQuestNavigation()
 assert(not overrides.L)
+
+combat = true
+WowAgent.PrepareQuestNavigation(90885, 0, 0, true, true)
+assert(not overrides.L and #timers == 0)
+combat = false
+frames[3].scripts.OnEvent(nil, "PLAYER_REGEN_ENABLED")
+while #timers > 0 do table.remove(timers, 1)() end
+assert(overrides.L == "CLICK WowAgentTaskFetch:LeftButton")
+WowAgent.StopQuestNavigation()
 
 -- The same navigation strip reports verified spell keys and the native death dialog.
 local playerDead, playerGhost, petDead, aura = false, false, true, nil
@@ -1376,6 +1419,8 @@ C_Spell.GetSpellName = function(id)
 end
 C_UnitAuras = {GetPlayerAuraBySpellID = function() return aura end}
 local recoveryBinding = GetBindingAction
+MultiBarBottomRightButton11 = {action = 47}
+C_ActionBar.HasAction = function(slot) return slot ~= 47 end
 function GetBindingAction(key)
     if key == "F6" then return overrides.F6 or "MULTIACTIONBAR2BUTTON11" end
     return recoveryBinding(key)
@@ -1439,10 +1484,10 @@ function StaticPopup_FindVisible(which)
 end
 function GetMouseFoci() return {button} end
 frames[3].scripts.OnUpdate(nil, .2)
-assert(rowValues[-64] % 8192 == 3 + 4 + 256 + 512 + 1024 and rowValues[-32] == 0)
+assert(rowValues[-64] % 8192 == 3 + 4 + 512 + 1024 and rowValues[-32] == 0)
 enabled = true
 frames[3].scripts.OnUpdate(nil, .2)
-assert(rowValues[-64] % 8192 == 3 + 4 + 256 + 512 + 1024 + 2048 + 4096 and rowValues[-32] > 0)
+assert(rowValues[-64] % 8192 == 3 + 4 + 512 + 1024 + 2048 + 4096 and rowValues[-32] > 0)
 for hidden = 0, 15 do
     WowAgent.VisualUI = {HiddenMask = function() return hidden end}
     frames[3].scripts.OnUpdate(nil, .2)
@@ -1454,6 +1499,7 @@ frames[3].scripts.OnUpdate(nil, .2)
 WowAgent.StopQuestNavigation()
 assert(not overrides.F9 and not overrides.F10 and not overrides.F11 and not overrides.F12)
 assert(not overrides.F6 and GetBindingAction("F6", true) == "MULTIACTIONBAR2BUTTON11")
+MultiBarBottomRightButton11 = nil
 
 -- A valid parent-map pin can replace a missing local pin. Off-map projections cannot.
 StaticPopup_FindVisible = nil
@@ -1538,9 +1584,106 @@ for _, offset in ipairs(frames[3].pixelOffsets) do
     top, bottom = math.min(top, offset), math.max(bottom, offset + 16)
 end
 assert(bottom == frames[3].height) -- The core ends exactly at the main strip.
-assert(bottom - top == 38 * 16) -- Python's 12 core + 26 extension capture rows.
+assert(bottom - top == 46 * 16) -- The binding receipt is shared with the Forever layout.
+local buildSequence = math.floor(rowValues[-272] / 4096) % 128
+assert(rowValues[-320] == 0 and rowValues[-336] == buildSequence * 8192)
+assert(math.floor(rowValues[-432] / 8192) == buildSequence)
 
 local visualRestores = 0
 WowAgent.VisualUI = {Restore = function(quiet) assert(quiet); visualRestores = visualRestores + 1 end}
 WowAgent.StopQuestNavigation()
 assert(visualRestores == 1)
+
+-- Forever pickup sees public offers even before title data loads and when the
+-- client reports a different floor on the same map. Native dialogue still
+-- verifies each offer. Sort only the jobs already collected by the round.
+do
+    local nearID, chainID, followupID = 96620, 96627, 95998
+    WowAgent.Forever = {
+        questData = {map = 1429,
+            quests = {[chainID] = {turnIn = 263399},
+                [followupID] = {level = 4, after = {[chainID] = true}, campPoint = {44.9, 63.2}}},
+            NPCPoint = function(_, id) if id == 263399 then return {44.9, 63.4} end end},
+        BindProgression = function() end, Progression = function() end, MeleeSpell = function() end,
+        OutputSpell = function() return 75 end,
+    }
+    frames = {}
+    dofile("addon/WowAgent/Quest.lua")
+    C_Map.GetBestMapForUnit = function() return 1429 end
+    C_Map.GetPlayerMapPosition = function() return vector(.49, .42) end
+    C_Map.GetMapWorldSize = function() return 3470.8, 2314.6 end
+    for index, name in ipairs({"WorldQuest", "Recurring", "Calling", "Campaign", "Legendary", "Meta",
+                               "BonusObjective", "Threat", "Important"}) do
+        Enum.QuestClassification[name] = index
+    end
+    C_QuestInfoSystem.GetQuestClassification = function() return nil end
+    C_QuestLog.GetTitleForQuestID = function() return nil end
+    local function offer(id, x, hidden, isStart)
+        return {questID = id, x = x, y = .42, startMapID = 1429, floorLocation = 1,
+                isQuestStart = isStart, isHidden = hidden}
+    end
+    C_QuestLine.GetAvailableQuestLines = function()
+        return {offer(96699, .49, true, true), offer(96698, .49, false, false),
+                offer(nearID, .491, false, true), offer(chainID, .50, false, true)}
+    end
+    assert(WowAgent.GetNearbyQuestID() == nearID)
+    questState[nearID] = 2
+    assert(WowAgent.GetNearbyQuestID() == chainID)
+    questState[chainID] = 2
+    WowAgentDB.questRounds[UnitGUID("player")] = {
+        stage = 2, current = nearID, jobs = {nearID, chainID},
+        anchor = {map = 1429, x = .49, y = .42, width = 3470.8, height = 2314.6},
+    }
+    assert(WowAgent.GetQuestRoundResumeID() == chainID)
+
+    local round = WowAgentDB.questRounds[UnitGUID("player")]
+    WowAgent.LayoutSupport.LearnedSpells = function() return {[75] = "Auto Shot"} end
+    WowAgent.VisualUI.HiddenMask = function() return 0 end
+    round.stage, round.current, round.immediate = 1, chainID, true -- Inherited old decision.
+    round.offers, round.options, round.suspended = {}, {}, {}
+    questState[chainID], questState[nearID] = 3, nil
+    WowAgent.PrepareQuestNavigation(chainID, 0, 0, true, true, nil, nil, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(not round.immediate and round.stage == 1) -- Sam is at the next hub.
+    now = now + 2.1
+    frames[3].scripts.OnUpdate(nil, .2)
+    WowAgent.RunPreparedQuestAction()
+    assert(round.current == nearID and round.stage == 1)
+
+    questState[nearID] = 2
+    C_QuestLine.GetAvailableQuestLines = function() return {} end
+    frames[3].scripts.OnUpdate(nil, .2)
+    now = now + 6.1
+    frames[3].scripts.OnUpdate(nil, .2)
+    WowAgent.RunPreparedQuestAction()
+    assert(round.current == chainID and round.stage == 3) -- Deliver the prerequisite before the side objective.
+
+    questState[chainID] = 4
+    frames[3].scripts.OnUpdate(nil, .2)
+    now = now + 6.1
+    frames[3].scripts.OnUpdate(nil, .2)
+    WowAgent.RunPreparedQuestAction()
+    assert(round.current == nearID and round.stage == 2)
+
+    questState[nearID], questState[followupID] = nil, 2
+    round.current, round.jobs = followupID, {followupID}
+    C_QuestLog.GetQuestObjectives = function()
+        return {{type = "object", finished = false, numFulfilled = 0, numRequired = 1},
+                {type = "object", finished = false, numFulfilled = 0, numRequired = 1}}
+    end
+    WowAgent.PrepareQuestNavigation(followupID, 0, 0, true, true, nil, nil, true)
+    while #timers > 0 do table.remove(timers, 1)() end
+    frames[3].scripts.OnUpdate(nil, .2)
+    assert(math.floor(values[1] / 131072) == 3) -- Multi-objective camp still uses its dedicated action.
+    local emotes = 0
+    function DoEmote(token) assert(token == "SIT"); emotes = emotes + 1 end
+    function GetUnitSpeed() return 0 end
+    function IsFalling() return false end
+    function IsSwimming() return false end
+    WowAgent.RunPreparedQuestAction()
+    assert(emotes == 0)
+    C_Map.GetPlayerMapPosition = function() return vector(.449, .632) end
+    WowAgent.RunPreparedQuestAction()
+    assert(emotes == 1)
+end

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bot.perception.segmentation import fuse_masks, expanded_box, refinement_check, ground_seeds
+from bot.perception.segmentation import LocalSegmenter, fuse_masks, expanded_box, refinement_check, ground_seeds
 from bot.decision.image_navigation import ImageNavigator, ImageRouteError
 
 
@@ -13,6 +13,40 @@ def semantics():
 def instance(label='wooden fence', score=.9):
     mask = np.zeros((180, 240), bool); mask[50:130, 105:115] = True
     return {'label': label, 'mask_score': score, 'mask': mask, 'box': [90, 40, 130, 140]}
+
+
+@pytest.mark.parametrize("requested", ["auto", "mps"])
+def test_only_automatic_sam_mode_retries_gpu_failure_on_cpu(monkeypatch, requested):
+    model = LocalSegmenter.__new__(LocalSegmenter)
+    model.requested_sam_device = requested
+    model.sam_device = "mps"
+    model.sam_fallback = None
+    model.sam = object()
+    image = np.zeros((2, 2, 3), np.uint8)
+    calls = []
+
+    def inspect(frame, **options):
+        assert frame is image and options["optimize"]
+        calls.append(model.sam_device)
+        if model.sam_device == "mps":
+            raise RuntimeError("GPU device reset")
+        return frame
+
+    def build():
+        calls.append("build-" + model.sam_device)
+        return object()
+
+    monkeypatch.setattr(model, "_inspect", inspect)
+    monkeypatch.setattr(model, "_build_sam", build)
+    if requested == "auto":
+        assert model.inspect(image, optimize=True) is image
+        assert model.inspect(image, optimize=True) is image
+        assert calls == ["mps", "build-cpu", "cpu", "cpu"]
+        assert model.sam_fallback == "GPU device reset"
+    else:
+        with pytest.raises(RuntimeError, match="GPU device reset"):
+            model.inspect(image, optimize=True)
+        assert calls == ["mps"]
 
 
 def test_incomplete_instance_mask_does_not_reclassify_its_box_holes_as_grass():

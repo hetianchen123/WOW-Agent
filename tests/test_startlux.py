@@ -123,6 +123,21 @@ def test_planner_discards_changed_phase_and_expired_response(monkeypatch):
         planner.close()
 
 
+def test_planner_discards_running_decision_after_pause_even_if_context_matches():
+    planner = QuestPlanner(LocalStartLux())
+    signature = (62, "ACTIVE")
+    future = Future()
+    future.set_running_or_notify_cancel()
+    planner.future, planner.signature = future, signature
+    try:
+        planner.discard_pending()
+        future.set_result({"recommendation": "retry"})
+        assert planner.poll(signature, {}, {}) is None
+        assert planner.future is None
+    finally:
+        planner.close()
+
+
 def test_planner_retries_timeout_with_fresh_state_and_accepts_slow_response(monkeypatch):
     from bot.decision import startlux
 

@@ -174,6 +174,8 @@ class StatusFlags(enum.IntFlag):
     MOVING = 1 << 10
     HEARTBEAT = 1 << 11  # toggles every STATUS send — addon liveness
     HP_UNKNOWN = 1 << 12  # hp bucket is unavailable when this bit is set
+    QUEST_PREPARE_KEY = 1 << 13  # verified controller preparation shortcut
+    QUEST_PREPARE_FOREVER = 1 << 14  # edition of that shortcut's addon
 
 
 def pack_status(flags: int, hp_pct: float) -> int:

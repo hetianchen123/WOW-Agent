@@ -2,11 +2,9 @@
 -- the helper's emergency release, cancels remaining camera work.
 local camera = {key = "F8", probeKey = "F6", orbitKey = "F4", epoch = 0, request = 0, result = 0, scene = 1, applied = 0}
 WowAgent.QuestCamera = camera
+local bindings = WowAgent.TaskBindings
 local button, driver, pending, stopNudge
 local buttonName = "WowAgentTaskCamera"
-local action = ("CLICK %s:LeftButton"):format(buttonName)
-local probeAction = ("CLICK %s:RightButton"):format(buttonName)
-local orbitAction = ("CLICK %s:MiddleButton"):format(buttonName)
 local orbitUntil
 local secret = issecretvalue or function() return false end
 local report = WowAgent.Report or print
@@ -97,7 +95,10 @@ local function GroundSafe()
         and not Read(UnitIsDeadOrGhost, "player") and not Casting()
 end
 function camera.orbitReady()
-    return Read(GetBindingAction, camera.orbitKey, true) == orbitAction and not paused
+    return bindings.ClickReady("camera_orbit") and not paused
+end
+function camera.turnKeysReady()
+    return bindings.Read("LEFT", true) == "TURNLEFT" and bindings.Read("RIGHT", true) == "TURNRIGHT"
 end
 function camera.orbitActive()
     return orbitUntil and GetTime() < orbitUntil and GroundSafe() and not Read(IsMounted)
@@ -297,43 +298,32 @@ function WowAgent.NudgeQuestCamera(down)
     return true
 end
 function camera.ready()
-    local binding = Read(GetBindingAction, camera.key, true)
-    return type(binding) == "string" and binding:lower() == action:lower()
+    return bindings.ClickReady("camera_restore")
 end
 function camera.prepare(owner)
     if not SetOverrideBindingClick or not C_Timer then return end
     EnsureButton()
-    pcall(SetOverrideBindingClick, owner, false, camera.key, buttonName, "LeftButton")
-    local binding = Read(GetBindingAction, camera.probeKey, true)
-    -- The task profile may temporarily borrow an action-bar key; clearing the
-    -- owner's overrides restores it. Never borrow movement/flight/control keys.
-    local barKey = type(binding) == "string" and (binding:match("^ACTIONBUTTON%d+$")
-        or binding:match("^MULTIACTIONBAR%d+BUTTON%d+$"))
-    if binding == "" or barKey or type(binding) == "string" and binding:lower() == probeAction:lower() then
-        pcall(SetOverrideBindingClick, owner, false, camera.probeKey, buttonName, "RightButton")
-    end
-    local orbitBinding = Read(GetBindingAction, camera.orbitKey, true)
-    local orbitBar = type(orbitBinding) == "string" and (orbitBinding:match("^ACTIONBUTTON%d+$")
-        or orbitBinding:match("^MULTIACTIONBAR%d+BUTTON%d+$"))
-    if orbitBinding == "" or orbitBar or orbitBinding == orbitAction then
-        pcall(SetOverrideBindingClick, owner, false, camera.orbitKey, buttonName, "MiddleButton")
-    end
+    bindings.BindClick(owner, "camera_restore", true, true)
+    bindings.BindClick(owner, "camera_probe", true, true)
+    bindings.BindClick(owner, "camera_orbit", true)
 end
 function camera.probeReady()
-    local binding = Read(GetBindingAction, camera.probeKey, true)
-    return type(binding) == "string" and binding:lower() == probeAction:lower() and not paused
+    return bindings.ClickReady("camera_probe") and not paused
 end
 function camera.overheadReady()
     -- Automatic calibration may inspect native view 4 without manual point or
     -- angle confirmation. Image geometry must pass before any route is moved.
-    return camera.probeReady() and SetView ~= nil and (camera.overheadZoom() ~= nil or camera.orbitReady())
+    return camera.probeReady() and SetView ~= nil
+        and (camera.overheadZoom() ~= nil or camera.orbitReady() or camera.turnKeysReady())
 end
 function camera.probeStatus()
-    local binding = Read(GetBindingAction, camera.probeKey, true)
-    return camera.overheadReady() and (camera.probeKey .. " 俯视观察可用；" .. camera.orbitKey
-        .. (camera.orbitReady() and " 自动标定镜头键已核对" or " 自动标定镜头键不可用"))
-        or camera.probeReady() and (camera.probeKey .. " 近场镜头已核对，俯视预设未保存")
-        or (camera.probeKey .. " 近场镜头不可用，当前绑定：" .. (type(binding) == "string" and binding or "未知"))
+    local key = bindings.ClickKey("camera_probe") or camera.probeKey
+    local binding = Read(GetBindingAction, key, true)
+    return camera.overheadReady() and (key .. " 俯视观察可用；"
+        .. (camera.orbitReady() and camera.orbitKey .. " 自动标定镜头键已核对"
+            or camera.turnKeysReady() and "左右转向键已核对" or "自动标定键位不可用"))
+        or camera.probeReady() and (key .. " 近场镜头已核对，俯视预设未保存")
+        or (key .. " 近场镜头不可用，当前绑定：" .. (type(binding) == "string" and binding or "未知"))
 end
 function camera.telemetry(sequence)
     local zoom = camera.zoom()

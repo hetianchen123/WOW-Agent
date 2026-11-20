@@ -46,14 +46,15 @@ log = logging.getLogger("cli")
 
 
 # --------------------------------------------------------------- helpers ----
-def _build_runtime(cfg: BotConfig, dry_run: bool, want_audio: bool = True):
+def _build_runtime(cfg: BotConfig, dry_run: bool, want_audio: bool = True, capture=None, *, keep_online=False):
     from .control.estop import EStop
     from .control.input import create_input
     from .modules.context import ModuleContext
 
-    capture = ScreenCapture(cfg.capture)
+    if capture is None:
+        capture = ScreenCapture(cfg.capture)
     channel = ChannelReader(cfg.channel)
-    input_backend = create_input(cfg.input, force_mock=dry_run)
+    input_backend = create_input(cfg.input, force_mock=dry_run, keep_online=keep_online)
     audio = AudioMonitor(cfg.audio)
     if want_audio and not dry_run:
         audio.start()
@@ -413,24 +414,56 @@ def cmd_record_route(args: argparse.Namespace) -> int:
 
 
 # -------------------------------------------------------------------- run ----
-def _prepared_channel_location(capture, previous, timeout):
+def _prepared_channel_location(capture, previous, timeout, *, prefer_stream=True, cancelled=None):
     from .modules.quest import game_is_frontmost, wait_for_game
     from .perception.calibration import ChannelNotFound, startup_location
 
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout is not None else float("inf")
     reported_retry = False
+    pinned = False
     while True:
+        if cancelled is not None and cancelled():
+            return None
         if not game_is_frontmost():
+            if timeout is None:
+                pinned = False
+                time.sleep(.1)
+                continue
             wait_for_game(activate=False, timeout=max(0, deadline - time.monotonic()))
+        if not pinned and sys.platform == "darwin" and isinstance(capture, ScreenCapture):
+            try:
+                capture.bind_game_window(stream=prefer_stream)
+            except ValueError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.1)
+                continue
+            pinned = True
         remaining = deadline - time.monotonic()
         try:
             location = startup_location(capture, previous, scan_duration=min(5, max(0, remaining)))
+        except CaptureError:
+            if not isinstance(capture, ScreenCapture) or time.monotonic() >= deadline:
+                raise
+            pinned = False
+            time.sleep(.1)
+            continue
         except ChannelNotFound:
             if time.monotonic() >= deadline:
                 raise
+            if isinstance(capture, ScreenCapture) and capture.stop_window_stream():
+                log.info("窗口流未能核对主色条，改用同一游戏窗口的 Quartz 截图。")
             if not reported_retry:
                 log.info("主色条暂未通过核对，将继续扫描。请保持魔兽窗口可见。")
                 reported_retry = True
+            continue
+        except ValueError as exc:
+            if timeout is not None:
+                raise
+            if not reported_retry:
+                log.info("等待可确认的主色条。%s", exc)
+                reported_retry = True
+            time.sleep(.25)
             continue
         if game_is_frontmost():
             return location
@@ -441,6 +474,17 @@ def _prepared_channel_location(capture, previous, timeout):
 
 def cmd_run(args: argparse.Namespace) -> int:
     from .control.input_helper import has_helper_socket, in_controller_app
+
+    if args.module == "quest_navigate" and getattr(args, "require_prepared", False) and has_helper_socket():
+        from .nav3d.ground_trial import cmd_ground_trial, take_prepared_trial
+
+        try:
+            trial = take_prepared_trial()
+        except (ValueError, OSError, TypeError) as exc:
+            print(f"短程试跑请求读取失败：{exc}", file=sys.stderr)
+            return 2
+        if trial is not None:
+            return cmd_ground_trial(trial)
 
     cfg = load_config()
     if args.dry_run:
@@ -470,29 +514,25 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print("实机任务需要运行环境的 macOS 辅助功能权限。", file=sys.stderr)
                 return 2
     setup_logging(cfg.log_level, DATA_DIR / "logs" / "bot.log")
+    capture = None
+    locate_channel = False
     try:
         if in_controller_app() and not (cfg.dry_run or args.mock_input or cfg.input.backend == "mock"):
             if not has_helper_socket():
                 raise ValueError("请先打开 WowAgent Keyboard Mouse.app")
-            from .modules.quest import PREPARED_FOCUS_WAIT_S, wait_for_game
-
-            if getattr(args, "require_prepared", False):
-                from .perception.calibration import Location
-
-                previous = Location(cfg.capture.monitor, cfg.channel.x, cfg.channel.y)
-                log.info("核对当前游戏窗口的色条位置，最多等待 %s 秒。", PREPARED_FOCUS_WAIT_S)
+            locate_channel = args.module == "quest_navigate" and args.require_prepared
+            if locate_channel:
                 capture = ScreenCapture(cfg.capture)
-                location = _prepared_channel_location(capture, previous, PREPARED_FOCUS_WAIT_S)
-                cfg.capture.monitor = location.monitor
-                cfg.channel.x, cfg.channel.y = location.x, location.y
-                cfg.channel.calibrated = True
-                if location != previous:
-                    log.info("色条位置已自动校正：显示器 %s，坐标 (%s, %s)。",
-                             location.monitor, location.x, location.y)
             else:
+                from .modules.quest import wait_for_game
+
                 wait_for_game()
-        ctx, estop = _build_runtime(cfg, dry_run=cfg.dry_run or args.mock_input, want_audio=not quest_mode)
+        ctx, estop = _build_runtime(cfg, dry_run=cfg.dry_run or args.mock_input,
+                                   want_audio=not quest_mode, capture=capture,
+                                   keep_online=locate_channel and not args.travel_only)
     except (CaptureError, ValueError, OSError) as exc:
+        if isinstance(capture, ScreenCapture):
+            capture.close()
         log.error("无法启动：%s", exc)
         return 2
     caf = _maybe_caffeinate(cfg)
@@ -500,8 +540,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not in_controller_app() or ctx.input.name == "helper":
         estop.start_hotkey()
     wd = Watchdog(cfg.game_process_names, on_lost=lambda reason: estop.fire(reason))
-    if not cfg.dry_run:
-        wd.start()
 
     from .modules.fisher import FisherModule
     from .modules.gatherer import GathererModule
@@ -510,6 +548,26 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     session_id = ctx.db.start_session(args.module, {"dry_run": cfg.dry_run})
     try:
+        if locate_channel:
+            from .perception.calibration import Location
+
+            previous = Location(cfg.capture.monitor, cfg.channel.x, cfg.channel.y)
+            log.info("任务主控已启动。等待魔兽前台及实时主色条。")
+            try:
+                location = _prepared_channel_location(capture, previous, None, cancelled=estop.check)
+            except KeyboardInterrupt:
+                location = None
+            if location is None:
+                ctx.db.end_session(session_id, "stopped:estop", {})
+                return 3
+            cfg.capture.monitor = location.monitor
+            cfg.channel.x, cfg.channel.y = location.x, location.y
+            cfg.channel.calibrated = True
+            if location != previous:
+                log.info("色条位置已自动校正（显示器 %s，坐标 %s、%s）。",
+                         location.monitor, location.x, location.y)
+        if not cfg.dry_run and not getattr(ctx.input, "supports_focus_pause", False):
+            wd.start()
         if args.module == "loop":
             if args.route:
                 ctx.route_name = args.route
@@ -528,7 +586,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 runner = QuestModule(ctx, *quest_module_args, planner=planner)
             max_duration = args.max_duration
             if max_duration is None:
-                max_duration = 3600.0 if args.require_prepared and not args.travel_only else 600.0
+                max_duration = 600.0
+                if args.require_prepared and not args.travel_only:
+                    max_duration = float("inf")
             outcome = runner.run(max_duration)
         else:
             mod = {"fisher": FisherModule, "gatherer": GathererModule, "seller": SellerModule}[args.module]
@@ -563,13 +623,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "stopped:quest_mount_not_confirmed": "已尝试使用原生驭空坐骑，游戏尚未确认骑乘任务进度。请查看游戏内提示及任务运行日志。",
                 "stopped:quest_object_interaction_unconfirmed": "已点击确认的任务物品，但任务进度尚未增加。角色已停在当前物品附近，请查看游戏内距离或互动提示。",
                 "stopped:game_not_frontmost": "魔兽未保持前台，脚本已停止。点击游戏窗口后让游戏保持在前台。",
+                "stopped:capture_unavailable": "游戏窗口位置、尺寸或截图状态发生变化，已停止输入。请核对任务运行日志。",
                 "stopped:input_session_stopped": "键鼠助手已结束会话。切回魔兽并重新从「WoW 键鼠」启动任务。",
                 "stopped:quest_navigation_not_prepared": "已找到主色条，但未读取到寻路色条。请在插件里点「一键准备自动任务」，等准备完成后再启动。",
                 "stopped:quest_navigation_channel_stale": "寻路色条停止更新。请保持游戏和色条可见，再准备并启动任务。",
+                "stopped:quest_loot_addon_required": "控制器需要支持强制拾取的新版插件和已核对的拾取键位，战斗已停止。",
+                "stopped:quest_loot_unconfirmed": "有一具击杀后的尸体仍未确认拾取完毕，脚本已停在当前任务。",
                 "stopped:quest_recovery_corpse_route_unavailable": "已识别到灵魂状态，但未取得跑尸所需的坐标、朝向或步行键位。请查看 quest_recovery_route_wait 日志中的缺失项。",
                 "stopped:quest_recovery_corpse_position_unavailable": "未读到尸体坐标、原生导航距离，也未能从小地图核对墓碑或红色方向箭头；已停止移动，请查看小地图识别日志。",
                 "stopped:quest_recovery_corpse_distance_search_unconfirmed": "已尝试根据游戏的尸体追踪距离定位，但读数未能确认前进方向。",
                 "stopped:quest_recovery_confirmation_unacknowledged": "已点击复活确认按钮，但游戏未报告角色存活。",
+                "stopped:quest_recovery_dialog_input_rejected": "键鼠助手拒绝操作复活弹窗。请核对游戏窗口是否被覆盖，以及运行日志中的拒绝原因。",
                 "stopped:quest_pet_revive_binding_unverified": "宠物已死亡，但复活宠物的 F11 临时绑定未通过核对。",
                 "stopped:quest_pet_revive_unconfirmed": "已尝试复活宠物，游戏仍未报告宠物存活。",
                 "stopped:quest_pet_summon_unconfirmed": "已尝试恢复宠物，游戏仍未报告宠物存活。",
@@ -627,6 +691,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0 if not outcome.status.startswith("stopped") else 3
     finally:
         ctx.input.release_all()
+        if isinstance(ctx.capture, ScreenCapture):
+            ctx.capture.close()
         estop.stop()
         wd.stop()
         ctx.audio.stop()
@@ -783,6 +849,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--duration", type=float, default=3.0)
     p.set_defaults(func=cmd_probe_navigation)
 
+    from .nav3d.ground_trial import DISPATCH_CHOICES, PROFILE_CHOICES, cmd_ground_trial
+
+    p = sub.add_parser("ground-trial", help="用已准备键位验证有距离限制的地面路线并保存回执")
+    p.add_argument("--mesh", required=True)
+    p.add_argument("--mesh-id", required=True)
+    p.add_argument("--start", nargs=2, type=float, required=True, metavar=("E", "N"))
+    p.add_argument("--goal", nargs=2, type=float, required=True, metavar=("E", "N"))
+    p.add_argument("--capture", choices=("stream", "quartz"), default="stream")
+    p.add_argument("--pose-source", choices=("fast", "legacy"), default="legacy")
+    p.add_argument("--dispatch", choices=DISPATCH_CHOICES, default="auto")
+    p.add_argument("--profile", choices=PROFILE_CHOICES, default="short")
+    p.add_argument("--entry-scene", type=Path, help="使用与网格同源的碰撞场景验证一次入网短步")
+    p.add_argument("--queue", action="store_true", help="使用已准备任务的签名启动入口运行一次")
+    p.add_argument("--output", type=Path, required=True)
+    p.set_defaults(func=cmd_ground_trial)
+
     p = sub.add_parser("accept-quest", help="本地 StartLux 决策，脚本接受已准备的当前 NPC 任务")
     p.add_argument("--key", choices=[str(key) for key in range(1, 10)], default="9")
     p.add_argument("--startlux-port", type=int, default=8090)
@@ -794,9 +876,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     p = sub.add_parser("navigate-quest", help="按原生任务目标坐标寻路并执行已准备任务")
     p.add_argument("--startlux-port", type=int, default=8090)
-    p.add_argument("--max-duration", type=float, help="最长运行秒数，自动任务默认 3600，其余默认 600")
+    p.add_argument("--max-duration", type=float,
+                   help="最长运行秒数。无限服练级默认随任务结果结束，其他自动任务 3600 秒，其余 600 秒")
     p.add_argument("--travel-only", action="store_true", help="只验证寻路，抵达落地后结束")
-    p.add_argument("--require-prepared", action="store_true", help="仅运行插件内一键准备并核对的任务")
+    p.add_argument("--require-prepared", action="store_true", help="启动后等待插件发布任务和已核对的键位")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--mock-input", action="store_true")
     p.set_defaults(func=cmd_run, module="quest_navigate", quest_plan=None,

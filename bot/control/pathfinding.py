@@ -27,8 +27,11 @@ class GridRouter:
         tx, ty = self.metric(toward)
         length = math.hypot(tx - x, ty - y)
         if length:
-            self.blocked.add(self.cell(((x + (tx - x) / length * self.cell_size) / self.width,
-                                        (y + (ty - y) / length * self.cell_size) / self.height)))
+            contact = self.cell(((x + (tx - x) / length * self.cell_size) / self.width,
+                                 (y + (ty - y) / length * self.cell_size) / self.height))
+            if contact not in self.blocked:
+                self.blocked.add(contact)
+                return contact
 
     def remember_passage(self, trace):
         """Record adjacent cells crossed during a confirmed local detour."""
@@ -37,7 +40,7 @@ class GridRouter:
             if first != second and max(abs(first[0] - second[0]), abs(first[1] - second[1])) == 1:
                 self.passages.add(frozenset((first, second)))
 
-    def route(self, position, destination):
+    def route(self, position, destination, *, smooth=False):
         if not self.blocked:
             return [destination]
         start, goal = self.cell(position), self.cell(destination)
@@ -63,8 +66,10 @@ class GridRouter:
                     cells.append(current)
                     current = previous[current]
                 cells.reverse()
-                return [(min(1.0, (x + .5) * self.cell_size / self.width),
-                         min(1.0, (y + .5) * self.cell_size / self.height)) for x, y in cells[:-1]] + [destination]
+                points = [(min(1.0, (x + .5) * self.cell_size / self.width),
+                           min(1.0, (y + .5) * self.cell_size / self.height)) for x, y in cells[:-1]]
+                points.append(destination)
+                return self.smooth_path(position, points) if smooth else points
             x, y = current
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
                 neighbor = x + dx, y + dy
@@ -78,3 +83,31 @@ class GridRouter:
                     costs[neighbor], previous[neighbor] = candidate, current
                     heapq.heappush(frontier, (candidate + estimate(neighbor), candidate, neighbor))
         return []
+
+    def smooth_path(self, position, points):
+        """Combine short grid legs when they do not cross a known obstruction."""
+        path = []
+        first = 0
+        while first < len(points):
+            end = min(first + 6, len(points) - 1)
+            while end > first and not self.clear_segment(position, points[end]):
+                end -= 1
+            position = points[end]
+            path.append(position)
+            first = end + 1
+        return path
+
+    def clear_segment(self, start, end):
+        x, y = start
+        dx, dy = end[0] - x, end[1] - y
+        count = max(1, math.ceil(self.distance(start, end) / (self.cell_size / 4)))
+        previous = self.cell(start)
+        for step in range(1, count + 1):
+            cell = self.cell((x + dx * step / count, y + dy * step / count))
+            if cell == previous:
+                continue
+            if cell in self.blocked or (cell[0] != previous[0] and cell[1] != previous[1]
+                    and ((cell[0], previous[1]) in self.blocked or (previous[0], cell[1]) in self.blocked)):
+                return False
+            previous = cell
+        return True

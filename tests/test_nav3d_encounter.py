@@ -19,7 +19,7 @@ def encounter():
     state = RespawnEncounter(MESH_ID, log_event=lambda *args: events.append(args))
     tracker = ObservationTracker()
     serial = 0
-    def tick(now, *, target=False, sequence=None, xyz=None, combat=None, nav=None):
+    def tick(now, *, target=False, sequence=None, xyz=None, combat=None, nav=None, loot_pending=False):
         nonlocal serial
         serial += 1
         seq = serial if sequence is None else sequence
@@ -39,8 +39,18 @@ def encounter():
         q = NS(sequence=seq, quest_id=n.quest_id, state=n.phase, map_id=n.map_id, tracking=True)
         observation = tracker.snapshot(now, q, n, c)
         tick.last = (s, n, observation)
-        return state.step(now, s, n, observation)
+        return state.step(now, s, n, observation, loot_pending=loot_pending)
     return state, tick, events
+
+
+def test_ready_encounter_cannot_handoff_with_pending_loot(encounter):
+    state, tick, events = encounter
+    assert tick(0, target=True).tap == '1'
+    command = tick(.3, xyz={'phase': 3, 'in_combat': True}, nav={'phase': QuestState.READY},
+                   combat={'target_id': 123, 'target_dead': True}, loot_pending=True)
+    assert command.outcome is None and command.tap is None
+    assert state.state == 'loot_pending'
+    assert not any(event == 'quest_encounter_credit' for event, _ in events)
 
 
 def test_wait_holds_position_exact_select_then_first_attack_and_cast_receipt(encounter):

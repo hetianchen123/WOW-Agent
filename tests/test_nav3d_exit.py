@@ -89,6 +89,23 @@ def test_exit_segment_releases_phase_and_reaches_exit(door_mesh, tmp_path):
     assert not any(data.get('reason') == 'target_receipt_missing' for _, data in events)
 
 
+def test_combat_retreat_requires_a_grounded_prepared_mesh_exit(door_mesh, tmp_path):
+    goal = (100, 8.5)
+    regular, _, start, _ = coordinator(door_mesh, tmp_path)
+    regular.begin_exit(goal, now=0)
+    sample = replace(exit_sample(start, goal, 2), in_combat=True)
+    nav = exit_nav(2)
+    assert regular.step(.1, sample, nav, travel_only=True).outcome == "nav3d_state_unsafe"
+
+    retreat, events, _, _ = coordinator(door_mesh, tmp_path)
+    retreat.begin_exit(goal, now=0)
+    command = retreat.step(.1, sample, nav, travel_only=True, retreating=True)
+    assert command.tap and command.outcome is None
+    assert any(data.get("retreating") for kind, data in events if kind == "nav3d_pose")
+    airborne = replace(sample, sequence=3, grounded=False)
+    assert retreat.step(.2, airborne, exit_nav(3), travel_only=True, retreating=True).outcome == "nav3d_state_unsafe"
+
+
 def test_exit_segment_gets_fresh_budget_after_long_spawn_wait(door_mesh, tmp_path):
     rt, events, start, goal = coordinator(door_mesh, tmp_path, budget_s=10)
     rt.begin_exit((100, 8.5), now=300)

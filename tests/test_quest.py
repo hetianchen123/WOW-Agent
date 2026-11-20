@@ -6,17 +6,17 @@ import numpy as np
 import pytest
 
 from bot.control.input_mock import MockInput
+from bot.control.quest_travel import TravelCommand
 from bot.core.config import BotConfig
 from bot.modules import quest
 from bot.perception import channel_spec as spec
-from bot.perception.combat_channel import combat_region
-from bot.perception.combat_channel import TargetDanger
+from bot.perception.combat_channel import CombatSample, TargetDanger, combat_region
 from bot.perception.cv import hostile_nameplate_points
 from bot.perception.quest_channel import Dialogue, Objective, QuestKind, QuestState, decode_quest
 from bot.perception.travel_channel import (
     CameraSample, CameraScene, CameraResult,
-    CorpseSource, LifeState, MinimapGeometry, ObjectiveAction, PetState, RecoverySample, RoundStage,
-    TaskFlags, TravelFlags, TravelSample,
+    CorpseLootReceipt, CorpseSource, ForeverStep, LifeState, MinimapGeometry, ObjectiveAction, PetState, RecoverySample, RoundStage,
+    PlayerVitals, SupplyAction, TaskFlags, TravelFlags, TravelSample,
 )
 
 
@@ -42,6 +42,41 @@ def test_quest_channel_rejects_misaligned_rows():
     assert sample.tracking and sample.sequence == 3
     canvas[32:48] = canvas[16:32]
     assert decode_quest(canvas) is None
+
+
+def test_native_travel_pulse_continues_through_idle_frames_and_cancels_before_handoff(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    calls = []
+    events = []
+
+    def start(key, hold_s):
+        calls.append(("start", key, hold_s))
+        return True
+
+    ctx.input.start_navigation_pulse = start
+    ctx.input.cancel_navigation_pulse = lambda: calls.append(("cancel",))
+    ctx.log_event = lambda name, payload: events.append((name, payload))
+    pulse = TravelCommand(tap="left", hold_s=.07, precise=True)
+    run.apply_travel_command(ctx, pulse)
+    run.apply_travel_command(ctx, TravelCommand())
+    assert calls == [("start", "left", .07)]
+    assert events[-1][1]["dispatch"] == "native_timer"
+
+    run.set_travel_keys(ctx, frozenset({"w"}))
+    assert calls[-1] == ("cancel",)
+    assert ctx.input.count("key_down", "w") == 1
+    assert ctx.input.count("key_down", "left") == 0
+
+    run.apply_travel_command(ctx, pulse)
+    run.apply_travel_command(ctx, TravelCommand(outcome="detoured"))
+    assert calls[-2:] == [("start", "left", .07), ("cancel",)]
+
+
+def test_precise_travel_pulse_preserves_legacy_execution(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.input.start_navigation_pulse = lambda *_: False
+    run.apply_travel_command(ctx, TravelCommand(tap="right", hold_s=.07, precise=True))
+    assert ctx.input.count("key_down", "right") == ctx.input.count("key_up", "right") == 1
 
 
 def test_resource_strip_is_distinct_from_counted_and_legacy_non_counted():
@@ -141,6 +176,128 @@ def test_no_pet_ordinary_loot_waits_for_matching_corpse_receipt(tmp_path, monkey
     assert events == ["quest_loot", "quest_loot", "quest_loot_confirmed"]
 
 
+@pytest.mark.parametrize('same_corpse', [True, False])
+def test_required_loot_blocks_turn_in_until_same_corpse_is_empty(tmp_path, monkeypatch, same_corpse):
+    run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
+    run.auto_route = run.require_prepared = True
+    run.phase = QuestState.ACTIVE
+    run.hunt = quest.QuestHunt(frozenset({244669}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=244669, state_epoch=1)
+    nav = [TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.READY, TravelFlags.KEYS_VERIFIED, 1, addon_build=323, loot_epoch=4,
+        task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE, corpse_lootable=True)]
+    monkeypatch.setattr(quest, 'decode_travel', lambda *_, **__: replace(nav[0], sequence=ctx.frame_sequence()))
+    tick(QuestState.READY, done=3, target=244669, dead=True)
+    assert ctx.input.count('key_down', 'f') == 1
+    nav[0] = replace(nav[0], loot_epoch=5)
+    tick(QuestState.READY, done=3, target=244669, dead=True, elapsed=.5)
+    assert run.phase == QuestState.ACTIVE and run.required_loot
+    nav[0] = replace(nav[0], corpse_lootable=False)
+    tick(QuestState.READY, done=3, target=244669, dead=True, epoch=1 if same_corpse else 2, elapsed=.5)
+    assert bool(run.required_loot) is not same_corpse
+    if not same_corpse:
+        tick(QuestState.READY, done=3, target=244669, dead=True, epoch=2, elapsed=19)
+        assert run.OUTCOME == 'stopped:quest_loot_unconfirmed'
+    assert run.phase == QuestState.ACTIVE and not ctx.input.count('key_down', '9')
+
+
+def test_required_loot_holds_self_defense_corpses_until_combat_ends(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.hunt = quest.QuestHunt(frozenset({244669}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=244669, state_epoch=1)
+    run.defense = SimpleNamespace(fight=SimpleNamespace(presses=1, target_id=244669, state_epoch=1))
+    frame = SimpleNamespace(quest_id=12345, map_id=2248, state=QuestState.ACTIVE, dialogue=Dialogue.CLOSED)
+    corpse = SimpleNamespace(target_id=244669, target_dead=True, state_epoch=1, unsafe=False)
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED | TravelFlags.IN_COMBAT, 1, addon_build=323,
+        task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE, corpse_lootable=True, loot_epoch=7)
+    assert not run.process_required_loot(ctx, 1, frame, nav, corpse, None)
+    assert len(run.required_loot) == 1 and not ctx.input.actions
+    nav = replace(nav, flags=TravelFlags.KEYS_VERIFIED, sequence=2)
+    assert run.process_required_loot(ctx, 2, frame, nav, corpse, None)
+    assert ctx.input.count('key_down', 'f') == 1
+    assert run.process_required_loot(ctx, 2.2, frame, replace(nav, corpse_lootable=False), corpse, None)
+    assert len(run.required_loot) == 1  # A repeated navigation frame proves nothing.
+    assert run.process_required_loot(ctx, 2.4, frame, replace(nav, corpse_lootable=False, sequence=3), corpse, None)
+    assert not run.required_loot
+
+
+def test_required_loot_accepts_fresh_corpse_receipt_after_target_clears(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.hunt = quest.QuestHunt(frozenset({244669}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=244669, state_epoch=4)
+    frame = SimpleNamespace(quest_id=12345, map_id=2248, state=QuestState.ACTIVE, dialogue=Dialogue.CLOSED)
+    corpse = SimpleNamespace(target_id=244669, target_dead=True, state_epoch=4, unsafe=False)
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, addon_build=324,
+        task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE, corpse_lootable=True, loot_epoch=0,
+        corpse_loot_receipt=CorpseLootReceipt(1, 4))
+    assert run.process_required_loot(ctx, 1, frame, nav, corpse, None)
+    assert ctx.input.count('key_down', 'f') == 1
+    cleared = SimpleNamespace(target_id=0, target_dead=False, state_epoch=7, unsafe=False)
+    nav = replace(nav, task=TaskFlags.PREPARED, corpse_lootable=None, loot_epoch=5)
+    for tick, receipt in enumerate((None, CorpseLootReceipt(1, 4), CorpseLootReceipt(2, 7)), start=2):
+        assert run.process_required_loot(ctx, tick, frame, replace(nav, sequence=tick, corpse_loot_receipt=receipt),
+                                         cleared, None)
+        assert len(run.required_loot) == 1
+    assert run.process_required_loot(ctx, 5, frame, replace(nav, sequence=5, corpse_loot_receipt=CorpseLootReceipt(2, 4)),
+                                     cleared, None)
+    assert not run.required_loot and not ctx.input.count('key_down', 'p')
+
+
+@pytest.mark.parametrize('started_selected', [True, False])
+def test_prepared_task_loots_a_nearby_corpse_before_first_combat(tmp_path, monkeypatch, started_selected):
+    run, ctx, _ = make_run(tmp_path, monkeypatch, combat=True)
+    frame = SimpleNamespace(quest_id=12345, map_id=2248, state=QuestState.ACTIVE, dialogue=Dialogue.CLOSED)
+    corpse = SimpleNamespace(target_id=475, target_dead=True, state_epoch=7, previous_target_epoch=None, unsafe=False,
+                             facing=0, turn_verified=True, sequence=2)
+    no_target = SimpleNamespace(target_id=0, target_dead=False, state_epoch=6, unsafe=False,
+                                 facing=0, turn_verified=True, sequence=3)
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, addon_build=325, task=TaskFlags.PREPARED,
+        nearby_lootable_corpse=True, loot_epoch=0)
+    if not started_selected:
+        assert not run.process_required_loot(ctx, 0, frame, replace(nav, nearby_lootable_corpse=False), no_target, None)
+        assert not run.process_required_loot(ctx, 0, frame, replace(nav, flags=TravelFlags.IN_COMBAT), no_target, None)
+        assert run.process_required_loot(ctx, 1, frame, nav, no_target, None)
+        assert ctx.input.count('key_down', 'k') == 1
+        assert run.process_required_loot(ctx, 1.2, frame, nav, no_target, None)
+        assert not ctx.input.count('key_down', 'f')
+    selected = replace(nav, sequence=2, nearby_lootable_corpse=False, corpse_lootable=True,
+                       task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE)
+    assert run.process_required_loot(ctx, 1.4, frame, selected, corpse, None)
+    assert len(run.required_loot) == ctx.input.count('key_down', 'f') == 1
+    receipt = replace(nav, sequence=3, nearby_lootable_corpse=False, loot_epoch=1,
+                      corpse_loot_receipt=CorpseLootReceipt(1, 7))
+    assert run.process_required_loot(ctx, 2, frame, receipt, no_target, None)
+    assert not run.required_loot and not ctx.input.count('key_down', 'p')
+    hidden = replace(receipt, sequence=4)
+    assert run.process_required_loot(ctx, 2.2, frame, hidden, no_target, None)
+    assert run.process_required_loot(ctx, 2.4, frame, hidden, no_target, None)
+    assert ctx.input.count('key_down', 'left') == 1
+    assert ctx.input.count('key_down', 'f') == 1
+    assert not run.process_required_loot(ctx, 3, frame, replace(nav, flags=TravelFlags.IN_COMBAT), no_target, None)
+    assert run.nearby_loot_scan is None
+
+
+def test_nearby_loot_checks_another_heading_when_soft_target_disappears(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch, combat=True)
+    frame = SimpleNamespace(quest_id=12345, map_id=2248, state=QuestState.ACTIVE, dialogue=Dialogue.CLOSED)
+    combat = CombatSample(3, 1, 18, 70959, 1485, 5, 0, 0, False, True, False, 4, 6, 1,
+                          facing=0, turn_verified=True)
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, addon_build=325, task=TaskFlags.PREPARED,
+        nearby_lootable_corpse=True, loot_epoch=0)
+    assert run.process_required_loot(ctx, 1, frame, nav, combat, None)
+    lost = replace(nav, nearby_lootable_corpse=False, sequence=2)
+    assert run.process_required_loot(ctx, 2.3, frame, lost, combat, None)
+    assert run.process_required_loot(ctx, 2.4, frame, lost, combat, None)
+    assert ctx.input.count('key_down', 'left') == 1
+    aligned = replace(combat, sequence=2, facing=math.radians(80))
+    assert run.process_required_loot(ctx, 3, frame, replace(nav, sequence=3), aligned, None)
+    assert ctx.input.count('key_down', 'k') == 2 and not ctx.input.count('key_down', 'f')
+
+
 def test_fresh_v14_objective_replaces_older_quest_strip_progress(tmp_path, monkeypatch):
     run, ctx, tick = make_run(tmp_path, monkeypatch, combat=True)
     run.auto_route = run.require_prepared = True
@@ -158,6 +315,50 @@ def test_fresh_v14_objective_replaces_older_quest_strip_progress(tmp_path, monke
     assert run.objective_index == 2 and run.progress == (1, 4) and run.hunt is None
 
 
+def test_run_status_reports_activity_only_when_native_chord_is_verified(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.require_prepared = True
+    sent = []
+    ctx.input.publish_run_status = lambda code: sent.append(code) or True
+    nav = SimpleNamespace(run_status_ready=False, sequence=1)
+    run.publish_activity(ctx, 1, 'combat_target_search', nav, None)
+    assert not sent
+    nav.run_status_ready = True
+    run.publish_activity(ctx, 2, 'combat_target_search', nav, None)
+    run.publish_activity(ctx, 3, 'npc_search', nav, None)
+    run.required_loot.append(object())
+    run.publish_activity(ctx, 4, 'combat', nav, None)
+    assert sent == [3, 6, 9] and run.status_wire_at == 4
+
+
+def test_timeout_uses_startlux_without_dropping_a_pending_corpse(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    run.continuous = True
+    run.phase = QuestState.ACTIVE
+    corpse = quest.RequiredCorpseLoot(475, 7)
+    run.required_loot.append(corpse)
+    requests = []
+    decisions = iter(('next_task', 'retry'))
+
+    def decide(signature, state, options, **kwargs):
+        requests.append((signature, state, options))
+        return {'recommendation': next(decisions)}
+
+    run.planner = SimpleNamespace(poll=decide)
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED, suspend_ready=True,
+        suspend_epoch=2, round_advance=True)
+    frame = SimpleNamespace(quest_id=12345, map_id=2248, state=QuestState.ACTIVE, dialogue=Dialogue.CLOSED)
+    run.stop(ctx, 'quest_loot_unconfirmed')
+    assert run.timeout_review is not None and run.OUTCOME is None
+    assert run.review_timeout(ctx, 100, frame, nav, None, None)
+    assert 'next_task' not in requests[0][2] and run.suspend_request is None
+    assert run.review_timeout(ctx, 104, frame, nav, None, None)
+    assert corpse.started == 104 and run.timeout_review is None
+    assert run.required_loot == [corpse] and run.OUTCOME is None
+    assert not [action for action in ctx.input.actions if action[0] == 'key_down']
+
+
 def test_focus_loss_releases_held_movement_without_suspending(tmp_path, monkeypatch):
     run, ctx, tick = make_run(tmp_path, monkeypatch)
     run.auto_route = run.require_prepared = run.execution_started = True
@@ -167,6 +368,102 @@ def test_focus_loss_releases_held_movement_without_suspending(tmp_path, monkeypa
     tick(QuestState.ACTIVE)
     assert run.OUTCOME == "stopped:game_not_frontmost" and run.suspend_request is None
     assert ctx.input.count("key_down", "w") == ctx.input.count("key_up", "w") == 1
+
+
+@pytest.mark.parametrize("interruption", ["focus", "capture"])
+def test_online_controller_waits_for_fresh_frames_after_interruption(tmp_path, monkeypatch, interruption):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    state = quest.NavigateCurrentQuest(None, run.kinds, False, True)
+    state.runner = run
+    ctx.input.supports_focus_pause = True
+    ctx.input.focus_epoch = None
+    ctx.invalidate_game_observation = lambda: None
+    corpse = quest.RequiredCorpseLoot(475, 7)
+    run.required_loot.append(corpse)
+    phase = QuestState.ACTIVE
+    frame = [SimpleNamespace(quest_id=12345, map_id=2248, state=phase, sequence=1, tracking=True,
+                             dialogue=Dialogue.CLOSED, dialogue_id=0)]
+    nav = [TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+                        phase, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED)]
+    focused = [True]
+    resumed = []
+    fail_capture = [interruption == "capture"]
+    monkeypatch.setattr(quest, "game_is_frontmost", lambda: focused[0])
+    monkeypatch.setattr(quest, "decode_travel", lambda _: nav[0])
+    monkeypatch.setattr(quest, "decode_quest", lambda _: frame[0])
+
+    def task_tick(_):
+        if fail_capture[0]:
+            raise quest.CaptureError("window moved")
+        resumed.append("task")
+
+    def resume_foreground(epoch):
+        assert epoch == 4
+        ctx.input.focus_epoch = None
+        resumed.append("foreground")
+
+    monkeypatch.setattr(state, "tick_task", task_tick)
+    ctx.input.resume_foreground = resume_foreground
+    run.set_travel_keys(ctx, frozenset({"w"}))
+    if interruption == "focus":
+        focused[0], ctx.input.focus_epoch = False, 3
+    state.tick(ctx)
+    assert state.online_wait and state.OUTCOME is None and not ctx.input._held_keys
+    assert run.required_loot == [corpse]
+    fail_capture[0] = False
+    if interruption == "focus":
+        focused[0], ctx.input.focus_epoch = True, 4
+        state.tick(ctx)
+        assert resumed == ["foreground"]
+    state.tick(ctx)
+    state.tick(ctx)
+    assert "task" not in resumed and state.online_wait
+    nav[0] = replace(nav[0], sequence=2)
+    state.tick(ctx)
+    assert "task" not in resumed and state.online_wait
+    frame[0].sequence = 2
+    state.tick(ctx)
+    assert state.online_wait is None and state.runner.required_loot == [corpse]
+    state.tick(ctx)
+    assert resumed[-1] == "task"
+
+
+def test_online_controller_waits_for_changed_task_context_without_restarting_failed_step(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    state = quest.NavigateCurrentQuest(None, run.kinds, False, True)
+    state.runner = run
+    ctx.input.supports_focus_pause = True
+    ctx.input.focus_epoch = None
+    ctx.invalidate_game_observation = lambda: None
+    nav = [TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+                        QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED,
+                        objective_progress=(0, 1))]
+    frame = SimpleNamespace(quest_id=12345, map_id=2248, state=QuestState.ACTIVE, sequence=1,
+                            tracking=True, dialogue=Dialogue.CLOSED, dialogue_id=0)
+    run.observation = run.observations.snapshot(100, frame, nav[0], None)
+    monkeypatch.setattr(quest, "game_is_frontmost", lambda: True)
+    monkeypatch.setattr(quest, "decode_travel", lambda _: nav[0])
+    monkeypatch.setattr(quest, "decode_quest", lambda _: frame)
+    attempts = []
+
+    def failed_step(_):
+        attempts.append(True)
+        state.OUTCOME = "stopped:quest_route_blocked"
+
+    monkeypatch.setattr(state, "tick_task", failed_step)
+    state.tick(ctx)
+    for sequence in range(2, 6):
+        frame.sequence = sequence
+        nav[0] = replace(nav[0], sequence=sequence)
+        state.tick(ctx)
+    assert state.OUTCOME is None and state.online_wait and attempts == [True]
+    nav[0] = replace(nav[0], objective_progress=(1, 1), sequence=6)
+    frame.sequence = 6
+    state.tick(ctx)
+    nav[0] = replace(nav[0], sequence=7)
+    frame.sequence = 7
+    state.tick(ctx)
+    assert state.online_wait is None and attempts == [True]
 
 
 def test_probe_quests_waypoints_reads_live_position_frames(monkeypatch, capsys):
@@ -434,6 +731,26 @@ def test_auto_turn_in_faces_marker_before_interacting(tmp_path, monkeypatch):
     assert run.OUTCOME == "completed"
 
 
+def test_forever_restores_verified_corpse_for_loot_after_kill_credit(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    run.hunt = quest.QuestHunt(frozenset({6}))
+    run.hunt.fight = SimpleNamespace(presses=1, target_id=6, state_epoch=2)
+    run.hunt.baseline = 8
+    no_target = CombatSample(3, 1, 18, 70959, 1485, 2, 0, 0, False, False, False, 0, 3, 1)
+    nav = TravelSample(7, 1429, 1429, (.5, .5), (.5, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1,
+                       task=TaskFlags.PREPARED, last_target_verified=True)
+    assert run.loot_corpse(ctx, 0, 9, no_target, nav)
+    assert ctx.input.count("key_down", "p") == 1
+    corpse = replace(no_target, target_dead=True, target_id=6, sequence=2, previous_target_epoch=2)
+    assert run.loot_corpse(ctx, .2, 9, corpse, nav)
+    assert ctx.input.count("key_down", "f") == 0
+    nav = replace(nav, task=TaskFlags.PREPARED | TaskFlags.LOOT_IN_RANGE, corpse_lootable=True, loot_epoch=5)
+    assert run.loot_corpse(ctx, 1.6, 9, corpse, nav)
+    assert ctx.input.count("key_down", "f") == 1
+
+
 def test_pickup_resumes_search_when_candidate_disappears_after_selecting(tmp_path, monkeypatch):
     run, ctx, tick = make_run(tmp_path, monkeypatch)
     run.auto_route = run.require_prepared = True
@@ -484,18 +801,89 @@ def test_prepared_start_waits_for_foreground_before_reading_quest(monkeypatch):
     monkeypatch.setattr(quest, "decode_travel", lambda _: None)
     start = quest.NavigateCurrentQuest(None, {QuestKind.CAMPAIGN}, False, require_prepared=True)
     ctx = SimpleNamespace(input=SimpleNamespace(name="helper"), cfg=BotConfig(),
-                          capture=SimpleNamespace(grab=lambda *region: captures.append(region)))
+                          capture=SimpleNamespace(grab=lambda *region: captures.append(region)),
+                          log_event=lambda *_: None)
     start.on_enter(ctx)
-    now[0] = 14
+    now[0] = 120
     start.tick(ctx)
     assert start.OUTCOME is None and not captures
     focused[0] = True
-    now[0] = 15
+    now[0] = 121
     start.tick(ctx)
     assert start.OUTCOME is None and captures
-    now[0] = 21
+    now[0] = 300
     start.tick(ctx)
-    assert start.OUTCOME == "stopped:quest_navigation_not_prepared"
+    assert start.OUTCOME is None and start.runner is None
+
+
+@pytest.mark.parametrize('prepared_in_combat', [True, False])
+def test_prepared_start_in_combat_uses_current_bindings_or_waits_for_preparation(monkeypatch, prepared_in_combat):
+    now = [10.0]
+    events = []
+    nav = [TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.IN_COMBAT | TravelFlags.KEYS_VERIFIED, 1,
+        task=TaskFlags.PREPARED, npc_range_supported=True) if prepared_in_combat else None]
+    monkeypatch.setattr(quest, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(quest, 'decode_travel', lambda _: nav[0])
+    start = quest.NavigateCurrentQuest(None, {QuestKind.CAMPAIGN}, False, require_prepared=True)
+    ctx = SimpleNamespace(input=MockInput(), cfg=BotConfig(), capture=SimpleNamespace(grab=lambda *_: None),
+        log_event=lambda name, data: events.append(name))
+    start.on_enter(ctx)
+    start.tick(ctx)
+    assert start.runner is None and start.OUTCOME is None
+    if not prepared_in_combat:
+        now[0] += 200
+        start.tick(ctx)
+        assert events == ['quest_start_waiting'] and start.OUTCOME is None
+        now[0] += 6
+        start.tick(ctx)
+        assert start.runner is None and start.OUTCOME is None
+        nav[0] = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+            QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED, npc_range_supported=True)
+        start.tick(ctx)
+    nav[0] = replace(nav[0], sequence=2)
+    now[0] += .2
+    start.tick(ctx)
+    assert start.runner is not None and start.OUTCOME is None
+    assert events[-1] == 'quest_navigation_start' and not ctx.input.actions
+
+
+def test_cold_start_requests_preparation_once_after_fresh_matching_binding(monkeypatch):
+    events, requests = [], []
+    flags = quest.StatusFlags
+    status = [flags.IN_COMBAT]
+    nav = [None]
+    monkeypatch.setattr(quest, "decode_travel", lambda _: nav[0])
+    monkeypatch.setattr(quest, "decode_combat", lambda _: SimpleNamespace(build=70959))
+    start = quest.NavigateCurrentQuest(None, {QuestKind.CAMPAIGN}, False, require_prepared=True)
+    ctx = SimpleNamespace(
+        input=MockInput(), cfg=BotConfig(game_version="1.60.1"),
+        capture=SimpleNamespace(grab=lambda *_: None),
+        channel=SimpleNamespace(status=lambda **_: (status[0], 15)),
+        log_event=lambda name, data: events.append(name),
+    )
+    ctx.input.request_quest_preparation = lambda: requests.append(True) or True
+    start.on_enter(ctx)
+    start.tick(ctx)
+    status[0] = flags.QUEST_PREPARE_KEY | flags.HEARTBEAT
+    start.tick(ctx)
+    assert not requests and start.OUTCOME is None
+    status[0] = flags.QUEST_PREPARE_KEY | flags.QUEST_PREPARE_FOREVER | flags.MOUNTED
+    start.tick(ctx)
+    start.tick(ctx)
+    assert not requests
+    status[0] |= flags.HEARTBEAT
+    start.tick(ctx)
+    start.tick(ctx)
+    assert requests == [True] and events.count("quest_start_prepare_requested") == 1
+    nav[0] = TravelSample(12345, 1429, 1429, (.4, .5), (.4, .5), (1000, 1000), 0,
+        QuestState.ACTIVE, TravelFlags.MOUNTED | TravelFlags.KEYS_VERIFIED, 1,
+        task=TaskFlags.PREPARED, npc_range_supported=True)
+    start.tick(ctx)
+    assert start.runner is None
+    nav[0] = replace(nav[0], sequence=2)
+    start.tick(ctx)
+    assert start.runner is not None and not ctx.input.actions
 
 
 def test_prepared_runner_waits_on_focus_loss_during_initial_decision(tmp_path, monkeypatch):
@@ -836,6 +1224,44 @@ def test_failed_mob_search_remains_combat_search_without_mouse_fallback(tmp_path
     assert not ctx.input.count("move")
 
 
+def test_forever_blocked_outdoor_hunt_waypoint_tries_next_search_point(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    run.auto_route = True
+    run.hunt = quest.QuestHunt(frozenset({6}))
+    nav = TravelSample(7, 1429, 1429, (.5, .5), (.5, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED | TravelFlags.OUTDOORS, 1)
+    assert run.search_quest_area(ctx, nav)
+    waypoint = run.search_waypoint
+    blocked = quest.QuestTrip(nav.world_size, waypoint, "ccw_west")
+    run.trip = blocked
+    monkeypatch.setattr(blocked, "step", lambda *_args, **_kwargs: TravelCommand(outcome="route_blocked"))
+    monkeypatch.setattr(run, "start_detour", lambda *_: pytest.fail("optional search point needs no detour"))
+    run.travel_to_destination(ctx, 10, nav, 0)
+    assert blocked.router.blocked and run.search_waypoint != waypoint
+    assert run.trip is None and not run.arrived and run.OUTCOME is None
+
+
+@pytest.mark.parametrize("fighting, retry", [(False, True), (True, False)])
+@pytest.mark.parametrize("failure", ["no_cast_or_damage_receipt", "approach_timeout"])
+def test_forever_changes_search_point_after_no_opening_receipt(tmp_path, monkeypatch, fighting, retry, failure):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    run.auto_route = run.arrived = True
+    run.hunt = quest.QuestHunt(frozenset({6}))
+    sample = CombatSample(3, 1, 18, 70959, 1485, 1, 0, 6, False, True, False, 5, 8, 1)
+    run.hunt.step(0, sample, 4, False)
+    monkeypatch.setattr(run, "read_combat", lambda _: sample)
+    monkeypatch.setattr(run.hunt, "step", lambda *_: (failure, None))
+    nav = TravelSample(7, 1429, 1429, (.5, .5), (.5, .5), (1000, 1000), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED | TravelFlags.OUTDOORS, 1)
+    run.hunt_tick(ctx, 10, 4, fighting, nav)
+    if retry:
+        assert run.hunt.fight is None and run.search_waypoint and run.OUTCOME is None
+    else:
+        assert run.OUTCOME == f"stopped:quest_combat_{failure}"
+
+
 def test_npc_search_releases_turn_between_pulses(tmp_path, monkeypatch):
     run, ctx, _ = make_run(tmp_path, monkeypatch)
     run.auto_route, run.phase = True, QuestState.READY
@@ -1001,6 +1427,62 @@ def test_quest_runs_to_corpse_confirms_popup_and_prepares_before_resuming(tmp_pa
     assert run.recovery is None and ctx.stats["quest_recoveries"] == 1
     tick(QuestState.ACTIVE)
     assert run.OUTCOME is None and run.arrived
+
+
+def test_recovery_uses_the_reported_popup_key_once_before_the_hover_fallback():
+    recovery = quest.QuestRecovery(0)
+    keys = MockInput()
+    events = []
+    ctx = SimpleNamespace(input=keys, log_event=lambda kind, data: events.append((kind, data)))
+    nav = TravelSample(47, 1429, 1429, None, None, None, None, QuestState.ACTIVE, TravelFlags(0), 0,
+        recovery=RecoverySample(LifeState.GHOST, dialog=True, dialog_key="h",
+                                button=(.5, .4), ui_aspect=.5625, hovered=True))
+
+    def tick(at, sequence):
+        return recovery.tick(ctx, at, replace(nav, sequence=sequence),
+            None, lambda _: None, lambda: (0, 0, 1600, 925))
+
+    assert tick(0, 1) is None
+    assert keys.count("key_down", "h") == keys.count("key_up", "h") == 1
+    assert keys.count("move") == keys.count("ui_click") == 0
+    assert tick(.2, 2) is None
+    assert tick(4.1, 3) is None
+    assert keys.count("move") == 1 and keys.count("ui_click") == 0
+    assert tick(4.3, 4) is None
+    assert keys.count("key_down", "h") == keys.count("ui_click") == 1
+    assert tick(8.5, 5) == "confirmation_unacknowledged"
+    assert any(kind == "quest_recovery_dialog_key" and data["life"] == "GHOST" for kind, data in events)
+
+
+@pytest.mark.parametrize("operation", ["hover", "click"])
+def test_recovery_stops_when_helper_rejects_popup_input(monkeypatch, operation):
+    from bot.control.input_helper import HelperActionRejected
+
+    recovery = quest.QuestRecovery(0)
+    keys = MockInput()
+    events = []
+    ctx = SimpleNamespace(input=keys, log_event=lambda kind, data: events.append((kind, data)))
+    nav = TravelSample(47, 1429, 1429, None, None, None, None, QuestState.ACTIVE, TravelFlags(0), 1,
+        recovery=RecoverySample(LifeState.GHOST, dialog=True, button=(.5, .4), ui_aspect=.5625))
+
+    def reject(*args, **kwargs):
+        raise HelperActionRejected("鼠标目标在魔兽窗口之外")
+
+    def tick(at, sample):
+        return recovery.tick(ctx, at, sample, None, lambda _: None, lambda: (0, 0, 1600, 925))
+
+    if operation == "hover":
+        monkeypatch.setattr(keys, "move_to", reject)
+    else:
+        assert tick(0, nav) is None
+        monkeypatch.setattr(keys, "click_ui", reject)
+        nav = replace(nav, sequence=2, recovery=replace(nav.recovery, hovered=True))
+
+    assert tick(.3, nav) == "dialog_input_rejected"
+    assert recovery.hover is None and recovery.clicks == 0
+    assert keys.count("mouse_down") == 0
+    assert events[-1] == ("quest_recovery_dialog_input_rejected", {"life": "GHOST", "operation": operation,
+        "point": (800, 385), "reason": "鼠标目标在魔兽窗口之外"})
 
 
 @pytest.mark.parametrize("consistent", [True, False])
@@ -1307,6 +1789,31 @@ def test_quest_refuses_other_dialogue_and_filtered_category(tmp_path, monkeypatc
     assert not ctx.input.actions
 
 
+@pytest.mark.parametrize("accepted", [True, False])
+def test_prepared_accept_waits_for_quest_log_after_detail_closes(tmp_path, monkeypatch, accepted):
+    run, ctx, tick = make_run(tmp_path, monkeypatch)
+    run.auto_route = run.require_prepared = True
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0,
+                       QuestState.PENDING, TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED)
+    current = [nav]
+    monkeypatch.setattr(quest, "decode_travel", lambda _: replace(current[0], sequence=ctx.frame_sequence()))
+    tick(QuestState.PENDING, Dialogue.DETAIL, 12345)
+    assert ctx.input.count("key_down", "9") == 1
+
+    tick(QuestState.PENDING, Dialogue.BLOCKED, elapsed=.25)
+    assert run.OUTCOME is None
+    assert ctx.input.count("key_down", "9") == 1
+    if accepted:
+        current[0] = replace(nav, phase=QuestState.ACTIVE)
+        tick(QuestState.ACTIVE, elapsed=.25)
+        assert ctx.stats["quests_accepted"] == 1
+        assert run.OUTCOME is None
+    else:
+        tick(QuestState.PENDING, Dialogue.BLOCKED, elapsed=2.3)
+        assert run.OUTCOME == "stopped:quest_dialogue_unexpected"
+        assert ctx.input.count("key_down", "9") == 1
+
+
 def test_quest_waits_for_local_decision_before_pressing_a_key(tmp_path, monkeypatch):
     run, ctx, tick = make_run(tmp_path, monkeypatch)
     decisions = []
@@ -1573,8 +2080,292 @@ def test_forever_inn_uses_mesh_for_entry_and_keeps_exit_until_handoff(tmp_path, 
     run.forever_building_segment = (60, QuestState.ACTIVE, "goldshire", "exit")
     outside = replace(inside, position=entry.position, flags=TravelFlags.OUTDOORS)
     assert run.forever_building_mode(ctx, outside) == ("goldshire", "exit")
-    run.forever_building_complete.add((60, QuestState.ACTIVE))
+    run.forever_building_complete.add((60, QuestState.ACTIVE, "goldshire"))
     assert run.forever_building_mode(ctx, outside) is None
+
+
+def test_forever_abbey_perimeter_keeps_nav3d_after_client_reports_outdoors(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    outside = TravelSample(15, 1429, 1429, (.512, .409), (.503538, .426141), (3470.8, 2314.6), 0,
+                           QuestState.ACTIVE, TravelFlags.OUTDOORS, 1, forever_step=ForeverStep.TRAVEL)
+    assert run.forever_building_mode(ctx, outside) == ("abbey", "exit")
+    assert run.forever_building_mode(ctx, replace(outside, position=(.53, .41))) is None
+    run.forever_building_complete.add((15, QuestState.ACTIVE, "abbey_trainer"))
+    assert run.forever_building_mode(ctx, outside) is None
+
+
+def test_forever_gear_lua():
+    lua = pytest.importorskip("lupa.lua51").LuaRuntime()
+    lua.execute('dofile("tests/lua/forever_gear.lua")')
+
+
+def test_forever_equips_at_rest_and_resumes_the_quest(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    nav = TravelSample(60, 1429, 1429, (.42, .66), (.4, .67), (3470.8, 2314.6), 0,
+                       QuestState.ACTIVE, TravelFlags.KEYS_VERIFIED, 1, addon_build=328,
+                       forever_step=ForeverStep.EQUIP, forever_value=6)
+    run.set_travel_keys(ctx, frozenset({"w"}))
+    assert run.maintain_forever_character(ctx, 100, nav, 0, Dialogue.CLOSED)
+    assert ctx.input.count("key_up", "w") == 1
+    assert ctx.input.count("key_down", "f4") == 1
+    wait = replace(nav, sequence=2, forever_step=ForeverStep.EQUIP_WAIT)
+    assert run.maintain_forever_character(ctx, 102, wait, 0, Dialogue.CLOSED)
+    done = replace(nav, sequence=3, forever_step=ForeverStep.EQUIPPED)
+    assert run.maintain_forever_character(ctx, 104, done, 0, Dialogue.CLOSED)
+    assert ctx.input.count("key_down", "f4") == 1
+    assert not run.maintain_forever_character(ctx, 106, replace(nav, sequence=4, forever_step=ForeverStep.NONE),
+                                              0, Dialogue.CLOSED)
+
+
+def test_forever_repair_interacts_only_with_verified_npc_and_bounds_retries(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    flags = TravelFlags.KEYS_VERIFIED | TravelFlags.OUTDOORS
+    task = TaskFlags.PREPARED | TaskFlags.NPC_SELECTED | TaskFlags.NPC_RANGE_KNOWN | TaskFlags.NPC_WITHIN_5_YARDS
+    nav = TravelSample(60, 1429, 1429, (.417, .6586), (.417, .6586), (3470.8, 2314.6), 0,
+                       QuestState.READY, flags, 1, addon_build=328, task=task,
+                       forever_step=ForeverStep.REPAIR_TRAVEL, forever_value=2046, interact_verified=True)
+    assert run.maintain_forever_character(ctx, 100, replace(nav, interact_verified=False), 0, Dialogue.CLOSED)
+    assert ctx.input.count("key_down", "f") == 0
+    for i in range(4):
+        assert run.maintain_forever_character(ctx, 102 + 2 * i, replace(nav, sequence=i + 2), 0, Dialogue.CLOSED)
+    assert ctx.input.count("key_down", "f") == 3
+    assert ctx.input.count("key_down", "f4") == 1
+    merchant = replace(nav, sequence=6, forever_step=ForeverStep.REPAIR, forever_value=35)
+    assert run.maintain_forever_character(ctx, 110, merchant, 0, Dialogue.CLOSED)
+    assert ctx.input.count("key_down", "f4") == 2
+    assert run.maintain_forever_character(ctx, 112, replace(merchant, sequence=7, forever_step=ForeverStep.REPAIRED),
+                                          0, Dialogue.CLOSED)
+    assert ctx.input.count("key_down", "f4") == 2
+
+
+def test_forever_repair_leaves_an_indoor_objective_before_entering_the_smithy(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    ctx.cfg.nav3d.forever_fargodeep_mesh = "mine-mesh"
+    ctx.cfg.nav3d.forever_fargodeep_mesh_id = "mine"
+    ctx.cfg.nav3d.forever_goldshire_mesh_id = "town"
+    ctx.cfg.nav3d.forever_goldshire_mesh = "town-mesh"
+    repair = TravelSample(62, 1429, 1429, (.417, .6586), quest.FARGODEEP_SOUTH_ENTRY, (3470.8, 2314.6), 0,
+                          QuestState.ACTIVE, TravelFlags(0), 1,
+                          forever_step=ForeverStep.REPAIR_TRAVEL, forever_value=2046)
+    assert run.forever_building_mode(ctx, repair) == ("fargodeep", "exit")
+    near_smithy = replace(repair, position=quest.GOLDSHIRE_SMITHY_APPROACH, flags=TravelFlags.OUTDOORS)
+    assert run.forever_building_mode(ctx, near_smithy) == ("goldshire", "enter")
+    run.forever_building_segment = (62, QuestState.ACTIVE, "goldshire_repair_enter", "enter")
+    assert run.forever_building_mode(ctx, replace(near_smithy, position=repair.destination)) == ("goldshire", "enter")
+
+
+def test_forever_corpse_route_uses_verified_ghost_walking_and_current_map(tmp_path, monkeypatch):
+    from bot.perception.nav3d_channel import Nav3DSample
+
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    corpse = (.482893, .292278)
+    ghost = RecoverySample(LifeState.GHOST, corpse=corpse, corpse_source=CorpseSource.CURRENT_MAP,
+                           walk_verified=True, facing=0.)
+    nav = TravelSample(21, 1429, 1429, (.4896, .2776), (.496298, .421785), (3470.8, 2314.6), 0,
+                       QuestState.ACTIVE, TravelFlags.OUTDOORS, 1, recovery=ghost)
+    run.nav3d_sample = Nav3DSample(1, 0, 70959, 1429, (187.2, -8915.8), 0., 0.,
+                                   21, int(QuestState.ACTIVE), None, None, False, False, False, int(nav.flags))
+    calls = []
+    monkeypatch.setattr(run, "approach_forever_building",
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or True)
+    assert run.forever_corpse_route(ctx, 100, nav, corpse, 0.)
+    args, kwargs = calls[0]
+    assert args[2].destination == corpse and args[2].flags & TravelFlags.KEYS_VERIFIED
+    pose = kwargs["corpse_pose"]
+    assert pose.grounded and pose.bindings_verified and pose.goal_xy == pytest.approx((140.674, -8616.04), abs=.08)
+    assert run.forever_corpse_route(ctx, 100.2, replace(nav, position=(.49627, .42179)), corpse, 0.)
+    assert calls[-1][1]["corpse_pose"].goal_xy == pose.goal_xy
+    assert not run.forever_corpse_route(ctx, 100, replace(nav, recovery=replace(ghost, walk_verified=False)), corpse, 0.)
+
+
+def test_forever_echo_ridge_uses_cave_mesh_only_for_the_matching_objective(tmp_path, monkeypatch):
+    from bot.core.config import Nav3DConfig
+
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    ctx.cfg.nav3d = Nav3DConfig(forever_echo_ridge_mesh="local-mesh", forever_echo_ridge_mesh_id="digest")
+    outside = TravelSample(21, 1429, 1429, (.489628, .277552), (.48, .36), (3470.8, 2314.6), 0,
+                           QuestState.ACTIVE, TravelFlags.OUTDOORS, 1)
+    assert run.forever_building_mode(ctx, outside) is None
+    entrance = replace(outside, position=quest.ECHO_RIDGE_EXTERIOR)
+    assert run.forever_building_mode(ctx, entrance) == ("echo_ridge", "enter")
+    assert run.forever_building_mode(ctx, replace(entrance, quest_id=15)) is None
+    assert run.forever_building_mode(ctx, replace(entrance, destination=(.513, .35))) is None
+
+    inside = replace(outside, position=quest.ECHO_RIDGE_HUNT)
+    run.forever_building_complete.add((21, QuestState.ACTIVE, "echo_ridge"))
+    assert run.forever_building_mode(ctx, inside) is None
+    ready = replace(inside, phase=QuestState.READY, destination=(.489, .416))
+    assert run.forever_building_mode(ctx, ready) == ("echo_ridge", "exit")
+    run.forever_building_segment = (21, QuestState.READY, "echo_ridge", "exit")
+    assert run.forever_building_mode(ctx, replace(ready, position=quest.ECHO_RIDGE_EXTERIOR)) == ("echo_ridge", "exit")
+    run.forever_building_complete.add((21, QuestState.READY, "echo_ridge"))
+    assert run.forever_building_mode(ctx, ready) is None
+    abbey = replace(ready, position=quest.NORTHSHIRE_ABBEY_ENTRY)
+    assert run.forever_building_mode(ctx, abbey) == ("abbey", "enter")
+
+
+@pytest.mark.parametrize("roof_only", [False, True])
+def test_forever_handoff_to_mesh_requires_ground_floor_route(tmp_path, monkeypatch, roof_only):
+    from bot.nav3d import NavigationError
+
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    nav = TravelSample(7, 1429, 1429, (.489, .416), (.489342, .400187), (3470.8, 2314.6), 0,
+                       QuestState.READY, TravelFlags.OUTDOORS | TravelFlags.KEYS_VERIFIED, 1)
+    run.forever_building_segment = (7, QuestState.READY, "abbey", "enter")
+    rejoin_steps = []
+    run.forever_entry_trip = SimpleNamespace(
+        step=lambda *_args, **_kwargs: rejoin_steps.append(True) or TravelCommand())
+    run.nav3d_sample = SimpleNamespace(position_xy=(162.2, -8870.1), goal_xy=(161.0, -8906.7),
+        goal_world_id=0, grounded=True, bindings_verified=True, sequence=1, world_id=0, ui_map_id=1429,
+        quest_id=7, phase=3, client_build=70959)
+    mesh_poses = []
+
+    def plan(_):
+        if roof_only:
+            raise NavigationError("no_complete_path")
+
+    run.forever_entry = SimpleNamespace(sequence=None,
+        tracker=SimpleNamespace(edge_tolerance=.14,
+            candidates=lambda *_args, **_kwargs: [(162.2, -8870.1, 80.2)],
+            mesh=SimpleNamespace(frame=None, plan=plan)),
+        step=lambda _now, sample, _nav, **_kwargs: mesh_poses.append(sample.position_xy) or TravelCommand())
+    run.set_travel_keys(ctx, frozenset({"w"}))
+    assert run.approach_forever_building(ctx, 10, nav, 0)
+    if roof_only:
+        assert rejoin_steps == [True] and not mesh_poses and run.forever_entry_trip is not None
+    else:
+        assert mesh_poses == [(162.2, -8870.1)] and not rejoin_steps and run.forever_entry_trip is None
+    assert not run.travel_keys
+
+
+def test_forever_abbey_pickup_rejoins_lower_ground_before_trying_the_indoor_pin(tmp_path, monkeypatch):
+    from bot.nav3d import NavigationError
+
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    goal_xy = (161.8, -8902.34)
+    position_xy = (143., -8917.6)
+    lower_xy = (143., -8919.1)
+    nav = TravelSample(96627, 1429, 1429, (.489, .416), (.48357, .42257), (3470.8, 2314.6), 0,
+                       QuestState.PENDING, TravelFlags.OUTDOORS | TravelFlags.KEYS_VERIFIED, 1)
+    run.forever_building_segment = (96627, QuestState.PENDING, "abbey", "enter")
+    run.nav3d_sample = SimpleNamespace(position_xy=position_xy, goal_xy=goal_xy, goal_world_id=0,
+        grounded=True, bindings_verified=True, sequence=1, world_id=0, ui_map_id=1429,
+        quest_id=96627, phase=int(QuestState.PENDING), client_build=70959)
+    heights = {position_xy: 98.41, lower_xy: 81.03, goal_xy: 82.02}
+    mesh_steps = []
+
+    def plan(query):
+        if query.start[2] > 90:
+            raise NavigationError("no_complete_path")
+
+    run.forever_entry = SimpleNamespace(sequence=None,
+        tracker=SimpleNamespace(edge_tolerance=.14,
+            candidates=lambda point, **_: [(*point, heights[point])],
+            mesh=SimpleNamespace(frame=None, plan=plan)),
+        step=lambda _now, sample, _nav, **_: mesh_steps.append(sample.position_xy) or TravelCommand())
+
+    assert run.approach_forever_building(ctx, 10, nav, 0)
+    lower_map = (nav.position[0], nav.position[1] + 1.5 / nav.world_size[1])
+    assert run.forever_entry_trip.destination == pytest.approx(lower_map)
+    assert not mesh_steps
+    run.nav3d_sample.position_xy = lower_xy
+    assert run.approach_forever_building(ctx, 11, replace(nav, position=lower_map), 0)
+    assert run.forever_entry_trip is None and mesh_steps == [lower_xy]
+
+
+def test_goldshire_verified_npc_range_can_retry_from_connected_ground(tmp_path, monkeypatch):
+    from bot.nav3d import NavMesh
+    from bot.nav3d import runtime as nav3d_runtime
+    from bot.nav3d.follower import WorldRouteFollower
+
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    ctx.cfg.game_version = "1.60.1"
+    ctx.cfg.nav3d.forever_goldshire_mesh_id = "verified-mesh"
+    nav = TravelSample(54, 1429, 1429, (.422, .659), (.42285, .65871), (3470.8, 2314.6), 0,
+                       QuestState.READY, TravelFlags.OUTDOORS | TravelFlags.KEYS_VERIFIED, 23)
+    start_xy = (-67.73, -9464.19)
+    goal_xy = quest.GOLDSHIRE_DUGHAN_APPROACH_XY
+    run.nav3d_sample = SimpleNamespace(position_xy=start_xy, grounded=True, bindings_verified=True,
+        sequence=23, quest_id=54, ui_map_id=1429, world_id=0, client_build=70959)
+
+    def plan(query):
+        return SimpleNamespace(points=(query.start, query.goal), length=4.7)
+
+    monkeypatch.setattr(NavMesh, "load", lambda _: SimpleNamespace(mesh_id="verified-mesh", frame=None, plan=plan))
+    monkeypatch.setattr(nav3d_runtime, "SurfaceTracker", lambda _: SimpleNamespace(candidates=lambda xy: [(*xy, 56.)]))
+    monkeypatch.setattr(WorldRouteFollower, "validate_route", lambda _: None)
+
+    assert not run.start_goldshire_npc_reposition(ctx, 10, replace(nav, sequence=22))
+    assert run.start_goldshire_npc_reposition(ctx, 10, nav)
+    assert run.goldshire_npc_trip.destination[0] < nav.position[0]
+    assert not run.start_goldshire_npc_reposition(ctx, 11, nav)
+
+
+def test_forever_receipt_is_logged_even_when_not_driving_progression(tmp_path, monkeypatch):
+    run, ctx, tick = make_run(tmp_path, monkeypatch)
+    run.auto_route = True
+    ctx.cfg.game_version = "1.60.1"
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0, QuestState.ACTIVE,
+                       TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED, addon_build=297,
+                       forever_step=ForeverStep.SPELL_LEARNED, forever_value=1494)
+    monkeypatch.setattr(quest, "decode_travel", lambda _: replace(nav, sequence=ctx.frame_sequence()))
+    events = []
+    ctx.log_event = lambda name, data: events.append((name, data))
+    tick(QuestState.ACTIVE)
+    tick(QuestState.ACTIVE)
+    assert [data for name, data in events if name == "forever_progression_receipt"] == [
+        {"step": "SPELL_LEARNED", "value": 1494, "id": 12345, "sequence": 1}]
+
+
+def test_consumable_recovery_waits_for_item_receipt_and_rest_cancels_in_combat(tmp_path, monkeypatch):
+    run, ctx, _ = make_run(tmp_path, monkeypatch)
+    nav = TravelSample(21, 1429, 1429, (.48, .3), (.48, .3), (1000, 1000), 0, QuestState.ACTIVE,
+                       TravelFlags.KEYS_VERIFIED, 1, recovery=RecoverySample(LifeState.ALIVE),
+                       vitals=PlayerVitals(54, 100, SupplyAction.FOOD, 117))
+    released, events = [], []
+    ctx.log_event = lambda kind, data: events.append((kind, data))
+    tick = run.consumables.tick
+    assert tick(ctx, 100, nav, in_combat=False, can_start=True, release=lambda: released.append(True))
+    assert ctx.input.count("key_down", "f3") == 1 and released
+    assert tick(ctx, 101, nav, in_combat=False, can_start=True, release=lambda: None)
+    assert not any(kind == "quest_consumable_receipt" for kind, _ in events)
+    eaten = replace(nav, vitals=replace(nav.vitals, result="consumed"))
+    assert tick(ctx, 102, eaten, in_combat=False, can_start=True, release=lambda: None)
+    assert any(kind == "quest_consumable_receipt" for kind, _ in events)
+    assert not tick(ctx, 103, eaten, in_combat=True, can_start=True, release=lambda: None)
+    blocked = replace(nav, vitals=PlayerVitals(None, 80, SupplyAction.POTION, 118))
+    assert not tick(ctx, 109, blocked, in_combat=True, can_start=True, release=lambda: None)
+    injured = replace(blocked, vitals=replace(blocked.vitals, health=30))
+    assert tick(ctx, 110, injured, in_combat=True, can_start=True, release=lambda: None)
+    assert ctx.input.count("key_down", "f1") == 1
+    assert not tick(ctx, 111, injured, in_combat=True, can_start=True, release=lambda: None)
+    assert ctx.input.count("key_down", "f1") == 1
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_forever_waits_for_verified_reward_without_guessing_a_slot(tmp_path, monkeypatch, confirmed):
+    run, ctx, tick = make_run(tmp_path, monkeypatch)
+    run.auto_route = True
+    ctx.cfg.game_version = "1.60.1"
+    nav = TravelSample(12345, 2248, 2248, (.4, .5), (.4, .5), (1000, 1000), 0, QuestState.READY,
+                       TravelFlags.KEYS_VERIFIED, 1, task=TaskFlags.PREPARED, addon_build=298)
+    monkeypatch.setattr(quest, "decode_travel", lambda _: replace(nav, sequence=ctx.frame_sequence()))
+    tick(QuestState.READY, Dialogue.REWARD_CHOICE, 12345)
+    assert run.OUTCOME is None and ctx.input.count("key_down", "9") == 0
+    if confirmed:
+        tick(QuestState.READY, Dialogue.REWARD, 12345)
+        assert run.OUTCOME is None and ctx.input.count("key_down", "9") == 1
+    else:
+        for _ in range(5):
+            tick(QuestState.READY, Dialogue.REWARD_CHOICE, 12345)
+        assert run.OUTCOME == "stopped:quest_reward_choice_required"
+        assert ctx.input.count("key_down", "9") == 0
 
 
 @pytest.mark.parametrize("corpse_returns", [True, False])
@@ -1673,6 +2464,10 @@ def test_defense_waits_for_landing_then_dismounts_and_retreats_if_attacks_stall(
     ctx.heading = lambda: math.pi
     fight()
     assert ctx.input.count("key_down", "w") == 1
+    run.defense.started_at -= 20
+    nav[0] = replace(base, flags=flags | TravelFlags.FALLING)
+    fight()
+    assert run.OUTCOME is None and not run.travel_keys
     nav[0] = replace(base, flags=TravelFlags.KEYS_VERIFIED, position=(.4, .53))
     tick(QuestState.READY)
     assert run.defense is None and run.OUTCOME is None

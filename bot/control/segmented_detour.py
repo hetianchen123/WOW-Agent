@@ -4,6 +4,7 @@ The artifact remains non-executable. This controller separately leases one pulse
 only after fresh native state, calibration and pose checks. No cloud fallback.
 """
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import json
@@ -61,7 +62,8 @@ def preflight(config,nav=None):
             raise ValueError('segmentation_search_destination_missing')
         if not nav.strafe_verified:
             raise ValueError('segmentation_strafe_bindings_required')
-        if not nav.calibration_orbit_available:
+        if (not nav.calibration_orbit_available
+                and not (nav.overhead_camera_available and nav.flags & TravelFlags.KEYS_VERIFIED)):
             raise ValueError('segmentation_orbit_binding_required')
     if not (DATA_DIR/'segmentation/.venv/bin/python').is_file():
         raise ValueError('segmentation_environment_missing')
@@ -69,21 +71,27 @@ def preflight(config,nav=None):
 
 
 class LocalRouteRequest:
-    def __init__(self,image,frame,job):
+    def __init__(self, png, frame, job):
         self.cancelled=Event()
+        job = deepcopy(dict(job, frame=asdict(frame)))
         self.pool=ThreadPoolExecutor(max_workers=1)
-        folder=DATA_DIR/'terrain'/('segmented-'+frame.frame_id)
-        folder.mkdir(parents=True,exist_ok=False)
-        path=folder/'image.png'
-        cv2.imwrite(str(path),cv2.cvtColor(image,cv2.COLOR_RGB2BGR))
-        if hashlib.sha256(path.read_bytes()).hexdigest()!=frame.image_sha256:
-            raise ValueError('segmentation_capture_encoding_mismatch')
-        job=dict(job,frame=asdict(frame))
-        (folder/'request.json').write_text(json.dumps(job,indent=2))
+
         def guard():
             if self.cancelled.is_set():raise ValueError('segmentation_cancelled')
-        self.future=self.pool.submit(lambda:local_worker().inspect([path],target=job,
-            guard=guard,timeout=20)[0])
+
+        def run():
+            guard()
+            if hashlib.sha256(png).hexdigest() != frame.image_sha256:
+                raise ValueError('segmentation_capture_encoding_mismatch')
+            folder = DATA_DIR / 'terrain' / ('segmented-' + frame.frame_id)
+            folder.mkdir(parents=True, exist_ok=False)
+            path = folder / 'image.png'
+            path.write_bytes(png)
+            (folder / 'request.json').write_text(json.dumps(job, indent=2))
+            guard()
+            return local_worker().inspect([path], target=job, guard=guard, timeout=20)[0]
+
+        self.future = self.pool.submit(run)
 
     def poll(self):
         return self.future.result() if self.future.done() else None
@@ -95,19 +103,24 @@ class LocalRouteRequest:
 
 class SegmentedDetour:
     def __init__(self,now,nav,router,convention,config,capture,*,deadline,request_factory=LocalRouteRequest,
-                 goal_mode='npc',ground_trace=None,overview_capture=None,overview_request_factory=None):
-        if goal_mode not in {'npc','building_entry','building_cross','building_search'}:raise ValueError('invalid_goal_mode')
+                 goal_mode='npc',ground_trace=None,overview_capture=None,overview_request_factory=None,
+                 travel_goal=None):
+        if goal_mode not in {'npc','travel','building_entry','building_cross','building_search'}:
+            raise ValueError('invalid_goal_mode')
+        if goal_mode=='travel' and travel_goal is None:raise ValueError('auto_travel_destination_missing')
         self.goal_mode=goal_mode
+        self.travel_goal=travel_goal
         self.crossing_baseline=None
         self.crossing_origin=None
         self.crossing_confirmed=None
         self.building_memory=BuildingRouteMemory(nav.world_size)
         self.passages=self.building_memory.passages
         self.return_passage=None;self.return_look=None;self.return_looked=set()
-        self.distance_limit=8. if goal_mode=='npc' else 40.
-        self.pulse_limit=32 if goal_mode=='npc' else 160
-        self.call_limit=16 if goal_mode=='npc' else 48
+        self.distance_limit=40. if self.building else 8.
+        self.pulse_limit=160 if self.building else 32
+        self.call_limit=48 if self.building else 16
         self.explored=[nav.position]
+        self.origin=nav.position
         self.progress_at=now
         self.floor_id=preflight(config,nav)
         self.config,self.capture,self.router,self.convention=config,capture,router,convention
@@ -116,7 +129,7 @@ class SegmentedDetour:
         self.identity=(nav.quest_id,nav.map_id,nav.phase,nav.objective_index,nav.objective_target,
                        nav.world_size,nav.destination,nav.destination_map)
         self.overhead=(OverheadObservation(reuse_current=goal_mode!='npc')
-                       if goal_mode=='npc' or nav.camera and nav.camera.view==4 else FacadeObservation())
+                       if not self.building or nav.camera and nav.camera.view==4 else FacadeObservation())
         self.request=self.pending=self.anchor=self.plan=self.pulse=None
         self.sequence=None;self.sequence_at=now
         self.last_turn=now-1;self.turn_sequence=None
@@ -163,6 +176,10 @@ class SegmentedDetour:
         self.visual_ui_hidden=nav.visual_ui_hidden
         self.stair=None
         self.calibration_coupled=False
+
+    @property
+    def building(self):
+        return self.goal_mode.startswith('building_')
 
     def seed_building_observation(self, scene, observation=None):
         """Retain the pose and exposure time of an obstructed facade or threshold."""
@@ -388,7 +405,7 @@ class SegmentedDetour:
     def step(self,ctx,now,nav,heading):
         if self.closed:return TravelCommand(outcome='segmentation_closed')
         if now>=self.deadline:return self.deadline_result(ctx,now,nav)
-        if self.goal_mode!='npc' and now-self.progress_at>=60:
+        if self.building and now-self.progress_at>=60:
             ctx.log_event('quest_building_no_progress',dict(seconds=now-self.progress_at,
                 calls=self.calls,pulses=self.pulses,passages=len(self.passages)))
             return TravelCommand(outcome='building_no_progress_budget')
@@ -404,6 +421,7 @@ class SegmentedDetour:
                 'movement_bindings_lost' if not nav.flags & TravelFlags.KEYS_VERIFIED else
                 'character_busy' if busy else
                 'character_not_alive' if nav.recovery and nav.recovery.life!=LifeState.ALIVE else
+                'outdoor_surface_lost' if self.goal_mode=='travel' and not nav.flags & TravelFlags.OUTDOORS else
                 'npc_selection_lost' if self.goal_mode=='npc' and not nav.task & TaskFlags.NPC_SELECTED else
                 'heading_missing' if heading is None else
                 'heading_stale' if ctx.heading_age()>.55 else None)
@@ -442,12 +460,13 @@ class SegmentedDetour:
             self.building_recovery=None;self.initial_building_reframe=None
             self.visual_ui_hidden=nav.visual_ui_hidden
             self.overhead=(OverheadObservation(reuse_current=True)
-                if self.goal_mode=='npc' or nav.camera.view==4 else FacadeObservation())
+                if not self.building or nav.camera.view==4 else FacadeObservation())
             self.recapture_not_before=now+.5
             ctx.log_event('quest_segmented_ui_changed',dict(previous=old,current=nav.visual_ui_hidden,
                 old_geometry_discarded=True,requires_new_observation=True))
             return TravelCommand()  # A pending movement receipt is consumed first.
-        if nav.task & TaskFlags.NPC_SELECTED and nav.task & TaskFlags.NPC_RANGE_KNOWN and nav.task & TaskFlags.NPC_WITHIN_5_YARDS:
+        if (self.goal_mode!='travel' and nav.task & TaskFlags.NPC_SELECTED
+                and nav.task & TaskFlags.NPC_RANGE_KNOWN and nav.task & TaskFlags.NPC_WITHIN_5_YARDS):
             self.close();return TravelCommand(outcome='detoured' if self.goal_mode=='npc' else 'building_entered')
         if self.stair and self.stair.pulse:
             old_total=self.stair.total
@@ -644,7 +663,7 @@ class SegmentedDetour:
             self.calibration_pulse=None;self.anchor=None
             self.total+=moved
             if len([p for p in self.motion_history if p['moved']<.15])>=2:
-                if self.goal_mode!='npc':
+                if self.building:
                     return self.recover_building_view(ctx,now,nav,'auto_calibration_repeated_collision',heading)
                 return TravelCommand(outcome='auto_calibration_repeated_collision')
             return TravelCommand()
@@ -679,15 +698,27 @@ class SegmentedDetour:
             if search_goal and self.router.distance(nav.position,search_goal)<.5:
                 self.visited.append(tuple(search_goal))
             self.pulse=None
-            ctx.log_event('quest_segmented_movement_feedback',dict(position=nav.position,yards=moved,progress=progress))
-            if moved>1.25:return TravelCommand(outcome='probe_pose_changed')
+            observed_at = time.monotonic()
+
+            def log_feedback(status):
+                ctx.log_event('quest_segmented_movement_feedback', dict(
+                    frame_id=reference.frame_id if reference else None, before_sequence=seq,
+                    after_sequence=nav.sequence, position=nav.position, yards=moved, progress=progress,
+                    status=status, pulse_to_feedback_ms=round((now-at)*1000, 2),
+                    capture_to_feedback_ms=round((observed_at-reference.captured_at)*1000, 2) if reference else None))
+
+            if moved>1.25:
+                log_feedback('discontinuous')
+                return TravelCommand(outcome='probe_pose_changed')
             if moved<(.03 if self.window else .1) or progress<(.02 if self.window else .03):
+                log_feedback('insufficient_progress')
                 self.plan=None;self.window=None
                 self.blocked.append(target)
                 if len(self.blocked)>=2:return TravelCommand(outcome='segmentation_repeated_collision')
             else:
                 dx,dy=[(b-a)*s for a,b,s in zip(origin,nav.position,nav.world_size)]
                 if abs(heading_error(direction,compass_from_delta(dx,dy,self.convention)))>math.radians(35):
+                    log_feedback('wrong_direction')
                     return TravelCommand(outcome='probe_pose_changed')
                 self.total+=moved
                 self.record_position(now,nav.position)
@@ -695,8 +726,10 @@ class SegmentedDetour:
                 if self.window:
                     try:self.window.feedback(origin,nav.position)
                     except ValueError as exc:
+                        log_feedback(str(exc))
                         self.plan=None;self.window=None
                         return TravelCommand(outcome=str(exc))
+                log_feedback('verified')
                 if surface_changed:
                     # A bounded, on-route step onto another surface is not a
                     # licence to extrapolate the old plane. Keep its movement
@@ -712,6 +745,14 @@ class SegmentedDetour:
                         before_sequence=seq,after_sequence=nav.sequence,
                         requires_new_measurement=True,level_id=None))
                     return TravelCommand()
+                if (self.goal_mode=='travel' and search_goal
+                        and self.router.distance(nav.position,search_goal)<=.25
+                        and self.router.distance(self.origin,self.travel_goal)
+                            - self.router.distance(nav.position,self.travel_goal)>=.5):
+                    ctx.log_event('quest_segmented_travel_frontier_observed',dict(
+                        position=nav.position,goal=self.travel_goal,source_frame=self.plan['frame_id'],
+                        sequence=nav.sequence,total_yards=self.total))
+                    return TravelCommand(outcome='detoured')
                 if (self.goal_mode=='building_entry' and self.full_window_measurement
                         and nav.camera.view==4 and nav.camera_restore_available
                         and self.plan.get('automatic_goal',{}).get('basis')=='local_observation_frontier'
@@ -786,7 +827,7 @@ class SegmentedDetour:
             if not self.plan and abs(heading_error(angle,heading))>math.radians(1):
                 return TravelCommand(outcome='probe_pose_changed')
             if now-stamp>15:
-                if self.goal_mode!='npc' and self.request and self.expired_building_recaptures==0:
+                if self.building and self.request and self.expired_building_recaptures==0:
                     self.expired_building_recaptures+=1
                     self.measure_after_facade(ctx,now,nav,'segmentation_frame_expired')
                     return TravelCommand()
@@ -802,7 +843,7 @@ class SegmentedDetour:
                 # Frontal building measurements use verified turn keys and
                 # still require image registration to prove camera rotation.
                 if (self.orbit_keyboard_preferred or nav.camera.view!=4
-                        or self.goal_mode!='npc' and not nav.calibration_orbit_available):
+                        or not nav.calibration_orbit_available):
                     self.orbit=CalibrationOrbit(now,nav,heading,action['yaw_pixels'],self.convention,keyboard=True)
                     return self.orbit.step(ctx,now,nav,heading)
                 self.orbit_request=(now,nav,heading,action['yaw_pixels'])
@@ -856,7 +897,8 @@ class SegmentedDetour:
             self.pulse_feedback_sequence=None;self.pulse_feedback_samples=0
             self.pulse_hold_s=duration
             ctx.log_event('quest_segmented_movement_issued',dict(target=target,hold_s=duration,
-                         frame_id=self.plan['frame_id']))
+                         frame_id=self.plan['frame_id'],before_sequence=nav.sequence,
+                         capture_to_issue_ms=round((time.monotonic()-self.anchor[3].captured_at)*1000, 2)))
             return TravelCommand(tap='w',hold_s=duration,precise=True)
         if self.request:
             try:result=self.request.poll()
@@ -873,10 +915,10 @@ class SegmentedDetour:
                 if result.get('kind') not in allowed:
                     return TravelCommand(outcome='stair_trial_evidence_invalid')
             if result.get('stationary_only') is True:
-                if (self.goal_mode=='npc' or nav.camera.view!=4 or self.stair is not None
+                if (not self.building or nav.camera.view!=4 or self.stair is not None
                         or result.get('kind') not in {'calibration_observe','calibration_orbit'}):
                     return TravelCommand(outcome='auto_calibration_action_invalid')
-            elif self.goal_mode!='npc':
+            elif self.building:
                 scene=result.get('building_scene')
                 layout=scene.get('layout',{}) if isinstance(scene,dict) else {}
                 goal=result.get('automatic_goal',{})
@@ -929,7 +971,7 @@ class SegmentedDetour:
                     scene=self.building_scene,ground_measurement=result.get('ground_measurement'),
                     calibration_ready=result.get('kind')=='route'))
             if result.get('kind') in {'stair_probe','stair_surface_candidate'}:
-                if (self.stair is None or self.goal_mode=='npc'
+                if (self.stair is None or not self.building
                         or result.get('executable') is not False or result.get('requires_fresh_feedback') is not True):
                     return TravelCommand(outcome='stair_trial_evidence_invalid')
                 if self.distance_limit-self.total<.6 or self.pulses>=self.pulse_limit:
@@ -954,7 +996,7 @@ class SegmentedDetour:
                     self.anchor=None;self.recapture_not_before=now+.4
                 return command
             if result.get('kind')=='building_reobserve':
-                if (self.goal_mode=='npc' or result.get('executable') is not False
+                if (not self.building or result.get('executable') is not False
                         or result.get('requires_fresh_feedback') is not True
                         or result.get('reason') not in BUILDING_REOBSERVE):
                     return TravelCommand(outcome='building_observation_invalid')
@@ -995,11 +1037,12 @@ class SegmentedDetour:
             try:
                 window=RouteWindow(result,nav.world_size,self.anchor[2]) if 'execution_window' in result else None
             except (KeyError,TypeError,ValueError):return TravelCommand(outcome='segmentation_window_invalid')
+            goal_kind = ('building_entry_region' if self.building else
+                         'automatic_travel_frontier' if self.goal_mode=='travel' else 'automatic_npc_search_region')
             if (result.get('executable') is not False or result.get('requires_fresh_feedback') is not True
                     or result.get('calibration_source')!='automatic_native_motion'
                     or evidence.get('fit_movements',0)<2 or evidence.get('validation_movements',0)<2
-                    or result.get('automatic_goal',{}).get('goal_kind')!=('automatic_npc_search_region'
-                        if self.goal_mode=='npc' else 'building_entry_region')
+                    or result.get('automatic_goal',{}).get('goal_kind')!=goal_kind
                     or evidence.get('current_frame')!=self.anchor[3].frame_id
                     or not height_matches([0.,0.],0.,evidence.get('surface_height'))
                     or type(bound) not in (int,float) or not 0<=bound<=.35
@@ -1026,13 +1069,18 @@ class SegmentedDetour:
                             for p in [goal_position,*points])):
                 return self.reached_threshold(ctx,nav,result['frame_id'],'measured_current_position')
             self.plan=result;self.window=window
+            diagnostics = result.get('model_diagnostics', {})
             ctx.log_event('quest_segmented_plan_ready',dict(frame_id=result['frame_id'],
                 cache=result.get('calibration_cache_status'),bound_yards=bound,
                 prefix_yards=budget,window=bool(window),
+                capture_to_plan_ms=round((time.monotonic()-self.anchor[3].captured_at)*1000, 2),
+                sam_device=diagnostics.get('sam_device'),sam_fallback=diagnostics.get('sam_fallback'),
+                model_timings=result.get('model_timings'),
                 observation_s=round(now-self.anchor[2],3),remaining_s=round(self.deadline-now,3)))
             return TravelCommand()
         if self.pending is not None:
-            image=self.pending;old,angle,stamp,frame=self.anchor
+            exposure, capture_ms, encoding_ms = self.pending
+            old,angle,stamp,frame=self.anchor
             if nav.sequence==old.sequence:return TravelCommand()
             if now-stamp>.25:return TravelCommand(outcome='segmentation_capture_unsynchronized')
             job=dict(automatic=True,session_id=self.session_id,models=str(ROOT/self.config.models),
@@ -1040,7 +1088,8 @@ class SegmentedDetour:
                      quest_id=nav.quest_id,phase=nav.phase.name,objective_index=nav.objective_index,
                      convention=self.convention,blocked=self.blocked,visited=self.visited,
                      motion_history=self.motion_history,strafe_verified=nav.strafe_verified,
-                     destination=nav.destination,goal_mode=self.goal_mode,passages=self.building_memory.incident(),
+                     destination=self.travel_goal if self.goal_mode=='travel' else nav.destination,
+                     goal_mode=self.goal_mode,passages=self.building_memory.incident(),
                      navigation_context=self.building_memory.snapshot(),return_passage_id=self.return_passage,
                      crossing_origin=self.crossing_origin,
                      native_outdoors=bool(nav.flags & TravelFlags.OUTDOORS),
@@ -1055,8 +1104,11 @@ class SegmentedDetour:
                 job['blocked_probe_keys']=[key for key,offset in
                     (('w',0),('s',math.pi),('q',left),('e',-left))
                     if abs(heading_error(heading+offset,self.rear_contact[1]))<math.radians(45)]
-            self.request=self.request_factory(image,frame,job);self.pending=None;self.calls+=1
-            ctx.log_event('quest_segmented_observation',dict(frame_id=frame.frame_id,call=self.calls))
+            self.request=self.request_factory(exposure,frame,job);self.pending=None;self.calls+=1
+            ctx.log_event('quest_segmented_observation',dict(frame_id=frame.frame_id,call=self.calls,
+                capture_ms=capture_ms,encoding_ms=encoding_ms,
+                capture_to_submit_ms=round((time.monotonic()-frame.captured_at)*1000, 2),
+                captured_sequence=old.sequence,confirmed_sequence=nav.sequence))
             return TravelCommand()
         if now<self.recapture_not_before:return TravelCommand()
         capture_started=time.monotonic()
@@ -1067,9 +1119,20 @@ class SegmentedDetour:
                 image=cv2.resize(image,(1012,round(height*1012/width)),interpolation=cv2.INTER_AREA)
         else:
             image=self.capture(ctx.capture)
-        captured_at=(capture_started+time.monotonic())/2
-        digest=hashlib.sha256(cv2.imencode('.png',cv2.cvtColor(image,cv2.COLOR_RGB2BGR))[1].tobytes()).hexdigest()
+        capture_finished = time.monotonic()
+        captured_at=(capture_started+capture_finished)/2
+        encoded, buffer = cv2.imencode('.png', cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        if not encoded:
+            return TravelCommand(outcome='segmentation_capture_encoding_failed')
+        png = buffer.tobytes()
+        digest = hashlib.sha256(png).hexdigest()
+        encoding_finished = time.monotonic()
         frame=ProjectionFrame(uuid4().hex,digest,(image.shape[1],image.shape[0]),nav.map_id,self.floor_id,
             nav.world_size,nav.position,None,nav.height,heading,(nav.camera.view,nav.camera.zoom,nav.camera_epoch),captured_at)
-        self.anchor=(nav,heading,now,frame);self.pending=image
+        self.anchor=(nav,heading,now,frame)
+        # The local worker saves the exact bytes hashed at exposure. Injected
+        # planners can still consume the original RGB array in memory.
+        exposure = png if self.request_factory is LocalRouteRequest else image
+        self.pending = (exposure, round((capture_finished-capture_started)*1000, 2),
+                        round((encoding_finished-capture_finished)*1000, 2))
         return TravelCommand()

@@ -32,7 +32,7 @@ Recast 固定源码提交 `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`。收录的
 | 无外部依赖的可旋转 HTML 预览 | 已生成；浏览器工具本地 URL 策略阻止实屏验看，未声称交互 UI 实测通过 |
 | 当前国服 CASC 自动提取、碰撞标记解析、完整摆放 | **尚未实现**；不是只给安装目录就能运行 |
 | 原生 XYZ／世界地图／相位遥测与当前场景对齐 | **待接入与实机验证**；当前二维任务色条不提供完整契约 |
-| 跨区分块流式导航、任务相位自动选择、门状态识别 | 待实现 |
+| 同一场景的分块网格及跨块查询 | CLI 已实现，合成边界与无限服真实资产离线通过。区域流式缓存、任务相位自动选择和门状态识别待实现。 |
 | 电梯／传送门／船／跳跃等特殊连接 | 待实现；当前无连接时返回不可达 |
 | 飞行、游泳、坐骑不同体型、战斗避险 | 未纳入 v1；只处理一个地面角色配置 |
 
@@ -55,6 +55,7 @@ Recast 固定源码提交 `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`。收录的
 
 ```sh
 .venv/bin/python -m bot.nav3d_cli build path/to/scene.json data/nav3d/my-region
+.venv/bin/python -m bot.nav3d_cli build path/to/scene.json data/nav3d/my-region-tiled --tile-cells 160
 .venv/bin/python -m bot.nav3d_cli query data/nav3d/my-region path/to/query.json --output data/nav3d/my-path.json
 .venv/bin/python -m bot.nav3d_cli preview path/to/scene.json data/nav3d/my-region --path data/nav3d/my-path.json --output data/nav3d/my-preview.html
 ```
@@ -120,9 +121,9 @@ Recast 固定源码提交 `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`。收录的
 
 构建执行体素化、表面过滤、半径侵蚀、区域划分、多边形与细节高度生成。查询保留多边形边界并按细节表面采样高度，不把楼梯路径压成空间直线。边界浮点误差只允许在原多边形做不超过 0.001 码的水平校正，不搜另一层补高度。
 
-每张图是一个局部区域，最多四百万水平体素格、两百万顶点／三角面。大世界坐标先平移到局部原点再转 float32；返回路点恢复世界坐标。大区域须先拆分，本版没有跨块拼接。
+单块模式最多四百万水平体素格。`build` 和 `extract-client` 接受 `--tile-cells`，每边可取 32–512 个体素格。分块模式共用原点和高度基准，每块带角色半径所需的邻接余量，查询时由 Detour 连接合法边界。默认体素 0.2 码时，160 格等于 32 码。构建最多接受 1024 块及两百万顶点或三角面，`extract-client` 选择分块后可处理每边至多 800 码的区域。大世界坐标先平移到局部原点，再转 float32，返回路点恢复世界坐标。 [Recast 分块示例](https://github.com/recastnavigation/recastnavigation/blob/6dc1667f580357e8a2154c28b7867bea7e8ad3a7/RecastDemo/Source/Sample_TileMesh.cpp)
 
-缓存保存资源 SHA-256、变换、几何与网格摘要、角色参数、世界身份、后端源码版本。二进制仅作本机生成缓存；后端源码／架构变化必须重建，不作为第三方任意二进制导入格式。
+缓存保存资源 SHA-256、变换、几何与网格摘要、角色参数、世界身份、后端源码版本。当前后端支持已核对的旧版单块原始 Detour 与同格式分块缓存，并核对二进制摘要和架构。分块缓存记录 `tile_cells`，首次加载后复用静态网格和查询器。含临时障碍的查询使用独立网格实例修改多边形标志，查询完成即释放。二进制用于本机生成缓存。
 
 ## 运行时接入
 
@@ -130,9 +131,39 @@ Recast 固定源码提交 `6dc1667f580357e8a2154c28b7867bea7e8ad3a7`。收录的
 
 要求显式 `alignment_verified=True` 和匹配的网格／动态障碍版本。旧帧释放输入等新帧；超时、失配、异常位移、离地、战斗、取消或连续无进展停止。同向转向至少间隔 0.45 秒、反向至少 0.9 秒，前进为有界短脉冲。
 
+分块静态网格的 `nav3d` 模式同时保留 Detour 多边形路廊。通过支撑面和连续位移核对后，用 `moveAlongSurface` 更新路廊起点，只在附近与原路廊相交的多边形处接续。跟随者偏出路段时可重建同一路廊的剩余路点，保持原目标、转向间隔和原运行预算。操作先释放输入，下一帧再启程。若路廊断开或动态障碍改变，则沿用原有完整重算。 [Detour 路廊参考实现](https://github.com/recastnavigation/recastnavigation/blob/6dc1667f580357e8a2154c28b7867bea7e8ad3a7/DetourCrowd/Source/DetourPathCorridor.cpp)
+
+高频位姿配合分块静态路廊时，持续跟随从最近一次已核对的支撑多边形，沿角色当前朝向做一次短程 Detour `raycast`。预估距离按当前速度和输入回执间隔保留制动空间。前方支撑不足时，先松开前进键并等待延后位移停稳，再按当前航点执行原有有界短按；直道维持前进长按。射线只检查由当前多边形出发的平面通行距离。高度、动态障碍和实际位移继续使用各自回执。 [Detour 查询说明](https://recastnav.com/classdtNavMeshQuery.html) · [Nav2 前向校验参考](https://api.nav2.org/nav2-rolling/html/regulated__pure__pursuit__controller_8cpp_source.html#l00284)
+
+可用 `build --tile-cells 160 --with-clearance` 为分块网格同批生成 `clearance/`，在相同碰撞源上多留一格障碍余量。高频位姿下，6–35 码的持续跟随路线出现 45° 以上转角时，会尝试替换路线中段。两端沿原路线选接点，保留原起终点，用原网格独立复核同层支撑和原路廊的接续。基础网格与辅助网格须匹配客户端、场景、碰撞摘要及构建参数。缺接点、复核失败或超出试跑范围时走原路线。 [Recast 的障碍余量](https://recastnav.com/structrcConfig.html) · [真网格模拟对照](../data/terrain/nav-optimization-20261120/sharp-corners-planning-clearance-ab.json)
+
+法戈第矿洞两条急弯路线共用一处坡面，基础网格和加宽网格的细节表面相差最多 0.375 码。中段投影到基础网格时，允许高度差随基础网格的最大可爬台阶参数在 0.2–0.4 码内调整。每个点仍须落在基础网格的确切三角面上，通过连续支撑与 Detour 路廊复核。高频跟随在弯道或网格边缘即将短按时，若到下一点的高差超过 0.15 码且超过水平距离的 75%，按 35 ms 前进，再等位姿停稳后继续。
+
+同构建碰撞数据的 40 组急弯模拟从 32 组到达提升到 40 组。追加 80 组不同延迟和速度的配对模拟从 61 组提升到 80 组。两版都通过的 32 组急弯，到达耗时的配对差值中位数为 0 秒。10 组直道的耗时、停点误差与动作数一致。坡面急弯仍待游戏内验收。 [坡面短按对照](../data/terrain/nav-optimization-20261120/sharp-corners-slope-sampling-ab.json)
+
 `nav3d_route_arrived` 只表示观测到路线终点，不表示任务完成、NPC 进入互动范围或真实门已打开。任务执行器仍须核对原生回执。本版没有改变 `QuestTrip` 默认选择，也没有把二维色条转换成虚构 XYZ。
 
 实机接入下一步：提取当前建筑及周边真实碰撞数据，核对导出完整性和轴系，补齐只读原生 XYZ／世界身份遥测，在多个独立位置验证对应关系，最后沿现有授权、焦点和急停执行器做短段实走。不要求用户手动跑标定点。
+
+### 地面短程验证
+
+从 `probe-live` 取得当前起点的真实 XY，核对这段地面在当前构建下有连续支撑。使用当前网格的 `mesh_id`、起终点 XY 和新的输出文件。插件的一键准备回执必须有效，脚本沿用已签名的键鼠助手和游戏前台核对。
+
+```sh
+.venv/bin/python -m bot.cli ground-trial --queue --mesh data/nav3d/my-region-tiled \
+  --mesh-id MESH_SHA256 --start START_E START_N --goal GOAL_E GOAL_N \
+  --capture stream --output data/nav3d/trial-stream.json
+```
+
+短程试跑接受 1–6 码目标，最多执行 15 秒。只发送有时限的前进和转向，检查场景、脱战、键位和遥测序列。到达后释放输入并用两帧确认停稳。`--capture quartz` 提供取图对照，两种方式均记录实际采用的取图来源、按键时间及首个可核对的位移回执。
+
+6–32 码的对照可选 `--profile continuous` 持续前进，或 `--profile pulsed` 全程短按。两者最多执行 25 秒，完整网格路线最多 35 码且不超过起终点直线距离的 1.6 倍。持续前进在急转角或精确终点前松键，根据新鲜位置决定转向或补短步。跟随器偏离约 2 码时释放输入，允许从已核对的支撑面向原目标恢复一次。离开原规划路线 2.6 码或超过试跑半径即停止。试跑记录持续前进的按下、释放、恢复和最大平面偏离。
+
+位于网格边缘时，可为 `--profile short` 显式提供 `--entry-scene` 和 0.50–1.20 码内的网格内目标。主控核对原始碰撞与当前网格的世界身份、源资产和几何摘要，验证脚下和扫过的地面连续，临近陡坡时要求向更远处移动。只执行有回执的短按，停稳后必须读回唯一的网格支撑。无限服曾实际移动 0.80 码并读回网格支撑。 [入网实机记录](../data/terrain/nav-optimization-20261120/fargodeep-edge-entry-first.json)
+
+比较定时输入时保持路径、取图和位姿来源一致，分别指定 `--dispatch controller` 和 `--dispatch native`。后者要求助手明确支持定时短按，并逐次记录实际分发方式。默认 `--dispatch auto` 根据助手能力选择。若签名启动未及时回执，短程请求仍保留，超过两分钟后会拒绝执行。
+
+0.2.118 的自动准备启用独立位姿通道，定时更新目标 15 Hz，原通道更新时也会同步发布一次。输出逐帧保留 `legacy_pose` 和 `fast_pose` 供同一次短按比较。试跑默认由 `--pose-source legacy` 控制，`--pose-source fast` 改用新通道，核对它与原通道的序列、地图和世界身份。快速流或原通道失效时释放输入。高频模式发出前进短按后等待位移回执和停稳，再决定下一步或确认到达。实际观察更新率和延迟依据两路实机记录。 [无限服位姿对照](../data/terrain/nav-optimization-20261120/fast-pose-ab.json)
 
 ## 验证证据
 

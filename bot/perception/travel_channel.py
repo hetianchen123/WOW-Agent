@@ -1,6 +1,6 @@
 """Precise quest destination and travel capabilities beside the main pixel strip."""
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum, IntFlag
 
 import numpy as np
@@ -15,6 +15,12 @@ DESCENT_KEYS = {1: "up", 2: "down"}
 DESCENT_KEYS.update({number + 2: f"f{number}" for number in range(1, 13)})
 DESCENT_KEYS.update({ord(key): key.lower() for key in "ABCDEGHIJKLMNOPQRTUVXYZ"})
 SKY_KEYS = (None, *(f"f{number}" for number in range(1, 13)), *"abcdeghijklmnopqrtuvxyz0")
+CAMERA_BINDING_BUILD = 319
+CAMERA_KEYS = (None, "f6", "f8", *"uyhgbnmi")
+RECOVERY_BINDING_BUILD = 320
+RECOVERY_F7_BUILD = 322
+RECOVERY_DIALOG_KEYS = (None, *"uyhgbnm", "f7")
+CORPSE_LOOT_RECEIPT_BUILD = 324
 
 
 class TravelFlags(IntFlag):
@@ -55,6 +61,24 @@ class ObjectiveAction(IntEnum):
     CHOICE = 6
 
 
+class SupplyAction(IntEnum):
+    NONE = 0
+    POTION = 1
+    FOOD = 2
+    WATER = 3
+
+
+@dataclass(frozen=True)
+class PlayerVitals:
+    health: int | None
+    mana: int | None
+    action: SupplyAction
+    item_id: int
+    result: str | None = None
+    supplies: tuple[int, int, int] | None = None
+    bars: tuple[int, int, int, int | None] | None = None
+
+
 class ForeverStep(IntEnum):
     NONE = 0
     TRAVEL = 1
@@ -71,6 +95,19 @@ class ForeverStep(IntEnum):
     ERROR = 12
     TRAINER_FINISH = 13
     TRAINER_WAIT = 14
+    EQUIP = 15
+    EQUIP_WAIT = 16
+    EQUIPPED = 17
+    EQUIP_FAILED = 18
+    REPAIR_TRAVEL = 19
+    REPAIR_GOSSIP = 20
+    REPAIR = 21
+    REPAIR_WAIT = 22
+    REPAIRED = 23
+    REPAIR_WAITING_FOR_FUNDS = 24
+    REPAIR_FAILED = 25
+    REPAIR_CLOSE = 26
+    REPAIR_CANNOT_PAY = 27
 
 
 class ChoiceStep(IntEnum):
@@ -183,6 +220,7 @@ class RecoverySample:
     attacker_cursor: tuple[float, float] | None = None
     attacker_hovered: bool = False
     attacker_scan_supported: bool = False
+    dialog_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +240,19 @@ class SkyFlight:
     charges: int | None = None
     cast: str | None = None
     cast_epoch: int = 0
+
+
+@dataclass(frozen=True)
+class CameraBindings:
+    generation: int
+    restore: str | None
+    probe: str | None
+
+
+@dataclass(frozen=True)
+class CorpseLootReceipt:
+    serial: int
+    target_epoch: int
 
 
 @dataclass(frozen=True)
@@ -271,17 +322,35 @@ class TravelSample:
     forever_step: ForeverStep = ForeverStep.NONE
     forever_value: int = 0
     counted_drop: bool = False
+    vitals: PlayerVitals | None = None
+    camera_bindings: CameraBindings | None = None
+    corpse_loot_receipt: CorpseLootReceipt | None = None
+    nearby_lootable_corpse: bool = False
+    run_status_ready: bool = False
+    run_status_receipt: int | None = None
+    run_status_epoch: int | None = None
 
 
-def travel_region(x: int, y: int) -> tuple[int, int, int, int]:
-    height = (TRAVEL_ROWS + 26) * spec.REGION_H
+def camera_binding_key(navigation, *, probe=False):
+    if (getattr(navigation, "addon_build", None) or 0) < CAMERA_BINDING_BUILD:
+        return "f6" if probe else "f8"
+    bindings = getattr(navigation, "camera_bindings", None)
+    if bindings is not None:
+        return bindings.probe if probe else bindings.restore
+
+
+def travel_region(x: int, y: int, *, supply_bars: bool = False,
+                  camera_bindings: bool = False, corpse_receipts: bool = False,
+                  run_status: bool = False) -> tuple[int, int, int, int]:
+    extra = 36 if run_status else 35 if corpse_receipts else 34 if camera_bindings else 33 if supply_bars else 28
+    height = (TRAVEL_ROWS + extra) * spec.REGION_H
     return x + TRAVEL_OFFSET_X, y - height, spec.REGION_W, height
 
 
-def decode_travel(image: np.ndarray) -> TravelSample | None:
+def decode_travel(image: np.ndarray, *, expect_camera_bindings: bool = False) -> TravelSample | None:
     row_height = spec.REGION_H
     if image.shape[1:] != (spec.REGION_W, 3) or image.shape[0] not in {
-        (TRAVEL_ROWS + extra) * row_height for extra in range(27)
+        (TRAVEL_ROWS + extra) * row_height for extra in range(37)
     }:
         return None
     offset = image.shape[0] - TRAVEL_ROWS * row_height
@@ -345,8 +414,13 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
     counted_drop = False
     if version >= 7 and offset >= 3 * row_height:
         row = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 3 * row_height))
-        if row and version >= 15 and action_code == 7 and row[0] in ForeverStep._value2member_map_:
-            forever_step, forever_value = ForeverStep(row[0]), row[1]
+        if row and version >= 15 and action_code == 7:
+            kind, value = row
+            if kind == 15:
+                subtype, value = divmod(value, 65536)
+                kind += subtype
+            if kind in ForeverStep._value2member_map_:
+                forever_step, forever_value = ForeverStep(kind), value
         elif row and version >= 15 and phase == QuestState.ACTIVE and action_code == 1 and row[0] == 3:
             action, target, counted_drop = ObjectiveAction.COMBAT, row[1], True
         elif row and row[0] == 2:
@@ -393,6 +467,8 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
                                           ((size >> 10) / 1023, (size & 1023) / 1023),
                                           radius, bool(info & 1024))
     recovery = None
+    recovery_dialog_key = None
+    recovery_f7 = False
     if version >= 10:
         if offset < 11 * row_height:
             return None
@@ -413,6 +489,9 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
                        if version >= 11 and life == LifeState.GHOST and not state & 1024 and button else None)
             source = (state >> 2) & 7
             dialog = bool(state & 1024)
+            if dialog:
+                recovery_dialog_key = RECOVERY_DIALOG_KEYS[(state >> 5) & 7]
+                recovery_f7 = recovery_dialog_key is None and bool(state & 256)
             recovery = RecoverySample(
                 life, point(corpse) if state & 512 else None,
                 point(button) if state & 4096 else None, aspect / 100000 if dialog else 0,
@@ -543,12 +622,84 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
                                          and bool(schema[1] & 524288))
             calibration_orbit_available = bool(automatic_schema and overhead_camera_available and schema_version & 1)
             calibration_orbit_active = bool(calibration_orbit_available and schema_version & 2)
+    if recovery is not None and recovery.dialog and (addon_build or 0) >= RECOVERY_F7_BUILD:
+        if recovery_f7:
+            recovery_dialog_key = RECOVERY_DIALOG_KEYS[8]
+        recovery = replace(recovery, walk_verified=None)
+    if recovery_dialog_key and (addon_build or 0) >= RECOVERY_BINDING_BUILD and task & TaskFlags.PREPARED:
+        recovery = replace(recovery, dialog_key=recovery_dialog_key)
     visual_ui_hidden = None
     if addon_build is not None and addon_build >= 274 and offset >= 26 * row_height:
         ui = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 26 * row_height))
         if (ui and ui[0] == 13 and ui[1] >> 14 == 45 and (ui[1] >> 4) & 7 == 1
                 and (ui[1] >> 7) & 127 == sequence):
             visual_ui_hidden = ui[1] & 15
+    camera_bindings = None
+    if addon_build is not None and addon_build >= CAMERA_BINDING_BUILD:
+        if offset >= 34 * row_height:
+            keys = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 34 * row_height))
+            if keys and keys[0] == 4 and keys[1] >> 13 == sequence:
+                value = keys[1]
+                restore, probe = value & 15, (value >> 4) & 15
+                if (restore < len(CAMERA_KEYS) and restore != 1 and probe < len(CAMERA_KEYS) and probe != 2
+                        and (not restore or restore != probe)):
+                    camera_bindings = CameraBindings((value >> 8) & 31, CAMERA_KEYS[restore], CAMERA_KEYS[probe])
+    if expect_camera_bindings or (addon_build or 0) >= CAMERA_BINDING_BUILD:
+        camera_restore_available = bool(camera_restore_available and camera_bindings and camera_bindings.restore)
+        camera_zoom_close = camera_zoom_close and camera_restore_available
+        probe_camera_available = bool(probe_camera_available and camera_bindings and camera_bindings.probe)
+        overhead_camera_available = overhead_camera_available and probe_camera_available
+        calibration_orbit_available = calibration_orbit_available and overhead_camera_available
+        calibration_orbit_active = calibration_orbit_active and calibration_orbit_available
+    vitals = None
+    if addon_build is not None and addon_build >= 300 and offset >= 28 * row_height:
+        stats = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 27 * row_height))
+        supply = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 28 * row_height))
+        if stats and stats[0] == sequence % 16 and supply and supply[0] == 12 and supply[1] >> 13 == sequence:
+            hp, mana = stats[1] & 127, (stats[1] >> 7) & 127
+            mode, supply_action = divmod(stats[1] >> 14, 4)
+            item_id = supply[1] & 8191
+            if hp <= 101 and mana <= 101 and mode in {0, 2, 3} and bool(supply_action) == bool(item_id):
+                supplies = bars = None
+                if addon_build >= 303 and offset >= 33 * row_height:
+                    potion, food, water, horizontal, vertical = (
+                        spec.decode_frame(spec.sample_nibbles(image, 0, offset - row * row_height))
+                        for row in range(29, 34)
+                    )
+                    readiness = (potion, food, water)
+                    if all(row and row[0] == kind and row[1] >> 13 == sequence
+                           for kind, row in enumerate(readiness, 1)):
+                        supplies = tuple(row[1] & 8191 for row in readiness)
+                        if horizontal and vertical and horizontal[0] == vertical[0] == sequence % 16:
+                            left, right = divmod(horizontal[1], 1024)
+                            health_y, mana_y = divmod(vertical[1], 1024)
+                            if left and health_y and 15 <= right - left <= 200:
+                                bars = ((left - 512) * 2, (right - 512) * 2, (health_y - 512) * 2,
+                                        (mana_y - 512) * 2 if mana_y and 3 <= abs(mana_y - health_y) <= 35 else None)
+                vitals = PlayerVitals(hp - 1 if hp else None, mana - 1 if mana else None,
+                                      SupplyAction(supply_action), item_id, {2: "consumed", 3: "unconfirmed"}.get(mode),
+                                      supplies, bars)
+    corpse_loot_receipt = None
+    nearby_lootable_corpse = False
+    run_status_ready = False
+    run_status_receipt = run_status_epoch = None
+    if (addon_build or 0) >= CORPSE_LOOT_RECEIPT_BUILD and offset >= 35 * row_height:
+        cleared = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 35 * row_height))
+        if cleared and cleared[0] == 6 and cleared[1] >> 13 == sequence:
+            payload = cleared[1] & 8191
+            if addon_build >= 325:
+                nearby_lootable_corpse = bool(payload & 4096)
+                payload &= 4095
+            serial, target_epoch = divmod(payload, 64)
+            if serial:
+                corpse_loot_receipt = CorpseLootReceipt(serial, target_epoch)
+    if (addon_build or 0) >= 327 and offset >= 36 * row_height:
+        state = spec.decode_frame(spec.sample_nibbles(image, 0, offset - 36 * row_height))
+        if state and state[0] == 7 and state[1] >> 13 == sequence and state[1] & 4096:
+            run_status_ready = bool(state[1] & 1)
+            code = (state[1] >> 1) & 15
+            if 1 <= code <= 10:
+                run_status_receipt, run_status_epoch = code - 1, (state[1] >> 5) & 127
     return TravelSample(
         quest, map_id, goal_map,
         (gx / 1048575, gy / 1048575) if meta & 128 and goal_map else None,
@@ -565,5 +716,6 @@ def decode_travel(image: np.ndarray) -> TravelSample | None:
         version, camera, addon_build, probe_camera_available, overhead_camera_available,
         calibration_orbit_available,calibration_orbit_active,
         round_pending_count, extension_schema, visual_ui_hidden,
-        choice_step, forever_step, forever_value, counted_drop,
+        choice_step, forever_step, forever_value, counted_drop, vitals, camera_bindings, corpse_loot_receipt,
+        nearby_lootable_corpse, run_status_ready, run_status_receipt, run_status_epoch,
     )

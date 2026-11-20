@@ -1,6 +1,6 @@
 #!/bin/zsh
 set -eu
-if [[ $# == 1 && "$1" == --prepared ]]; then
+if [[ $# == 1 && ( "$1" == --start || "$1" == --prepared ) ]]; then
     quest_project_root="$(cd "$(dirname "$0")/.." && pwd -P)"
     apps="$quest_project_root/data/apps"
     controller="$apps/WowAgent Controller.app/Contents/MacOS/WowAgentController"

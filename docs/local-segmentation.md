@@ -12,6 +12,26 @@
 
 `LocalSegmenter` 在实例内复用已加载模型；Torch/Transformers 延迟导入，不增加主控必需依赖。模型路径及固定 revision 在 `data/segmentation/models.json`，每份回放报告记录 SAM 权重 SHA256、输入图 SHA256、检测框、所有候选分数和耗时。截图未上传。
 
+## 2026-11-20 自动选设备与并行分割
+
+托管配置 `segmented_navigation.device: auto` 在 Apple GPU 可用时将 SAM 2.1 Large 放到 MPS。CPU 检测与同一帧的 GPU 图像编码同时执行，掩码预测等待该帧编码完成。MPS 不可用时使用 CPU。自动模式下 MPS 初始化或推理报错，进程切到 CPU，并从同一帧重新计算一次。报告保存实际设备与回退原因。显式 `cpu` 和 `mps` 仍可用于单独测量。 [SAM 2 实现](https://github.com/facebookresearch/sam2/blob/main/sam2/sam2_image_predictor.py)
+
+同一组四张留存游戏画面，预热后的八次完整分割中位耗时为 CPU 4.02 秒、串行 MPS 2.89 秒、并行 MPS 2.41 秒。并行组的预热样本最慢为 3.30 秒，串行 MPS 最慢为 2.93 秒。三组的地面、实体、未知、水域、遮挡、禁止区域掩码在配对检查中逐像素一致。 [串行设备对照](../data/terrain/nav-optimization-20261120/sam2-cpu-mps-ab.json) · [并行对照](../data/terrain/nav-optimization-20261120/sam2-mps-overlap-ab.json)
+
+使用六帧历史实机位姿和画面重新建立地面测量，再从两张后续原图各自生成路线。CPU 与 MPS 得到相同的世界坐标路线。分割后的标定与路线计算分别约 0.15–0.17 秒。该对照使用离线回放时钟，绕障执行和抵达仍待实机。 [测量与路线回放](../data/terrain/nav-optimization-20261120/sam2-measured-route-replay-ab.json)
+
+## 绕障截图交接
+
+控制线程将同一帧编码一次，后台使用原始 PNG 字节保存截图和请求。提交仍等待下一条位姿遥测确认画面同步。后台按取图时的 SHA-256 核对字节，推理入口再核对磁盘文件。保存过程中取消时，不提交推理。
+
+四张留存游戏画面各做十次配对，控制线程编码与交接的中位耗时从 24.89 ms 降到 11.63 ms，P95 从 25.34 ms 降到 11.98 ms。到达推理入口的中位耗时从 24.88 ms 降到 12.15 ms。每次新旧路径生成的 PNG 内容一致。对照测的是已取图后的处理耗时，实机取图、遥测等待和模型推理另行计时。 [截图交接对照](../data/terrain/nav-optimization-20261120/segmented-capture-handoff-ab.json)
+
+## 实机首步计时
+
+在同一轮 `events.jsonl` 里按 `frame_id` 串起 `quest_segmented_observation`、`quest_segmented_plan_ready`、`quest_segmented_movement_issued` 和 `quest_segmented_movement_feedback`。观察记录取图、PNG 编码与摘要、提交时间以及用于确认同步的两个遥测序列。路线记录到达主控的时间、SAM 实际设备、回退原因和模型各阶段耗时。CPU 和 GPU 并行阶段有重叠，用截图到路线的整体耗时作比较。
+
+移动指令和位移回执用 `before_sequence` 对应，`after_sequence` 标记核验位移的帧。以第一条 `status=verified` 的 `capture_to_feedback_ms` 衡量截图到首次通过核验的位移。窗格续走沿用同一张截图的时间锚点。停滞、异常位移和方向失配继续记录原因。此计时链已在合成回归覆盖，下一轮实机同时核对原生输入回执、绕过障碍和恢复行程。
+
 ## 地图与搜索边界
 
 `bot/perception/segmentation.py` 输出三个互斥布尔掩码：实体障碍、视觉候选地面、未知。地面要求语义置信度至少 0.8、前两类别差至少 0.2；这些阈值是开发规则，不是碰撞概率。树冠、人物等表示遮挡，不当作已知实体占地；未被分割覆盖的检测框内部保留未知，不能让语义草地填掉木栏的漏检部位。低分实例也保留未知。

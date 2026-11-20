@@ -80,6 +80,11 @@ class ChannelReader:
     def is_alive(self, max_age_s: float = 2.0) -> bool:
         return self.last_frame_t > 0 and (time.time() - self.last_frame_t) <= max_age_s
 
+    def invalidate(self) -> None:
+        self._latest.clear()
+        self.last_frame_t = 0.0
+        self._last_seq = None
+
     def error_rate(self) -> float:
         total = self.frames_ok + self.frames_bad
         return self.frames_bad / total if total else 1.0

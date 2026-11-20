@@ -220,6 +220,8 @@ local function Profile()
     return WowAgentDB.panel[guid]
 end
 
+local prepareAutomaticQuest
+
 local function BuildPanel()
     local frame = CreateFrame("Frame", "WowAgentControlPanel", UIParent, "BasicFrameTemplateWithInset")
     frame:SetSize(650, 560)
@@ -742,10 +744,10 @@ local function BuildPanel()
     Button(navigation, "关闭寻路色条", 151, 158, 136, function()
         if WowAgent.StopQuestNavigation then WowAgent.StopQuestNavigation() end
     end)
-    Button(navigation, "查看任务键位", 298, 158, 136, function()
+    Button(navigation, "只读键位检查", 298, 158, 136, function()
         if WowAgent.ReportQuestBindings then WowAgent.ReportQuestBindings() end
     end)
-    Button(navigation, "一键准备自动任务", 444, 158, 150, function()
+    local function PrepareAutomaticQuest()
         if WowAgent.PrepareQuestNavigation then
             local open = WowAgent.OpenQuestOfferID and WowAgent.OpenQuestOfferID()
             local resume = WowAgent.GetQuestRoundResumeID and WowAgent.GetQuestRoundResumeID()
@@ -768,7 +770,12 @@ local function BuildPanel()
                 true, true, useSavedOptions and Text(npc) or nil,
                 useSavedOptions and tonumber((itemMode())) == 1, true)
         end
-    end)
+    end
+    prepareAutomaticQuest = function()
+        local ok, err = pcall(PrepareAutomaticQuest)
+        if not ok then WowAgent.Report("WowAgent：一键准备失败。" .. tostring(err)) end
+    end
+    Button(navigation, "一键准备自动任务", 444, 158, 150, prepareAutomaticQuest)
     Button(navigation, "准备附近任务", 416, 80, 150, function()
         local open = WowAgent.OpenQuestOfferID and WowAgent.OpenQuestOfferID()
         local id = open or (WowAgent.GetNearbyQuestID and WowAgent.GetNearbyQuestID())
@@ -862,6 +869,13 @@ end
 function WowAgent_TogglePanel()
     panel = panel or BuildPanel()
     panel:SetShown(not panel:IsShown())
+end
+
+function WowAgent.PrepareAutomaticQuestCommand()
+    panel = panel or BuildPanel()
+    if not panel:IsShown() then panel:Show() end
+    panel:Hide()
+    prepareAutomaticQuest()
 end
 
 local launcher = CreateFrame("Button", "WowAgentPanelLauncher", UIParent, "UIPanelButtonTemplate")

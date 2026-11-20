@@ -12,14 +12,20 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
     private let state = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private var armed = false
     private var session = false
+    private var keepOnline = false
+    private var focusEpoch = 0
+    private var waitingForForeground = false
     private var game: pid_t?
     private var lastContact = ProcessInfo.processInfo.systemUptime
     private var keys = Set<CGKeyCode>()
+    private var navigationPulse: (key: CGKeyCode, token: UUID)?
     private var buttons = Set<String>()
     private var point: CGPoint?
     private var eventCount = 0
     private var simulatedFocus = true
     private var timer: Timer?
+    private var preparingLaunchLog = false
+    private var preparationCancelled = false
     private var launchDeadline: TimeInterval?
     private var nextLaunchCheck: TimeInterval = 0
     private var launchWait: LaunchWait?
@@ -29,7 +35,6 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
     private enum LaunchWait: String {
         case accessibility = "请授权当前版键鼠助手（设备控制和数据访问）"
         case postEvents = "等待键鼠事件发送权限"
-        case game = "权限已通过，等待魔兽切回前台"
     }
 
     init(simulate: Bool) { self.simulate = simulate }
@@ -44,13 +49,14 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
         "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
         "left": 123, "right": 124, "down": 125, "up": 126,
     ]
+    private static let pulseKeys: Set<String> = ["w", "s", "q", "e", "left", "right"]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = simulate ? "WoW 输入模拟" : "WoW 键鼠"
         let menu = NSMenu()
         menu.addItem(state)
-        for (title, action) in [("授权并运行已准备任务", #selector(runPrepared)),
+        for (title, action) in [("启动任务主控", #selector(runPrepared)),
                                 ("查看任务运行日志", #selector(showQuestLog)),
                                 ("启用一次会话", #selector(arm)), ("立即停止", #selector(cancel)),
                                 ("检查键鼠权限", #selector(permissions)),
@@ -144,7 +150,7 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
 
     @objc func arm() {
         guard server >= 0, permission else { permissions(); return }
-        guard !session, launchDeadline == nil, questProcess == nil else { return }
+        guard !session, !preparingLaunchLog, launchDeadline == nil, questProcess == nil else { return }
         armed = true
         updateStatus()
     }
@@ -156,23 +162,50 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
 
     private func requestPrepared() -> [String: Any] {
         guard !simulate else { return error("模拟执行器不能启动实机任务") }
-        guard server >= 0, !session, questProcess == nil, launchDeadline == nil else {
+        guard server >= 0, !session, !preparingLaunchLog, questProcess == nil, launchDeadline == nil else {
             return error("键鼠执行器尚未就绪或已有任务在运行")
         }
-        do {
-            let log = try questRoot().appendingPathComponent("data/logs/quest-launch.log")
-            try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data("已请求运行任务。\n".utf8).write(to: log)
-            questRequestedAt = Date()
-        } catch {
-            return self.error("无法写入任务启动日志 · \(error.localizedDescription)")
+        preparingLaunchLog = true
+        preparationCancelled = false
+        questRequestedAt = Date()
+        let deadline = ProcessInfo.processInfo.systemUptime + 120
+        state.title = "已请求运行任务，正在准备启动日志"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let log = try self.questRoot().appendingPathComponent("data/logs/quest-launch.log")
+                try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("已请求运行任务。\n".utf8).write(to: log)
+                DispatchQueue.main.async { self.finishLaunchLog(deadline: deadline, failure: nil) }
+            } catch {
+                DispatchQueue.main.async {
+                    self.finishLaunchLog(deadline: deadline, failure: error.localizedDescription)
+                }
+            }
+        }
+        return ["ok": true]
+    }
+
+    private func finishLaunchLog(deadline: TimeInterval, failure: String?) {
+        preparingLaunchLog = false
+        if preparationCancelled {
+            if failure == nil { recordLaunchStatus("启动准备已取消") }
+            return
+        }
+        if let failure {
+            state.title = "无法写入任务启动日志 · \(failure)"
+            return
         }
         let now = ProcessInfo.processInfo.systemUptime
-        launchDeadline = now + 120
+        if now >= deadline {
+            state.title = "启动等待超时 · 启动日志"
+            recordLaunchStatus(state.title)
+            return
+        }
+        launchDeadline = deadline
         nextLaunchCheck = now
         launchWait = nil
-        state.title = "已请求运行任务，正在等待权限和魔兽前台"
-        return ["ok": true]
+        state.title = "已请求启动主控，正在核对系统权限"
     }
 
     private func questRoot() throws -> URL {
@@ -189,7 +222,7 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
             let logURL = root.appendingPathComponent("data/logs/quest-launch.log")
             let log = try FileHandle(forWritingTo: logURL)
             _ = try log.seekToEnd()
-            try log.write(contentsOf: Data("权限已通过，魔兽已在前台，启动任务。\n".utf8))
+            try log.write(contentsOf: Data("权限已通过，启动主控。游戏前台和任务状态将在主控内核对。\n".utf8))
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/zsh")
             task.arguments = [root.appendingPathComponent("macos/quest-accept.command").path, "--run-prepared"]
@@ -236,6 +269,7 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
     }
 
     @objc private func cancel() {
+        preparationCancelled = true
         launchDeadline = nil
         let task = questProcess
         questProcess = nil
@@ -247,6 +281,8 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
         release()
         armed = false
         session = false
+        keepOnline = false
+        waitingForForeground = false
         game = nil
         point = nil
         updateStatus()
@@ -269,7 +305,22 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
 
     @objc private func requestPostPermission() { _ = CGRequestPostEventAccess() }
 
-    private func updateStatus() { state.title = armed ? "已启用，等待或正在执行" : "已停止" }
+    private func updateStatus() {
+        if keepOnline {
+            state.title = waitingForForeground ? "主控在线 · 等待游戏前台与色条" : "主控在线"
+        } else {
+            state.title = armed ? "已启用，等待或正在执行" : "已停止"
+        }
+    }
+
+    private func pauseForForeground(_ front: pid_t?) {
+        release()
+        point = nil
+        game = front
+        focusEpoch += 1
+        waitingForForeground = true
+        updateStatus()
+    }
 
     private func watch() {
         let now = ProcessInfo.processInfo.systemUptime
@@ -284,7 +335,14 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
             }
         }
         guard session else { return }
-        if let game, game != foreground { stop(); return }
+        let front = foreground
+        if keepOnline && front != game {
+            pauseForForeground(front)
+        } else if let game, game != front {
+            stop()
+            return
+        }
+        guard permission else { stop(); return }
         if (!keys.isEmpty || !buttons.isEmpty) &&
             ProcessInfo.processInfo.systemUptime - lastContact > 2 { stop() }
     }
@@ -295,8 +353,6 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
             waiting = .accessibility
         } else if !CGPreflightPostEventAccess() {
             waiting = .postEvents
-        } else if foreground == nil {
-            waiting = .game
         } else {
             startPrepared()
             return
@@ -311,44 +367,126 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
             _ = AXIsProcessTrustedWithOptions(options)
         case .postEvents:
             _ = CGRequestPostEventAccess()
-        case .game:
-            break
         }
     }
 
     private func respond(_ request: [String: Any]) -> [String: Any] {
         guard let op = request["op"] as? String else { return error("缺少键鼠操作") }
         watch()
-        if op == "info" { return ["ok": true, "simulate": simulate, "armed": armed, "events": eventCount] }
+        if op == "info" {
+            return ["ok": true, "simulate": simulate, "armed": armed, "events": eventCount, "navigationPulse": true]
+        }
         if op == "run_prepared" { return requestPrepared() }
         if simulate && op == "simulate_blur" {
             simulatedFocus = false
             watch()
             return ["ok": true]
         }
+        if simulate && op == "simulate_focus" {
+            simulatedFocus = true
+            watch()
+            return ["ok": true]
+        }
+        if simulate && op == "simulate_stop" {
+            stop()
+            return ["ok": true]
+        }
+        if simulate && op == "simulate_arm" {
+            arm()
+            return ["ok": true]
+        }
         if op == "ready" {
-            guard armed, permission else { return error("请给键鼠 App 授权并选择「启用一次会话」") }
+            guard !session, armed, permission else { return error("请给键鼠 App 授权并选择「启用一次会话」") }
             session = true
+            keepOnline = request["keep_online"] as? Bool == true && (questProcess != nil || simulate)
+            if keepOnline {
+                pauseForForeground(foreground)
+                return ["ok": true, "focus_epoch": focusEpoch]
+            }
             return ["ok": true]
         }
         if op == "release" { release(); return ["ok": true] }
         guard session, armed, permission else { stop(); return error("键鼠会话已停止") }
         lastContact = ProcessInfo.processInfo.systemUptime
-        if op == "heartbeat" { return ["ok": true] }
-        guard let pid = foreground else { stop(); return error("魔兽窗口不在前台") }
-        game = pid
+        if op == "heartbeat" {
+            return waitingForForeground ? ["ok": true, "focus_epoch": focusEpoch] : ["ok": true]
+        }
+        let front = foreground
+        if keepOnline && front != game { pauseForForeground(front) }
+        if waitingForForeground {
+            if op == "resume_foreground", front != nil, request["focus_epoch"] as? Int == focusEpoch {
+                waitingForForeground = false
+                updateStatus()
+                return ["ok": true]
+            }
+            return ["ok": false, "error": "等待魔兽前台和新色条", "focus_epoch": focusEpoch]
+        }
+        guard let pid = front else {
+            if op == "prepare_quest", game == nil { return error("等待魔兽回到前台再准备任务") }
+            stop()
+            return error("魔兽窗口不在前台")
+        }
+        if op != "prepare_quest" { game = pid }
 
         switch op {
+        case "run_status_v2":
+            guard request["wire"] as? Int == 2, let state = request["state"] as? Int,
+                  (0...9).contains(state) else { return error("无效的运行状态协议") }
+            // Carbon virtual key codes for F13 through F20. F20 is the prefix
+            // for states 7–9. No status event uses a normal action-bar key.
+            let functionKeys: [CGKeyCode] = [105, 107, 113, 106, 64, 79, 80, 90]
+            let symbols = state < 7 ? [state] : [7, state - 7]
+            for symbol in symbols {
+                let code = functionKeys[symbol]
+                guard !keys.contains(code),
+                      let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+                      let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
+                    return error("无效或冲突的运行状态键")
+                }
+                down.flags = []
+                up.flags = []
+                guard send(down, to: pid), send(up, to: pid) else { return error("运行状态发送失败") }
+            }
+        case "prepare_quest":
+            guard keys.isEmpty, buttons.isEmpty else { return error("准备任务前仍有键鼠输入") }
+            guard let code = Self.keyCodes["f5"],
+                  let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
+                return error("无法构造任务准备键")
+            }
+            down.flags = [.maskControl, .maskAlternate, .maskShift]
+            up.flags = down.flags
+            guard send(down, to: pid), send(up, to: pid) else { return error("任务准备键发送失败") }
         case "down", "up":
             guard let key = request["key"] as? String, let code = Self.keyCodes[key] else {
                 return error("按键不在允许列表")
             }
             let down = op == "down"
+            if navigationPulse?.key == code {
+                guard !down else { return error("该移动键正在短按") }
+                navigationPulse = nil
+            }
             if down != keys.contains(code) {
                 guard send(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down), to: pid)
                 else { return error("无法构造按键事件") }
                 if down { keys.insert(code) } else { keys.remove(code) }
             }
+        case "navigation_pulse":
+            guard let key = request["key"] as? String, Self.pulseKeys.contains(key),
+                  let code = Self.keyCodes[key], let microseconds = request["hold_us"] as? Int,
+                  (1...120_000).contains(microseconds) else { return error("无效的导航短按") }
+            guard navigationPulse == nil, !keys.contains(code) else { return error("已有移动短按或按键被占用") }
+            guard send(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true), to: pid)
+                else { return error("无法构造导航短按") }
+            let token = UUID()
+            navigationPulse = (code, token)
+            keys.insert(code)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .microseconds(microseconds)) { [weak self] in
+                guard let self = self, self.navigationPulse?.token == token else { return }
+                self.finishNavigationPulse(pid)
+            }
+        case "cancel_navigation_pulse":
+            finishNavigationPulse(pid)
         case "position":
             guard let p = pointer else { return error("无法读取鼠标位置") }
             return ["ok": true, "x": Int(p.x), "y": Int(p.y)]
@@ -466,7 +604,18 @@ private final class KeyboardMouse: NSObject, NSApplicationDelegate {
         return true
     }
 
+    private func finishNavigationPulse(_ pid: pid_t) {
+        guard let pulse = navigationPulse else { return }
+        navigationPulse = nil
+        if !send(CGEvent(keyboardEventSource: nil, virtualKey: pulse.key, keyDown: false), to: pid) {
+            stop()
+            return
+        }
+        keys.remove(pulse.key)
+    }
+
     private func release() {
+        navigationPulse = nil
         if let pid = game, simulate || NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == gameID {
             for code in keys { _ = send(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false), to: pid) }
             if let point = pointer {

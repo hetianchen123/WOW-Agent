@@ -5,6 +5,7 @@ if type(version) ~= "string" or not version:match("^1%.60%.") then return end
 WowAgent = WowAgent or {}
 local forever = {}
 WowAgent.Forever = forever
+local bindings = WowAgent.TaskBindings
 
 -- Candidate locations from QuestieDB Forever. The live client still has to
 -- confirm the giver, dialogue quest ID and acceptance or reward outcome.
@@ -12,7 +13,8 @@ forever.questData = {
     map = 1429,
     npcs = {
         [823] = {48.2, 42.9}, [197] = {48.9, 41.6}, [240] = {42.2, 65.9},
-        [241] = {42.1, 67.2}, [253] = {43.3, 65.8}, [261] = {74.0, 72.2},
+        [241] = {42.1, 67.2}, [253] = {43.3, 65.8}, [261] = {74.0, 72.2}, [248415] = {51.2, 40.9},
+        [263399] = {44.9, 63.4},
     },
     npcNames = {
         [823] = {enUS = "Deputy Willem", zhCN = "维里副队长"},
@@ -21,8 +23,9 @@ forever.questData = {
         [241] = {enUS = 'Remy "Two Times"'},
         [253] = {enUS = "William Pestle", zhCN = "威廉·匹斯特"},
         [261] = {enUS = "Guard Thomas", zhCN = "卫兵托马斯"},
-        [248415] = {enUS = "Tordrin Sternblade"},
+        [248415] = {enUS = "Tordrin Sternblade", zhCN = "托尔德林·坚刃"},
         [251507] = {enUS = "Josephine Carson"},
+        [263399] = {enUS = "Sam Sarsaparilla", zhCN = "萨姆·萨斯帕里拉"},
     },
     quests = {
         [783] = {starter = true, level = 1, pickup = 823, turnIn = 197, arrival = true},
@@ -31,8 +34,13 @@ forever.questData = {
         [15] = {level = 1, after = {[7] = true}, pickup = 197, turnIn = 197,
             objectivePoint = {49, 35.7}, combatNPC = 257},
         [21] = {level = 1, after = {[15] = true}, pickup = 197, turnIn = 197,
-            objectivePoint = {48.4, 29}, combatNPC = 80},
+            objectivePoint = {48.4, 29}, combatNPC = 80, rewardChoice = {HUNTER = 2186}},
         [54] = {level = 1, after = {[21] = true}, pickup = 197, turnIn = 240, arrival = true},
+        [96627] = {level = 4, after = {[21] = true}, pickup = 197, turnIn = 263399, arrival = true},
+        [95998] = {level = 4, after = {[96627] = true}, pickup = 263399, turnIn = 263399,
+            campPoint = {44.9, 63.2}},
+        [92479] = {level = 1, class = "HUNTER", after = {[7] = true},
+            pickup = 197, turnIn = 248415, arrival = true},
         [47] = {level = 4, after = {[54] = true}, pickup = 241, turnIn = 241,
             objectivePoint = {40.5, 80.3}, lootNPCs = {[40] = true, [475] = true}},
         [60] = {level = 3, after = {[54] = true}, pickup = 253, turnIn = 253,
@@ -75,11 +83,13 @@ function forever.MeleeSpell(spells)
     end
 end
 
-function forever.MeleeMacro(spell, spells)
+function forever.MeleeMacro(spell, spells, legacy)
     if spell ~= forever.MeleeSpell(spells) then return end
     local name = spells[spell]
     if type(name) ~= "string" or name == "" or name:find("[%z\1-\31\127;%[%]]") then return end
-    return "#showtooltip " .. name .. "\n/startattack [harm,nodead]\n/cast [harm,nodead] " .. name
+    -- Repeated presses must preserve a Raptor Strike queued for the next swing.
+    return "#showtooltip " .. name .. "\n/startattack [harm,nodead]\n/cast [harm,nodead] "
+        .. (legacy and "" or "!") .. name
 end
 
 local function Public(value)
@@ -90,6 +100,27 @@ local function Read(api, ...)
     if type(api) ~= "function" then return nil end
     local ok, first, second, third = pcall(api, ...)
     if ok then return Public(first), Public(second), Public(third) end
+end
+
+function forever.RewardChoice(questID, count)
+    local quest = forever.questData.quests[questID]
+    local _, class = Read(UnitClass, "player")
+    local preferred = quest and quest.rewardChoice and quest.rewardChoice[class]
+    if not preferred or type(GetQuestItemInfo) ~= "function"
+        or Read(C_QuestLog.ReadyForTurnIn, questID) ~= true
+        or Read(GetQuestMoneyToGet) ~= 0 then return end
+    local chosen
+    for index = 1, count do
+        local ok, _, _, _, _, usable, itemID = pcall(GetQuestItemInfo, "choice", index)
+        itemID = ok and Public(itemID)
+        if type(itemID) ~= "number" or itemID <= 0 then return end
+        if itemID == preferred then
+            if chosen or Public(usable) ~= true then return end
+            chosen = index
+        end
+    end
+    local selected = QuestInfoFrame and Public(QuestInfoFrame.itemChoice)
+    if not QuestInfoFrame or selected == 0 or selected == chosen then return chosen end
 end
 
 local trainers = {
@@ -184,7 +215,7 @@ local function Report(plan, code, value)
 end
 
 local function State(plan, map)
-    if not plan.foreverEnabled or Read(GetBindingAction, "F4", true) ~= "CLICK WowAgentForeverProgress:LeftButton"
+    if not plan.foreverEnabled or not bindings.ClickReady("forever_progress")
         or Read(UnitIsDeadOrGhost, "player") ~= false then return end
     local _, class = Read(UnitClass, "player")
     local level = Read(UnitLevel, "player")
@@ -193,6 +224,18 @@ local function State(plan, map)
     if receipt then
         if GetTime() < receipt.untilTime then return receipt end
         plan.foreverReceipt = nil
+    end
+    local opening = plan.foreverGossipPending
+    if opening then
+        if TrainerPanel(opening.trainer) then
+            plan.foreverGossipPending = nil
+        elseif CreatureGUID("target", opening.trainer.id) == opening.guid and GetTime() < opening.deadline then
+            return {code = step.trainerWait, trainer = opening.trainer}
+        else
+            plan.foreverGossipPending, plan.foreverSkipLevel = nil, level
+            Report(plan, step.error, opening.trainer.id)
+            return plan.foreverReceipt
+        end
     end
     if pending then
         local ok
@@ -233,7 +276,8 @@ local function State(plan, map)
     local support = WowAgent.LayoutSupport
     local spells = support.LearnedSpells()
     local spell = forever.OutputSpell(spells)
-    if spell and not support.ActionMatches(4, spell, forever.OutputMacro(spell, spells)) then
+    if spell and not (GossipFrame and GossipFrame:IsShown())
+        and not support.ArmedActionMatches(4, spell, forever.OutputMacro(spell, spells)) then
         return {code = step.macro, value = spell}
     end
     if level >= 10 then
@@ -281,11 +325,26 @@ local function State(plan, map)
 end
 
 function forever.Progression(plan, map)
-    local dialogueClosed = not (QuestFrame and QuestFrame:IsShown() or GossipFrame and GossipFrame:IsShown())
-    if not dialogueClosed and not plan.foreverTrain then return end
+    if QuestFrame and QuestFrame:IsShown() then return end
+    if forever.Gear and plan.foreverEnabled and bindings.ClickReady("forever_progress")
+        and not (plan.foreverPending or plan.foreverGossipPending or plan.foreverReceipt) then
+        local maintenance = forever.Gear.State(plan, map)
+        if maintenance then return maintenance end
+    end
+    local gossipOpen = GossipFrame and GossipFrame:IsShown()
+    if gossipOpen and not plan.foreverTrain then return end
+    local opening = plan.foreverGossipPending
     local state = State(plan, map)
-    if not dialogueClosed and state and state.code ~= step.gossip then
-        return
+    if gossipOpen and state and state.code ~= step.gossip then
+        local trainer = state.trainer or (opening and opening.trainer)
+            or (plan.foreverPending and plan.foreverPending.trainer)
+        if not trainer then
+            for _, candidate in ipairs(trainers) do
+                if TrainerPanel(candidate) then trainer = candidate; break end
+            end
+        end
+        if not trainer or (not TrainerPanel(trainer) and not (opening and opening.trainer == trainer
+                and CreatureGUID("target", trainer.id) == opening.guid)) then return end
     end
     return state
 end
@@ -295,7 +354,17 @@ function forever.BindProgression(owner, plan)
     button:RegisterForClicks("LeftButtonUp")
     button:SetScript("OnClick", function()
         if InCombatLockdown() then return end
-        local state = State(plan, Read(C_Map.GetBestMapForUnit, "player"))
+        local map = Read(C_Map.GetBestMapForUnit, "player")
+        local offered = plan.foreverProgress
+        if forever.Gear and offered and offered.code >= 15 then
+            if plan.foreverEnabled and bindings.ClickReady("forever_progress") then
+                forever.Gear.Run(plan, map, offered)
+            end
+            return
+        end
+        if forever.Gear and plan.automatic and not (plan.foreverPending or plan.foreverGossipPending
+            or plan.foreverReceipt) and forever.Gear.State(plan, map) then return end
+        local state = State(plan, map)
         if not state then return end
         if state.code == step.learn and TrainerPanel(state.trainer) then
             local ok, result = pcall(BuyTrainerService, state.index)
@@ -309,13 +378,23 @@ function forever.BindProgression(owner, plan)
         elseif state.code == step.finish and TrainerPanel(state.trainer) then
             local level = state.level
             SaveTrainerCheck(plan, level, state.copper, not state.unverified)
+            if GossipFrame and GossipFrame:IsShown() and C_GossipInfo and C_GossipInfo.CloseGossip
+                and CreatureGUID("npc", state.trainer.id) == trainerGUID then pcall(C_GossipInfo.CloseGossip) end
             pcall(CloseTrainer)
             if state.unverified then Report(plan, step.error, level)
             elseif state.copper then Report(plan, step.funds, state.copper)
             else Report(plan, step.done, level) end
         elseif state.code == step.gossip then
             local option = TrainerOption(state.trainer)
-            if option then pcall(C_GossipInfo.SelectOption, option) end
+            if option then
+                plan.foreverGossipPending = {trainer = state.trainer, guid = CreatureGUID("target", state.trainer.id),
+                    deadline = GetTime() + 5}
+                local ok, result = pcall(C_GossipInfo.SelectOption, option)
+                if not ok or result == false then
+                    plan.foreverGossipPending, plan.foreverSkipLevel = nil, Read(UnitLevel, "player")
+                    Report(plan, step.error, state.trainer.id)
+                end
+            end
         elseif state.code == step.talent then
             local config, node = state.config, state.node
             if Read(C_Traits.PurchaseRank, config, node) ~= true then
@@ -348,8 +427,8 @@ function forever.BindProgression(owner, plan)
             plan.foreverTrainerCheck = saved
         end
     end
-    SetOverrideBindingClick(owner, false, "F4", "WowAgentForeverProgress", "LeftButton")
-    plan.foreverEnabled = true
+    plan.foreverEnabled = bindings.BindClick(owner, "forever_progress", true)
+    if not plan.foreverEnabled then print("WowAgent：F4 有冲突，职业成长和装备维护暂不可用。") end
 end
 
 local events = CreateFrame("Frame")
@@ -382,6 +461,7 @@ function forever.Inspect()
         type(C_QuestLog and C_QuestLog.GetQuestObjectives), type(GetQuestLogTitle))
     print("WA TRAIN", type(GetNumTrainerServices), type(BuyTrainerService),
         "TALENT", type(GetNumTalentTabs), type(LearnTalent), "MACRO", type(CreateMacro))
+    if forever.Gear then forever.Gear.Inspect() end
     local worldPos = C_Map and C_Map.GetWorldPosFromMapPos
     if worldPos and map and x and y then
         local instance, world = Read(worldPos, map, CreateVector2D(x, y))

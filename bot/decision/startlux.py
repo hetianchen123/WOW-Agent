@@ -161,13 +161,15 @@ class QuestPlanner:
         self.started = 0.0
         self.retried = False
 
-    def poll(self, signature: tuple, state: dict, criteria: dict[str, str]) -> dict | None:
+    def poll(self, signature: tuple, state: dict, criteria: dict[str, str], *,
+             instructions: str | None = None, max_age_s: float = REQUEST_TIMEOUT_S + 1) -> dict | None:
         if self.future is None:
             if signature != self.signature:
                 self.retried = False
             self.signature = signature
             self.started = time.monotonic()
-            self.future = self.pool.submit(self.client.decide, state, criteria)
+            options = {"instructions": instructions} if instructions is not None else {}
+            self.future = self.pool.submit(self.client.decide, state, criteria, **options)
             return None
         if not self.future.done():
             return None
@@ -183,10 +185,16 @@ class QuestPlanner:
             self.retried = True
             log.warning("StartLux 首次推理超时，将用当前任务状态重试一次。")
             return None
-        if (time.monotonic() - self.started > REQUEST_TIMEOUT_S + 1
+        if (time.monotonic() - self.started > max_age_s
                 or state.get("observation_age_ms", 0) > OBSERVATION_MAX_AGE_MS):
             return {**result, "recommendation": None, "reason": "stale_decision"}
         return result
+
+    def discard_pending(self):
+        if self.future is not None and self.future.cancel():
+            self.future = None
+        self.signature = None
+        self.retried = False
 
     def close(self):
         if self.future:

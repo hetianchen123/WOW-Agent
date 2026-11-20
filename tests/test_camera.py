@@ -7,7 +7,7 @@ from bot.control.camera import CameraController
 from bot.control.input_mock import MockInput
 from bot.perception.quest_channel import QuestState
 from bot.perception.travel_channel import CameraSample, CameraScene as Scene, CameraResult as Result
-from bot.perception.travel_channel import TravelFlags, TravelSample
+from bot.perception.travel_channel import CameraBindings, TravelFlags, TravelSample
 
 
 def setup(scene=Scene.GROUND, *, close=False, request=0):
@@ -76,6 +76,17 @@ def test_camera_release_on_lost_data_and_late_reply_cannot_resume_old_transactio
     camera.tick(ctx, 1.6, replace(nav, sequence=2, camera=replace(
         nav.camera, request=1, applied=Scene.GROUND, result=Result.DISTANCE_VERIFIED)))
     assert camera.pending is None
+
+
+def test_dynamic_camera_releases_the_previously_held_physical_key():
+    camera, ctx, nav, _ = setup()
+    nav = replace(nav, addon_build=319, camera_bindings=CameraBindings(1, "y", "h"))
+    assert camera.tick(ctx, 0, nav)
+    assert camera.tick(ctx, .7, replace(nav, sequence=1))
+    assert ctx.input.count("key_down", "y") == 1 and not ctx.input.count("key_down", "f8")
+    latest = replace(nav, sequence=2, camera_bindings=CameraBindings(2, "y", "h"))
+    assert camera.guard(ctx, .8, latest)
+    assert camera.pending is None and ctx.input.count("key_up", "y") == 1
 
 
 def test_camera_scene_debounce_manual_pause_and_unknown_context():

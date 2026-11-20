@@ -6,6 +6,19 @@ import pytest
 from bot.perception import cv as cvmod
 
 
+def test_player_bar_requires_visible_contiguous_fill():
+    bar = np.full((3, 124, 3), (25, 20, 18), dtype=np.uint8)
+    bar[:, :45] = (48, 126, 27)
+    assert cvmod.player_bar_percent(bar) == 38
+    assert cvmod.player_bar_percent(bar, mana=True) is None
+    bar[:, :45] = (23, 57, 140)
+    assert cvmod.player_bar_percent(bar, mana=True) == 38
+    bar[:, 75:86] = (23, 57, 140)
+    assert cvmod.player_bar_percent(bar, mana=True) is None
+    bar[:, 5:8] = (198, 162, 40)
+    assert cvmod.player_bar_percent(bar, mana=True) is None
+
+
 def _dot_template():
     """Node icon with a border — uniform templates are degenerate for NCC."""
     t = np.full((20, 20, 3), (255, 180, 40), dtype=np.uint8)

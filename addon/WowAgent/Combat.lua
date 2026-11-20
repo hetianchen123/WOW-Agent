@@ -6,6 +6,15 @@ local writeFacing, writeReach, writeFeedback, writeReceipt
 local castEpoch = 0
 local rangeErrorUntil, sightErrorUntil = 0, 0
 local liveTargetGUID, liveTargetEpoch, previousTargetGUID, previousTargetEpoch
+local deadTargetGUID, deadTargetEpoch
+
+function WowAgent.CombatLootTargetEpoch(guid)
+    if type(guid) ~= "string" then return end
+    if guid == liveTargetGUID then return liveTargetEpoch end
+    if guid == previousTargetGUID then return previousTargetEpoch end
+    if guid == deadTargetGUID then return deadTargetEpoch end
+end
+
 local pendingSetup
 local screen = CreateFrame("Frame", nil, UIParent)
 local secret = issecretvalue or function() return false end
@@ -444,6 +453,7 @@ local function Disarm()
     facingError = 0
     rangeErrorUntil, sightErrorUntil = 0, 0
     liveTargetGUID, liveTargetEpoch, previousTargetGUID, previousTargetEpoch = nil, nil, nil, nil
+    deadTargetGUID, deadTargetEpoch = nil, nil
     stateEpoch = (stateEpoch + 1) % 64
 end
 
@@ -586,6 +596,7 @@ local function Update()
     local p = Identity()
     local target, dead, guid = HostileTarget()
     if target > 0 and not dead then liveTargetGUID, liveTargetEpoch = guid, stateEpoch end
+    if target > 0 and dead then deadTargetGUID, deadTargetEpoch = guid, stateEpoch end
     -- The supported clients use seven bits for the character level.
     local specLevel = p.spec + p.level * 4096
     if p.level < 128 and target > 0 and not dead and IsEngaged("target") then
@@ -608,7 +619,9 @@ local function Update()
     local range = flags % 4 == 2 and target > 0 and not dead and AttackRange() or 0
     local key = armed and armed.key or 0
     if range ~= 1 and flags % 4 == 2 and target > 0 and not dead and armed.meleeSpell
-        and ActionMatches(5, nil, armed.meleeBody) then
+        and ActionMatches(5, nil, armed.meleeBody)
+        and ReadRangeValue(CheckInteractDistance, "target", 3) == true then
+        -- The queued spell alone can report in range at a distance on Forever.
         local check = C_Spell and C_Spell.IsSpellInRange or IsSpellInRange
         local melee = ReadRangeValue(check, armed.meleeSpell, "target")
         if melee == true or melee == 1 then range, key = 1, 5 end
@@ -707,17 +720,25 @@ local function SetupAction(kind, id, requestedKey)
             else print("WowAgent：宏已在数字键 " .. candidate) end
             return true
         end
-        if kind == "forever" and bound and EditMacro then
+        if (kind == "forever" or kind == "forever_melee") and bound and EditMacro then
             local existing, index = ReadAction(bound)
             local actualName = existing == "macro" and index and GetMacroInfo and Public(GetMacroInfo(index))
             local actualBody = actualName and ReadMacroBody(index, actualName)
             local owner = WowAgentDB and WowAgentDB.foreverOutputMacro
             local legacyAutoShot = actualName == "WAS75" and actualBody == MacroText(MacroBody(75))
-            if legacyAutoShot or (owner and owner.name == actualName and owner.body == actualBody) then
+            local ownedRanged = kind == "forever"
+                and (legacyAutoShot or (owner and owner.name == actualName and owner.body == actualBody))
+            local legacyMelee = kind == "forever_melee" and actualName
+                and actualName:match("^" .. name .. "%d*$") and actualBody
+                and actualBody == MacroText(WowAgent.Forever.MeleeMacro(id, Spellbook(), true))
+            if ownedRanged or legacyMelee then
                 local ok = pcall(EditMacro, index, nil, nil, body)
                 if ok and ActionMatches(candidate, action, body) then
-                    RememberForeverMacro(bound, body)
-                    return ArmAction(candidate, action, body)
+                    if action then
+                        RememberForeverMacro(bound, body)
+                        return ArmAction(candidate, action, body)
+                    end
+                    return true
                 end
                 return nil, ok and "macro_pending" or "forever_macro_unconfirmed"
             end
@@ -778,6 +799,7 @@ end
 screen:SetSize(142, 128)
 screen:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 0, 80)
 screen:SetFrameStrata("TOOLTIP")
+if WowAgent.RoadScan then WowAgent.RoadScan.RegisterStrip(screen) end
 writeFeedback = WowAgent.NewPixelRow(screen, -16)
 writeReceipt = WowAgent.NewPixelRow(screen, -32)
 writeReach = WowAgent.NewPixelRow(screen, 0)
@@ -1063,4 +1085,8 @@ WowAgent.LayoutSupport = {
     Disarm = Disarm, MacroDefinition = MacroDefinition, WriteMacro = WriteMacro,
     SwitchLoadout = SwitchLoadout, LearnedSpells = Spellbook,
     SetupAction = SetupAction, ActionMatches = ActionMatches, BoundSlot = BoundSlot, ReadMacroBody = ReadMacroBody,
+    ArmedActionMatches = function(key, spell, body)
+        return armed and armed.key == key and armed.spell == spell
+            and MacroText(armed.body) == MacroText(body) and ActionMatches(key, spell, body)
+    end,
 }

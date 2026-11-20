@@ -1,12 +1,14 @@
 """Recover the player and verify class preparation before resuming a quest."""
 import math
 
+from ..control.input_helper import HelperActionRejected
 from ..control.quest_travel import QuestTrip
 from ..control.navigation import heading_error
 from ..control.pathfinding import GridRouter
-from ..perception.capture import CaptureError, game_ui_bounds
-from ..perception.cv import minimap_corpse_pin, minimap_corpse_bearing
-from ..perception.travel_channel import LifeState, PetState, TravelFlags
+from ..perception.capture import CaptureError, ScreenCapture, frontmost_game_bounds, game_ui_bounds
+from ..perception.cv import minimap_corpse_pin, minimap_corpse_bearing, player_bar_percent
+from ..perception.nav3d_channel import nav3d_region
+from ..perception.travel_channel import LifeState, PetState, SupplyAction, TravelFlags, travel_region
 
 
 class CorpseDistanceSearch:
@@ -192,13 +194,14 @@ class QuestRecovery:
         self.hover = None
         self.clicked_at = float("-inf")
         self.clicks = 0
+        self.dialog_key_attempted = False
         self.preparation = None
         self.approach_heading = None
         self.near_probe = None
         self.near_steps = 0
         self.near_failed = False
 
-    def tick(self, ctx, now, nav, heading, set_keys, window_bounds):
+    def tick(self, ctx, now, nav, heading, set_keys, window_bounds, *, ground_route=None):
         if now - self.started >= 360:
             return "timeout"
         sample = nav.recovery if nav else None
@@ -218,6 +221,7 @@ class QuestRecovery:
             set_keys(frozenset())
             self.life, self.life_at = sample.life, now
             self.hover, self.clicks, self.clicked_at = None, 0, float("-inf")
+            self.dialog_key_attempted = False
             self.trip = None
             self.search = None
             self.minimap_tracker = None
@@ -280,6 +284,9 @@ class QuestRecovery:
                 return "corpse_position_unavailable" if missing == ("corpse_position",) else "corpse_route_unavailable"
             return
         self.route_missing = ()
+        if (ground_route and sample.corpse is not None
+                and ground_route(nav, sample.corpse, heading)):
+            return
         probing = False
         if destination is None:
             if self.search is None or self.search.map_id != nav.map_id:
@@ -360,12 +367,23 @@ class QuestRecovery:
 
     def confirm(self, ctx, now, sample, window_bounds):
         # A visible disabled popup can be waiting for the game's corpse timer.
-        if sample.button is None:
+        if sample.button is None and not sample.dialog_key:
             self.hover = None
             return
         if now - self.clicked_at < 4:
             return
         if self.clicks >= 2:
+            return "confirmation_unacknowledged"
+        if sample.dialog_key and not self.dialog_key_attempted:
+            ctx.input.tap_precise(sample.dialog_key, .05)
+            self.dialog_key_attempted = True
+            self.clicks += 1
+            self.clicked_at = now
+            self.hover = None
+            ctx.log_event("quest_recovery_dialog_key", {"life": self.life.name, "key": sample.dialog_key,
+                "attempt": self.clicks})
+            return
+        if sample.button is None:
             return "confirmation_unacknowledged"
         try:
             x, y, width, height = window_bounds()
@@ -376,22 +394,138 @@ class QuestRecovery:
             return "dialog_coordinates_unverified"
         bx, by = sample.button
         point = (round(x + bx * width), round(y + height - (1 - by) * ui_height))
-        if self.hover is None or math.dist(self.hover[0], point) > 3:
-            ctx.input.move_to(*point, jitter_px=0)
-            self.hover = point, now
-            ctx.log_event("quest_recovery_hover", {"life": self.life.name, "point": point})
-            return
-        if not sample.hovered:
+        needs_hover = self.hover is None or math.dist(self.hover[0], point) > 3
+        if not needs_hover and not sample.hovered:
             if now - self.hover[1] >= 3:
                 return "dialog_hover_unverified"
             return
-        # The verified helper-side click channel: native popups poll system
-        # button state, so split in-process down/up events can go unnoticed.
-        ctx.input.click_ui()
+        try:
+            if needs_hover:
+                ctx.input.move_to(*point, jitter_px=0)
+            else:
+                # Native popups may poll system button state. Use the helper's verified click.
+                ctx.input.click_ui()
+        except HelperActionRejected as exc:
+            self.hover = None
+            ctx.log_event("quest_recovery_dialog_input_rejected", {"life": self.life.name,
+                "operation": "hover" if needs_hover else "click", "point": point, "reason": str(exc)})
+            return "dialog_input_rejected"
+        if needs_hover:
+            self.hover = point, now
+            ctx.log_event("quest_recovery_hover", {"life": self.life.name, "point": point})
+            return
         self.clicks += 1
         self.clicked_at = now
         self.hover = None
         ctx.log_event("quest_recovery_click", {"life": self.life.name, "attempt": self.clicks, "point": point})
+
+
+class ConsumableRecovery:
+    """Use a verified inventory binding, then observe the resulting recovery."""
+
+    def __init__(self):
+        self.pending = None
+        self.rest = None
+        self.next_use = 0.0
+        self.visual_sequence = None
+        self.visual_vitals = (None, None)
+
+    def read_bars(self, ctx, nav, sample):
+        if (sample.bars is None or not isinstance(ctx.capture, ScreenCapture)
+                or sample.health is not None and sample.mana is not None):
+            return sample.health, sample.mana
+        if self.visual_sequence == nav.sequence:
+            return self.visual_vitals
+        self.visual_sequence = nav.sequence
+        x, y = ctx.cfg.channel.x, ctx.cfg.channel.y
+        left, right, hp_y, mana_y = sample.bars
+        width = right - left
+        strips = (travel_region(x, y, supply_bars=True), nav3d_region(x, y, raised=True))
+        try:
+            wx, wy, ww, wh = frontmost_game_bounds()
+            results = [sample.health, sample.mana]
+            for idx, center in enumerate((hp_y, mana_y)):
+                if center is None or results[idx] is not None:
+                    continue
+                bx, by = x + left, y + center - 1
+                if not (wx <= bx and bx + width <= wx + ww and wy <= by and by + 3 <= wy + wh):
+                    continue
+                if any(bx < sx + sw and bx + width > sx and by < sy + sh and by + 3 > sy
+                       for sx, sy, sw, sh in strips):
+                    continue
+                results[idx] = player_bar_percent(ctx.capture.grab(bx, by, width, 3), mana=idx == 1)
+            previous = self.visual_vitals
+            self.visual_vitals = tuple(results)
+            if any(native is None and current is not None and old is None
+                   for native, current, old in zip((sample.health, sample.mana), results, previous)):
+                ctx.log_event("quest_consumable_visible_vitals", {"health": results[0], "mana": results[1],
+                    "bars": sample.bars})
+            return self.visual_vitals
+        except (CaptureError, ValueError):
+            self.visual_vitals = sample.health, sample.mana
+            return self.visual_vitals
+
+    def tick(self, ctx, now, nav, *, in_combat, can_start, release):
+        sample = nav.vitals
+        if not nav.recovery or nav.recovery.life != LifeState.ALIVE:
+            self.pending = self.rest = None
+            return False
+        health, mana = self.read_bars(ctx, nav, sample) if sample else (None, None)
+        if self.pending:
+            action, item, started = self.pending
+            if sample and sample.action == action and sample.item_id == item and sample.result:
+                ctx.log_event("quest_consumable_receipt", {
+                    "item": item, "action": action.name, "result": sample.result,
+                    "health": health, "mana": mana,
+                })
+                self.pending = None
+                if sample.result == "consumed" and action != SupplyAction.POTION and not in_combat:
+                    self.rest = action, now + 18
+            elif now - started >= 3.5 or (in_combat and action != SupplyAction.POTION):
+                ctx.log_event("quest_consumable_wait_ended", {"item": item, "combat": in_combat})
+                self.pending = None
+            elif action != SupplyAction.POTION:
+                release()
+                return True
+            else:
+                return False
+        if self.rest:
+            action, deadline = self.rest
+            value = health if action == SupplyAction.FOOD else mana
+            if not in_combat and now < deadline and (value is None or value < 90):
+                release()
+                return True
+            self.rest = None
+            ctx.log_event("quest_consumable_rest_ended", {
+                "action": action.name, "percent": value, "combat": in_combat,
+            })
+        if (not can_start or not sample or sample.result or now < self.next_use
+                or nav.flags & (TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING
+                                | TravelFlags.SWIMMING | TravelFlags.CASTING)):
+            return False
+        potion, food, water = sample.supplies or tuple(
+            sample.item_id if sample.action == action else 0
+            for action in (SupplyAction.POTION, SupplyAction.FOOD, SupplyAction.WATER)
+        )
+        if not in_combat and food and health is not None and health <= 65:
+            action, item, key = SupplyAction.FOOD, food, "f3"
+        elif not in_combat and water and mana is not None and mana <= 45:
+            action, item = SupplyAction.WATER, water
+            key = "f2" if (nav.addon_build or 0) >= 303 else "f3"
+        elif potion and health is not None and health <= (40 if in_combat else 30):
+            action, item, key = SupplyAction.POTION, potion, "f1"
+        else:
+            return False
+        self.pending = action, item, now
+        self.next_use = now + 5
+        release()
+        ctx.log_event("quest_consumable_requested", {
+            "item": item, "action": action.name, "health": health, "mana": mana,
+            "visual_health": sample.health is None and health is not None,
+            "visual_mana": sample.mana is None and mana is not None,
+        })
+        ctx.input.tap(key)
+        return True
 
 
 class ClassPreparation:

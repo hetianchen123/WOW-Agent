@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
-output="$root/data/apps"
+output="${WOWAGENT_APP_OUTPUT:-$root/data/apps}"
 cache="$root/data/swift-module-cache"
 mkdir -p "$output" "$cache"
 stage="$(mktemp -d "$root/data/.app-build.XXXXXX")"
@@ -61,6 +61,7 @@ printf 'identifier "io.wowagent.controller" and cdhash H"%s"' "$controller_hash"
 for app in "$controller" "$helper"; do
     /usr/bin/codesign --verify --strict "$app"
 done
+bash "$root/macos/build-capture.sh" "$output"
 for app in "$controller" "$helper"; do
     destination="$output/$(basename "$app")"
     rm -rf "$destination"

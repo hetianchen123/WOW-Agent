@@ -24,7 +24,7 @@
 - 固定 CascLib、wow.export、Map.dbd 版本；构建与只读补丁见 `native/nav3d/casc/README.md`。无 API 密钥依赖。
 - CASC 按产品 `wow` 选择本地构建。严格读取校验，不联网补资产、不将缺密钥内容填零。缓存按 Build Key 隔离，读回校验摘要。
 - `Map.db2` 解析世界地图身份、Directory 和 WDT FileDataID；WDT 给出实际 tile 文件 ID。uiMapID 只用于界面与同帧一致性，不作资产世界 ID。
-- 地形保留高度、低/高精度洞口。水域所在地形 chunk 保守排除；ROI 内 WMO 水体暂时明确拒绝。WMO 使用碰撞/普通渲染面标志，排除 detail 面和 MOGP 不可达/antiportal group（0x80 / 0x4000000 或 antiportal 名称）；兼容 16/32 位索引与新材质标志。M2 仅用碰撞顶点和索引。
+- 地形保留高度、低/高精度洞口。ADT 水域按 MH2O 实际湿格排除，缺少有效覆盖信息时排除相应 chunk。ROI 内有 WMO 水体时停止提取。WMO 使用碰撞及普通渲染面标志，排除 detail 面和 MOGP 不可达或 antiportal group（0x80、0x4000000 或 antiportal 名称），兼容 16/32 位索引与新材质标志。M2 使用碰撞顶点和索引。
 - 应用 ADT 实例的位移、旋转和缩放；包含 WMO 全局与选定 doodad set 的 M2 碰撞。实例、源文件、依赖、变换与摘要逐项落盘。邻接 tile 也检查可能跨界的摆放。现代 FileDataID 为主要路径；旧名称索引可显式提供 listfile。
 - 三角形裁切到 ROI 后构网。首轮使用起终点包围框加 32 码，最大边长 320 码，仍受四百万水平体素上限约束。没有生成全世界导航网格。
 - 不支持的全局 WMO 地图、水体、缺资源、未知模型结构均报错。动态门、运输载具、任务相位替换等不在静态资源证明范围内，不能因此认为当前场景已可通行。

@@ -20,6 +20,7 @@ from .planner import Frame, NavigationError
 ROOT = Path(__file__).resolve().parents[2]
 TILE = 1600/3
 CENTER = TILE*32
+ALL_TERRAIN_CELLS = (1 << 64) - 1
 
 
 class ClientDecoder:
@@ -85,7 +86,33 @@ def raw_vertices(values):
     return v[:,[0,2,1]]*np.array([1,-1,1])
 
 
-def terrain(chunk):
+def liquid_cells(instances):
+    """Return the union of wet MH2O cells. Incomplete records block the chunk."""
+    wet = 0
+    for layer in instances:
+        if not isinstance(layer, dict):
+            return ALL_TERRAIN_CELLS
+        x0, y0, width, height, offset = (layer.get(key) for key in
+            ("xOffset", "yOffset", "width", "height", "offsetExistsBitmap"))
+        if (any(type(v) is not int for v in (x0, y0, width, height, offset)) or offset < 0
+                or not (0 <= x0 < x0 + width <= 8 and 0 <= y0 < y0 + height <= 8)):
+            return ALL_TERRAIN_CELLS
+        coverage = (1 << (width * height)) - 1
+        if offset:
+            bitmap = layer.get("bitmap")
+            nbytes = (width * height + 7) // 8
+            if (not isinstance(bitmap, list) or len(bitmap) < nbytes
+                    or any(type(v) is not int or not 0 <= v <= 255 for v in bitmap[:nbytes])):
+                return ALL_TERRAIN_CELLS
+            coverage &= int.from_bytes(bytes(bitmap[:nbytes]), "little")
+        row_mask = (1 << width) - 1
+        for y in range(height):
+            row = (coverage >> (y * width)) & row_mask
+            wet |= row << ((y + y0) * 8 + x0)
+    return wet
+
+
+def terrain(chunk, wet=0):
     unit=TILE/128;v=[];t=[];cx,cy,cz=chunk['position']
     for row in range(17):
         for col in range(8 if row%2 else 9):
@@ -94,7 +121,7 @@ def terrain(chunk):
         for x in range(8):
             hole=((chunk['holesHighRes'][y]>>x)&1 if chunk['flags']&0x10000
                   else (chunk['holesLowRes']>>(x//2+4*(y//2)))&1)
-            if hole:continue
+            if hole or wet & (1 << (y * 8 + x)):continue
             i=y*17+9+x
             # ENU up-facing winding.
             t.extend([[i,i-9,i+8],[i,i-8,i-9],[i,i+9,i-8],[i,i+8,i+9]])
@@ -102,12 +129,13 @@ def terrain(chunk):
 
 
 class SceneBuilder:
-    def __init__(self, casc, decoder, roi, names=None):
+    def __init__(self, casc, decoder, roi, names=None, *, tiled=False):
         self.casc,self.decoder,self.roi=casc,decoder,np.asarray(roi,float)
-        if self.roi.shape!=(2,2) or not np.isfinite(self.roi).all() or (self.roi[1]<=self.roi[0]).any() or (self.roi[1]-self.roi[0]>320).any():
+        max_span = 800 if tiled else 320
+        if self.roi.shape!=(2,2) or not np.isfinite(self.roi).all() or (self.roi[1]<=self.roi[0]).any() or (self.roi[1]-self.roi[0]>max_span).any():
             raise NavigationError('invalid_local_roi')
         self.names=names or {};self.vertices=[];self.triangles=[];self.instances=[];self.seen=set()
-        self.excluded_liquid_chunks=[];self.excluded_wmo_groups=[]
+        self.excluded_liquid_chunks=[];self.excluded_liquid_cells=[];self.excluded_wmo_groups=[]
 
     def read(self,kind,fdid):return self.decoder.decode(kind,self.casc.read(fdid))
 
@@ -204,12 +232,14 @@ class SceneBuilder:
                 tiles.append(dict(x=x,y=y,**entry))
                 if xmin<=x<=xmax and ymin<=y<=ymax:
                     adt=self.read('adt',entry['rootADT'])
+                    liquids=adt.get('liquidChunks',[])
                     for i,ch in enumerate(adt['chunks']):
-                        # Conservatively exclude whole chunks carrying any liquid.
-                        liquids=adt.get('liquidChunks',[])
-                        if liquids and liquids[i]['instances']:
+                        wet=liquid_cells(liquids[i]['instances']) if liquids else 0
+                        if wet==ALL_TERRAIN_CELLS:
                             self.excluded_liquid_chunks.append([x,y,i]);continue
-                        v,t=terrain(ch);self.add(v,t,np.eye(4),dict(kind='terrain',file_id=entry['rootADT'],chunk=i))
+                        if wet:
+                            self.excluded_liquid_cells.append(dict(x=x,y=y,chunk=i,mask=f'{wet:016x}'))
+                        v,t=terrain(ch,wet);self.add(v,t,np.eye(4),dict(kind='terrain',file_id=entry['rootADT'],chunk=i))
                 if not entry['obj0ADT']:raise NavigationError('tile_objects_missing')
                 obj=self.read('obj',entry['obj0ADT'])
                 for iswmo,models in ((False,obj.get('models',[])),(True,obj.get('worldModels',[]))):
@@ -236,6 +266,7 @@ class SceneBuilder:
         evidence=dict(schema=1,map_record=maprow,build=self.casc.build,roi=self.roi.tolist(),tiles=tiles,
             dependencies=dict(casclib=CASC_COMMIT,wow_export=EXPORT_COMMIT,casclib_patch_sha256=hashlib.sha256((ROOT/'native/nav3d/casc/readonly.patch').read_bytes()).hexdigest(),map_dbd_sha256=hashlib.sha256(Path(dbd).read_bytes()).hexdigest()),
             resources=list(self.casc.records.values()),instances=self.instances,excluded_liquid_chunks=self.excluded_liquid_chunks,
+            excluded_liquid_cells=self.excluded_liquid_cells,
             excluded_wmo_groups=self.excluded_wmo_groups,
             alignment_verified=False,phase_verified=False,dynamic_objects_included=False,reached_in_game=False)
         (output/'extraction.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2))

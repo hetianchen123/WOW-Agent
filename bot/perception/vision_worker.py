@@ -67,7 +67,7 @@ class VisionWorker:
                         raise ValueError("oversized vision response")
 
     def inspect(self, images, *, crop=None, target=None, nearfield=False, composition=False, guard=None, timeout=40,
-                player_identity=None):
+                player_identity=None, road_map=False):
         deadline = time.monotonic() + timeout
         while not self.lock.acquire(timeout=.1):
             self._check(guard)
@@ -87,7 +87,7 @@ class VisionWorker:
             request_id = uuid.uuid4().hex
             request = {"id": request_id, "images": [str(path) for path in images],
                        "crop": crop, "target": target, "nearfield": nearfield, "composition": composition,
-                       "player_identity": player_identity}
+                       "player_identity": player_identity, "road_map": road_map}
             self.process.stdin.write((json.dumps(request) + "\n").encode())
             self.process.stdin.flush()
             result = self._read(deadline, guard)

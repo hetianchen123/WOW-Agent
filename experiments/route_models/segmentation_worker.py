@@ -18,7 +18,7 @@ from bot.perception.live_projection import read_bundle,rebase_projection
 from bot.control.projected_route import interaction_region,plan_segmented_approach
 from bot.perception.automatic_ground import AutomaticGround
 from bot.perception.calibration_cache import load_cache,save_cache
-from bot.decision.automatic_approach import calibration_probe,npc_search_region
+from bot.decision.automatic_approach import calibration_probe,npc_search_region,travel_search_region
 from bot.perception.building_scene import (BUILDING_PROMPT, BUILDING_REOBSERVE,
     describe_building_scene, building_ui_exclusion, building_ground_measurement, turnaway_view)
 from bot.decision.building_navigation import building_navigation_region
@@ -70,6 +70,8 @@ def automatic_job(calibrator,frame,rgb,observed,job):
             crossing=job['goal_mode']=='building_cross',searching=job['goal_mode']=='building_search',
             visited=job.get('visited',[]),passages=job.get('passages',[]),crossing_origin=job.get('crossing_origin'),
             navigation_context=job.get('navigation_context'),returning=job.get('return_passage_id'))
+    elif job.get('goal_mode')=='travel':
+        region,goal=travel_search_region(projection,observed,job.get('destination'))
     else:
         region,goal=npc_search_region(projection,observed,rgb,job.get('destination'),
                                      visited=job.get('visited',[]))

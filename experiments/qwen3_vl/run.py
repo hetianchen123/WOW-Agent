@@ -108,6 +108,16 @@ near_ground_visible (true/false), evidence (one short visible reason).
 Unknown visibility must be false. A normal framing is NOT proof of walkable ground."""
 
 
+ROAD_MAP_PROMPT = """Trace major ground roads visibly drawn on this top-down World of Warcraft map.
+Respond with compact JSON {"roads":[[[x,y],[x,y],...],...]}. Coordinates are integers from 0 to 1000
+measured from the exact image left/top to right/bottom, x right, y down.
+Follow the actual center of each visible light brown or pale road stroke. Place a point at every bend, with short
+segments on curves. Keep separate roads separate and end a line where the actual road stops being visible.
+Ignore rivers, shorelines, mountain ridges, text, icon edges, faded parchment and flat gray masked areas.
+End where the road disappears. Avoid extending toward an image edge. Return at most 4 lines with 2–14
+points each. If you see no clear road strokes return {"roads":[]}."""
+
+
 def parse_composition(response):
     value = parse_json(response)
     if not isinstance(value, dict) or set(value) != {"view", "player_visible", "near_ground_visible", "evidence"}:
@@ -291,17 +301,19 @@ class VisionModel:
         return record
 
     def inspect(self, images, *, crop=None, target=None, nearfield=False, composition=False, repeat=1,
-                player_identity=None):
+                player_identity=None, road_map=False):
         from PIL import Image
         if target not in (None, "catapult"):
             raise ValueError("unsupported target")
+        if road_map and (crop or target or nearfield or composition):
+            raise ValueError("road observation needs the full verified canvas")
         if composition and (target or nearfield):
             raise ValueError("composition must use a separate full-scene observation")
-        instruction = COMPOSITION_PROMPT if composition else TARGET_PROMPT.format(target=target) if target else NEAR_PROMPT if nearfield else PROMPT
+        instruction = ROAD_MAP_PROMPT if road_map else COMPOSITION_PROMPT if composition else TARGET_PROMPT.format(target=target) if target else NEAR_PROMPT if nearfield else PROMPT
         if nearfield:
             instruction += "\nVerified game character facts: " + json.dumps(player_identity or {})
             instruction += ". Do not identify quest NPCs by proximity to quest icons. Unknown identity stays unknown."
-        parse = parse_composition if composition else parse_target if target else parse_near_observation if nearfield else parse_observation
+        parse = parse_json if road_map else parse_composition if composition else parse_target if target else parse_near_observation if nearfield else parse_observation
         prompt = self.template(self.processor, self.config, instruction, num_images=1)
         self.requests += 1
         cases = []
@@ -330,7 +342,8 @@ class VisionModel:
             for attempt in range(1, repeat + 1):
                 started = time.perf_counter()
                 output = self.generate(self.model, self.processor, prompt, [image],
-                                       max_tokens=290 if nearfield else 160, temperature=0, verbose=False)
+                                       max_tokens=460 if road_map else 290 if nearfield else 160,
+                                       temperature=0, verbose=False)
                 record = {"image": path.name, "attempt": attempt, "size": list(image.size),
                           "elapsed_s": round(time.perf_counter() - started, 2),
                           "prompt_tokens": output.prompt_tokens, "generation_tokens": output.generation_tokens,
@@ -357,7 +370,8 @@ def serve(model_path):
             with redirect_stdout(sys.stderr):
                 cases = model.inspect(request["images"], crop=request.get("crop"), target=request.get("target"),
                                       nearfield=request.get("nearfield", False), composition=request.get("composition", False),
-                                      player_identity=request.get("player_identity"))
+                                      player_identity=request.get("player_identity"),
+                                      road_map=request.get("road_map", False))
             result = {"id": request["id"], "cases": cases}
         except Exception as exc:
             result = {"id": request.get("id"), "error": str(exc)}

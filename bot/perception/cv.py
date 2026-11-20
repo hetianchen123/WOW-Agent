@@ -76,6 +76,25 @@ def absdiff_score(a_rgb: np.ndarray, b_rgb: np.ndarray) -> float:
     )
 
 
+def player_bar_percent(rgb: np.ndarray, *, mana: bool = False) -> int | None:
+    """Read the contiguous fill of an already identified native player bar."""
+    if rgb.ndim != 3 or rgb.shape[0] < 3 or rgb.shape[1] < 30 or rgb.shape[2] != 3:
+        return None
+    pixels = rgb[:, 2:-2].astype(np.int16)
+    red, green, blue = np.moveaxis(pixels, 2, 0)
+    fill, other = (blue, green) if mana else (green, blue)
+    colored = np.mean((fill >= 70) & (fill - red >= 25) & (fill - other >= 20), axis=0) >= .66
+    empty = np.mean(np.max(pixels, axis=2) < 95, axis=0) >= .66
+    indices = np.flatnonzero(colored)
+    if len(indices) < 4 or indices[0] > 4:
+        return None
+    start = int(indices[0])
+    end = int(indices[-1]) + 1
+    if np.count_nonzero(~colored[start:end]) > 3 or np.count_nonzero(~empty[end + 2:]) > 3:
+        return None
+    return 100 if end == colored.size else min(100, math.ceil(100 * (end + 3) / rgb.shape[1]))
+
+
 def hostile_nameplate_points(frame_rgb: np.ndarray) -> tuple[tuple[int, int], ...]:
     """Centers of red health-bar shapes in the world view, in capture pixels."""
     if frame_rgb.size == 0:

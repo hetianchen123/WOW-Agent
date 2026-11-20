@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 from ..core.statemachine import Machine
 from ..control.input_helper import HelperSessionStopped
+from ..perception.capture import CaptureError
 from .context import ModuleContext
 
 log = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class Module:
                 dt = now - last
                 last = now
                 self.ctx.begin_tick()
-                self.ctx.pump_channel()
+                self.pump_channel()
                 self.ctx.evidence_state = self.machine.state_name
                 self.machine.tick(dt)
                 self.ctx.sample_gold()
@@ -65,11 +66,17 @@ class Module:
         except HelperSessionStopped as exc:
             self.ctx.log_event("input_session_stopped", {"module": self.name, "reason": str(exc)})
             return self._finish("stopped:input_session_stopped", t0)
+        except CaptureError as exc:
+            self.ctx.log_event("capture_session_stopped", {"module": self.name, "reason": str(exc)})
+            return self._finish("stopped:capture_unavailable", t0)
         except Exception as exc:  # noqa: BLE001
             log.exception("module crashed")
             self.ctx.log_event("module_crash", {"module": self.name, "error": repr(exc)})
             self.ctx.snapshot("crash_" + self.name)
             return self._finish(f"stopped:crash:{exc}", t0)
+
+    def pump_channel(self):
+        self.ctx.pump_channel()
 
     def _finish(self, status: str, t0: float) -> ModuleOutcome:
         self.ctx.stats["duration_s"] = round(time.time() - t0, 1)

@@ -61,7 +61,8 @@ class ModuleContext:
     def start_evidence(self, module: str) -> None:
         if self.evidence is not None or not module.startswith("quest"):
             return
-        installed = Path("/Volumes/Mac SSD1/Applications/World of Warcraft/_retail_/Interface/AddOns/WowAgent")
+        edition = "_forever_" if self.cfg.game_version.startswith("1.60.") else "_retail_"
+        installed = Path("/Volumes/Mac SSD1/Applications/World of Warcraft") / edition / "Interface/AddOns/WowAgent"
         try:
             manifest = build_manifest(installed=installed)
             manifest.update(module=module, input_backend=self.input.name,
@@ -80,6 +81,11 @@ class ModuleContext:
         for k in list(self._frame_cache):
             if now - self._frame_cache[k][0] > 0.2:
                 del self._frame_cache[k]
+
+    def invalidate_game_observation(self) -> None:
+        self._frame_cache.clear()
+        self.channel.invalidate()
+        self._fastev_cursor = len(self.channel.events)
 
     def frame(self, rect: Rect) -> np.ndarray:
         key = tuple(rect)

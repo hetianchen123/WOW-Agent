@@ -1,7 +1,7 @@
 -- World-map road editor. Optional APIs are checked at entry for older clients.
 local Roads = WowAgent.Roads
 local editor, layer, capture, attachedMap
-local labels, lines = {}, {}
+local labels, lines, scanLines = {}, {}, {}
 local editing, crossing, loading = false, false, false
 local Refresh, SyncFields, OpenMap
 local pendingOpen, mapMessage
@@ -145,6 +145,7 @@ local function Render()
     if not layer then return end
     for _, label in ipairs(labels) do label:Hide() end
     for _, line in ipairs(lines) do line:Hide() end
+    for _, line in ipairs(scanLines) do line:Hide() end
     layer:SetShown(editor:IsShown())
     if not editor:IsShown() or not MapReady() then return end
     local draft = Roads.Draft()
@@ -156,6 +157,19 @@ local function Render()
     local artID = C_Map and C_Map.GetMapArtID and C_Map.GetMapArtID(mapID)
     local points, segments = Roads.VisibleSegments(draft, mapID, artID)
     local w, h = attachedMap:GetCanvas():GetSize()
+    local scanIndex = 0
+    for _, trace in ipairs(Roads.Scanned(mapID, artID)) do
+        for j = 2, #trace do
+            scanIndex = scanIndex + 1
+            local line = scanLines[scanIndex]
+            if not line then line = layer:CreateLine(nil, "ARTWORK"); scanLines[scanIndex] = line end
+            line:SetThickness(2)
+            line:SetColorTexture(.4, .86, .87, .8)
+            line:SetStartPoint("TOPLEFT", layer, trace[j - 1][1] * w, -trace[j - 1][2] * h)
+            line:SetEndPoint("TOPLEFT", layer, trace[j][1] * w, -trace[j][2] * h)
+            line:Show()
+        end
+    end
     for i, pair in ipairs(segments) do
         local line = lines[i]
         if not line then line = layer:CreateLine(nil, "OVERLAY"); lines[i] = line end
@@ -253,7 +267,7 @@ local function Build()
     end)
     editor.status = Label(editor, "", 16, 392)
     editor.status:SetHeight(65)
-    Label(editor, "绿色：步行 · 黄色：骑马 · 蓝色：飞行\n标记适用于整条路线，通行尚未验证。\n当前编辑器不驱动角色移动。", 16, 464)
+    Label(editor, "绿色：步行 · 黄色：骑马 · 蓝色：飞行\n青色：本地识别的主路候选\n标记表示路线意图，通行待验证。", 16, 464)
     Button("显示末点地图", 16, 523, 150, function()
         local draft = Roads.Draft()
         local point = draft.points[#draft.points]

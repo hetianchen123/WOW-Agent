@@ -12,13 +12,13 @@ from .input_mock import MockInput
 log = logging.getLogger(__name__)
 
 
-def create_input(cfg: InputConfig, force_mock: bool = False) -> InputBase:
+def create_input(cfg: InputConfig, force_mock: bool = False, *, keep_online: bool = False) -> InputBase:
     if force_mock or cfg.backend == "mock":
         return MockInput()
     from .input_helper import HelperInput, in_controller_app
 
     if in_controller_app():
-        return HelperInput(cfg.key_jitter)
+        return HelperInput(cfg.key_jitter, keep_online=keep_online)
     backend = cfg.backend
     if backend == "auto":
         backend = "mac" if platform.system() == "Darwin" else "win"

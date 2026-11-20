@@ -42,8 +42,9 @@ class Fight:
         self.last_facing_error = None
         self.turn_goal: float | None = None
         self.turn_deadline = 0.0
-        self.facing_probed = False
+        self.facing_probes = 0
         self.turn_at = float("-inf")
+        self.last_facing_at = None
         self.approach = approach
         self.defense = defense
         self.approach_at = float("-inf")
@@ -55,9 +56,19 @@ class Fight:
         self.pending_action_at = None
         self.no_receipts = 0
         self.last_damage_at = None
+        self.last_cast_at = None
         self.first_output_at = None
         self.last_credit_at = None
         self.receipt_at = None
+
+    def last_progress(self, sample: CombatSample, since: float) -> float:
+        times = [since, self.last_damage_at, self.last_credit_at]
+        if (sample.target_health is None and sample.target_engaged
+                and client_edition(sample.build) == "forever"):
+            # Keep a bounded fight open while verified casts are arriving and
+            # HP is hidden. The native quest counter still decides credit.
+            times.extend((self.last_cast_at, self.last_facing_at))
+        return max(stamp for stamp in times if stamp is not None)
 
     def step(self, now: float, sample: CombatSample | None, navigation=None) -> tuple[str, str | None]:
         if sample is None:
@@ -85,7 +96,8 @@ class Fight:
             return "action_binding_changed", None
         if self.key is not None and sample.key != self.key:
             self.pending_action_at, self.no_receipts = None, 0
-            self.turn_goal, self.facing_probed = None, False
+            self.first_output_at = None
+            self.turn_goal, self.facing_probes = None, 0
             self.last_facing_error = sample.facing_error
         starting = self.identity is None
         self.identity, self.state_epoch, self.key = sample.identity, sample.state_epoch, sample.key
@@ -101,7 +113,10 @@ class Fight:
             self.receipt_at = now
         if sample.cast_epoch is not None and self.cast_epoch != sample.cast_epoch:
             if self.cast_epoch is not None and self.pending_action_at is not None:
+                self.last_cast_at = now
                 self.pending_action_at, self.no_receipts = None, 0
+                if client_edition(sample.build) == "forever":
+                    self.facing_probes = 0
             self.cast_epoch = sample.cast_epoch
         if sample.target_health is not None:
             if self.last_health is not None and sample.target_health < self.last_health:
@@ -152,12 +167,13 @@ class Fight:
         elif now - self.out_of_range_at < .6:
             return "waiting", None
         if sample.cast_epoch is not None:
-            last_progress = max((stamp for stamp in (self.first_output_at, self.last_damage_at, self.last_credit_at)
-                                 if stamp is not None), default=now)
-            if now - last_progress >= 12:
+            if self.first_output_at is not None and now - self.last_progress(sample, self.first_output_at) >= 12:
                 return "no_progress", None
             if self.pending_action_at is not None:
-                if now - self.pending_action_at < 1.6:
+                # A verified Forever hunter melee macro queues the strike for
+                # the next swing. Give that swing time to produce a receipt.
+                queued_melee = client_edition(sample.build) == "forever" and sample.class_id == 3 and sample.key == 5
+                if now - self.pending_action_at < (3.8 if queued_melee else 1.6):
                     return "waiting", None
                 self.no_receipts += 1
                 self.pending_action_at = None
@@ -183,16 +199,20 @@ class Fight:
         if sample.facing_error is None or sample.facing is None or not sample.turn_verified:
             return "facing_feedback_unavailable", None
         if self.turn_goal is None:
-            if self.facing_probed:
+            forever_attacker = client_edition(sample.build) == "forever" and sample.target_engaged
+            probe_budget = 9 if forever_attacker else 1
+            if self.facing_probes >= probe_budget:
                 return "facing_unconfirmed", None
-            self.turn_goal = (sample.facing + FACING_PROBE_ANGLE) % math.tau
-            self.facing_probed = True
+            angle = math.radians(48) if forever_attacker else FACING_PROBE_ANGLE
+            self.turn_goal = (sample.facing + angle) % math.tau
+            self.facing_probes += 1
             self.turn_deadline = now + 3
         error = heading_error(sample.facing, self.turn_goal)
         if abs(error) <= math.radians(15):
             if now - self.turn_at < TURN_SETTLE:
                 return "waiting", None
             self.turn_goal = None
+            self.last_facing_at = now
             return None
         if now >= self.turn_deadline:
             return "facing_turn_timeout", None
@@ -234,6 +254,7 @@ class QuestHunt:
         self.frame_at = 0.0
         self.binding = None
         self.search_heading: float | None = None
+        self.rejected_selection: tuple[int, int] | None = None
         self.search_turn_at = float("-inf")
         self.search_sector_at: float | None = None
 
@@ -324,10 +345,14 @@ class QuestHunt:
                     return "uncredited_target", None
             return "no_quest_credit", None
 
+        selection = (sample.target_id, sample.state_epoch)
+        if selection != self.rejected_selection:
+            self.rejected_selection = None
         matches = sample.target_id in self.targets or (not self.targets and verified_target != 0
                                                         and sample.target_id == verified_target)
         if self.fight is None:
-            if matches and not sample.target_dead and not sample.target_danger and not sample.tap_denied:
+            if (matches and (in_combat or self.rejected_selection is None)
+                    and not sample.target_dead and not sample.target_danger and not sample.tap_denied):
                 self.fight = Fight(sample.target_id, approach=True)
                 self.started_at, self.baseline, self.observed_progress = now, progress, progress
             elif in_combat:
@@ -336,15 +361,19 @@ class QuestHunt:
                 return "unexpected_combat_target", None
             else:
                 return self.search_target(now, sample)
+        elif (not in_combat and sample.tap_denied and sample.target_id == self.fight.target_id
+              and sample.state_epoch == self.fight.state_epoch and not sample.target_dead):
+            # Another player can tag the creature between selection and our first hit.
+            self.fight = None
+            return "target_tagged_by_other_player", None
 
         if progress > self.observed_progress:
             self.observed_progress = progress
             self.fight.last_credit_at = now
             self.fight.pending_action_at, self.fight.no_receipts = None, 0
-        last_damage = max(self.fight.last_damage_at or self.started_at,
-                          self.fight.last_credit_at or self.started_at)
+        last_progress = self.fight.last_progress(sample, self.started_at)
         if now - self.started_at >= 60 or (now - self.started_at >= 20
-                                            and now - last_damage >= 8):
+                                            and now - last_progress >= 8):
             return "fight_timeout", None
         locked_resource_target = (self.requires_loot and self.fight.state_epoch is not None
                                   and sample.state_epoch == self.fight.state_epoch)
@@ -364,6 +393,8 @@ class QuestDefense:
     def __init__(self, now: float):
         self.started_at = now
         self.grounded_at = None
+        self.airborne_since = None
+        self.quest_progress = None
         self.dismount_at = float("-inf")
         self.dismount_attempts = 0
         self.repositioned = False
@@ -389,7 +420,11 @@ class QuestDefense:
     def step(self, now: float, sample: CombatSample | None, navigation=None) -> tuple[str, str | None]:
         if self.grounded_at is None:
             self.grounded_at = now
-        budget = 60 if now - self.damage_at < 8 else 35
+        recent_turn = (sample and self.fight and sample.target_engaged
+                       and client_edition(sample.build) == "forever"
+                       and (self.fight.turn_goal is not None or (self.fight.last_facing_at is not None
+                            and now - self.fight.last_facing_at < 8)))
+        budget = 60 if recent_turn or now - self.damage_at < 8 else 35
         if now - self.grounded_at >= budget:
             return ("timeout" if self.binding else "binding_or_telemetry_unavailable"), None
         if sample is None or sample.sequence == self.sequence:
@@ -434,7 +469,7 @@ class QuestDefense:
         if sample.line_of_sight_blocked and self.fight.presses:
             return "line_of_sight_blocked", None
         stalled_for, attempts = (8, 4) if sample.target_health is not None else (12, 6)
-        if (now - self.last_progress_at >= stalled_for
+        if (now - self.fight.last_progress(sample, self.last_progress_at) >= stalled_for
                 and self.fight.presses - self.progress_presses >= attempts):
             return "no_progress", None
         status, key = self.fight.step(now, sample, navigation)
@@ -443,22 +478,42 @@ class QuestDefense:
         return status, key
 
 
-def run_fight(fight, read, backend, estop, foreground, duration: float) -> str:
+def run_fight(fight, read, backend, estop, foreground, duration: float, *, read_with_loot=None) -> str:
+    from .loot import RequiredCorpseLoot, loot_prepared
+
     deadline = time.monotonic() + duration
+    corpse = None
     try:
         while time.monotonic() < deadline:
             if estop():
                 return "estop"
             if not foreground():
                 return "game_not_frontmost"
-            status, key = fight.step(time.monotonic(), read())
+            sample, nav = read_with_loot() if read_with_loot else (read(), None)
+            now = time.monotonic()
+            if corpse:
+                cmd = corpse.step(now, nav, sample)
+                if cmd.outcome:
+                    return cmd.outcome
+                if cmd.tap:
+                    if estop() or not foreground():
+                        return "input_interrupted"
+                    backend.tap(cmd.tap, **({'hold_s': cmd.hold_s} if cmd.hold_s is not None else {}))
+                time.sleep(.08)
+                continue
+            status, key = fight.step(now, sample, nav)
             if key:
+                if status == 'action' and read_with_loot and not loot_prepared(nav):
+                    return 'loot_addon_required'
                 if estop() or not foreground():
                     return "input_interrupted"
                 tap_combat_key(backend, status, key)
+            elif read_with_loot and (status == 'target_defeated' or fight.presses
+                    and status in {'target_missing_or_changed', 'target_or_arm_changed'}):
+                corpse = RequiredCorpseLoot(fight.target_id, fight.state_epoch)
             elif status != "waiting":
                 return status
             time.sleep(.08)
-        return "timeout"
+        return "loot_unconfirmed" if corpse else "timeout"
     finally:
         backend.release_all()

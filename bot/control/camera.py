@@ -1,16 +1,18 @@
 """Scene camera transactions; only the addon owns zoom and relative pitch.
 
-The F8 lease is released by normal completion, cancellation, or the existing
+The camera key lease is released by normal completion, cancellation, or the existing
 input emergency stop. No camera work may hold up flight or combat control.
 """
 from __future__ import annotations
 
-from ..perception.travel_channel import CameraResult, CameraScene
+from ..perception.travel_channel import CameraResult, CameraScene, camera_binding_key
 
 
 class CameraController:
     def __init__(self):
         self.pending = None
+        self.held_key = None
+        self.held_bindings = None
         self.sequence = None
         self.frame_at = float("-inf")
         self.candidate = None
@@ -27,6 +29,8 @@ class CameraController:
     def forget(self):
         """Used immediately before the caller's full input release."""
         self.pending = None
+        self.held_key = None
+        self.held_bindings = None
         self.handled = self.candidate = None
 
     def cancel(self, ctx, now, reason):
@@ -34,7 +38,10 @@ class CameraController:
             return
         old = self.pending
         self.pending = None
-        ctx.input.up("f8")
+        if self.held_key is not None:
+            ctx.input.up(self.held_key)
+            self.held_key = None
+        self.held_bindings = None
         self.cooldown = now + 5
         if reason in {"input_window_closed", "travel_input_priority"} and self.attempts < 2:
             self.handled = None
@@ -48,6 +55,9 @@ class CameraController:
             return False
         if self.pending and (nav.map_id, nav.quest_id) != self.pending[0]:
             self.cancel(ctx, now, "task_changed")
+        if self.pending and (camera_binding_key(nav) != self.held_key
+                             or getattr(nav, "camera_bindings", None) != self.held_bindings):
+            self.cancel(ctx, now, "binding_changed")
         if self.pending and (now >= self.pending[3] or nav.camera.paused
                              or nav.camera.scene != self.pending[2]):
             self.cancel(ctx, now, "deadline_or_scene_changed")
@@ -68,7 +78,8 @@ class CameraController:
         if self.paused:
             self.handled = self.candidate = None
             self.paused = False
-        if locked or not nav.camera_restore_available:
+        key = camera_binding_key(nav)
+        if locked or not nav.camera_restore_available or key is None:
             self.cancel(ctx, now, "input_window_closed")
             return False
         if self.pending:
@@ -80,7 +91,9 @@ class CameraController:
             if sample.request == expected and sample.applied == requested_scene:
                 if sample.result not in {CameraResult.PENDING, CameraResult.IDLE}:
                     self.pending = None
-                    ctx.input.up("f8")
+                    ctx.input.up(self.held_key)
+                    self.held_key = None
+                    self.held_bindings = None
                     success = sample.result == CameraResult.DISTANCE_VERIFIED
                     if not success:
                         self.close_latched = True
@@ -133,7 +146,9 @@ class CameraController:
         ctx.log_event("quest_camera_requested", {
             "id": nav.quest_id, "scene": scene.name, "zoom": sample.zoom,
             "request": (sample.request + 1) % 8, "reason": reason or "scene_or_obstruction",
-            "background": background,
+            "background": background, "key": key,
         })
-        ctx.input.down("f8")
+        self.held_key = key
+        self.held_bindings = getattr(nav, "camera_bindings", None)
+        ctx.input.down(key)
         return not background

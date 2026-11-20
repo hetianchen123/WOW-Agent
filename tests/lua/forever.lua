@@ -1,6 +1,7 @@
 -- Run from the repository root with Lua 5.1 or lupa.lua51.
 local clock, level, money, combat = 1, 2, 10, false
 local learned, rank, staged, buys, purchases, commits = {}, 0, false, 0, 0, 0
+local outputArmed = true
 local trainerVisible, status, target = false, "available", 248415
 local gossipVisible, optionIcon, gossipSelection = false, 132049, nil
 local trainerSpell, character = 2973, "Player-1-001"
@@ -61,11 +62,46 @@ C_Traits = {
     CommitConfig = function() commits = commits + 1; return true end,
 }
 
+dofile("addon/WowAgent/TaskBindings.lua")
 dofile("addon/WowAgent/Forever.lua")
 local forever = WowAgent.Forever
+
+-- The reward choice is identified by the live item ID, not its list position.
+local rewards, rewardReady, rewardCost = {2691, 2186, 11192}, true, 0
+local rewardUsable = true
+C_QuestLog = {ReadyForTurnIn = function(id) return rewardReady and id == 21 end}
+function GetQuestMoneyToGet() return rewardCost end
+function GetQuestItemInfo(kind, index)
+    assert(kind == "choice")
+    return "item", nil, 1, 1, rewardUsable, rewards[index]
+end
+QuestInfoFrame = {itemChoice = 0}
+assert(forever.RewardChoice(21, 3) == 2)
+assert(forever.RewardChoice(7, 3) == nil)
+QuestInfoFrame.itemChoice = 1
+assert(forever.RewardChoice(21, 3) == nil)
+QuestInfoFrame.itemChoice, rewards[1], rewards[2] = 0, 2186, 2691
+assert(forever.RewardChoice(21, 3) == 1)
+rewardUsable = false
+assert(forever.RewardChoice(21, 3) == nil)
+rewardUsable, rewards[3] = true, 2186
+assert(forever.RewardChoice(21, 3) == nil)
+rewards[3] = nil
+assert(forever.RewardChoice(21, 3) == nil)
+rewards[3], rewardReady = 11192, false
+assert(forever.RewardChoice(21, 3) == nil)
+rewardReady, rewardCost = true, 1
+assert(forever.RewardChoice(21, 3) == nil)
+
 WowAgent.LayoutSupport = {
     LearnedSpells = function() return learned end,
     ActionMatches = function() return true end,
+    ArmedActionMatches = function() return outputArmed end,
+    SetupAction = function(kind, spell, key)
+        assert(kind == "forever" and spell == 3044 and key == 4)
+        outputArmed = true
+        return true
+    end,
 }
 learned[75], learned[3044] = "自动射击", "奥术射击"
 assert(forever.OutputSpell(learned) == 3044)
@@ -83,6 +119,11 @@ end
 local plan = {foreverTrain = true}
 forever.BindProgression({}, plan)
 assert(Observe(plan) == 1)
+outputArmed = false
+assert(Observe(plan) == 7)
+Click()
+assert(Observe(plan) == 10 and outputArmed)
+clock = 3
 gossipVisible = true
 Click()
 assert(gossipSelection == nil)
@@ -90,6 +131,8 @@ optionIcon, plan.foreverSkipLevel, plan.foreverReceipt = 132058, nil, nil
 assert(Observe(plan) == 3)
 Click()
 assert(gossipSelection == 300 and buys == 0)
+optionIcon = 132049
+assert(Observe(plan) == 14)
 gossipVisible = false
 trainerVisible, target = true, 999
 events:OnEvent("TRAINER_SHOW")

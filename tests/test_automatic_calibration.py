@@ -161,6 +161,17 @@ def test_camera_orbit_waits_for_native_lease_receipt_then_releases(tmp_path,monk
     assert not obj.step(ctx,1.5,fresh,heading).keys
 
 
+def test_stationary_calibration_without_mouse_lease_uses_verified_turn(tmp_path, monkeypatch):
+    obj, ctx, nav, requests = controller(tmp_path, monkeypatch)
+    nav = replace(nav, calibration_orbit_available=False, overhead_camera_available=True)
+    nav, heading = ready(obj, ctx, nav)
+    requests[0].result.update(kind="calibration_orbit", calibration={"stage": "orbit"}, yaw_pixels=110)
+    assert obj.step(ctx, 1.2, nav, heading).tap is None
+    command = obj.step(ctx, 1.3, nav, heading)
+    assert command.tap in {"left", "right"} and not command.keys
+    assert obj.orbit.keyboard and obj.orbit_request is None
+
+
 def test_orbit_mouse_failure_releases_button_and_lease(tmp_path,monkeypatch):
     from bot.control.input_mock import MockInput
     from bot.control.quest_travel import TravelCommand

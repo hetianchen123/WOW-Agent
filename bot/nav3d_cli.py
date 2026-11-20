@@ -13,12 +13,18 @@ from .nav3d.demo import write_scene
 from .nav3d.geometry import load_scene
 
 
-def build_scene(scene_path, output):
+def build_scene(scene_path, output, *, tile_cells=0, with_clearance=False):
+    if with_clearance and not tile_cells:
+        raise NavigationError("clearance_requires_tiled_mesh")
     scene, vertices, triangles, sources = load_scene(scene_path)
     mesh = NavMesh.build(vertices, triangles, frame=Frame(**scene["frame"]),
                          agent=Agent(**scene.get("agent", {})), sources=sources,
-                         evidence=scene.get("evidence", "unverified_collision_export"))
-    mesh.save(output)
+                         evidence=scene.get("evidence", "unverified_collision_export"), tile_cells=tile_cells)
+    clearance = None
+    if with_clearance:
+        clearance = NavMesh.build(vertices, triangles, frame=mesh.frame, agent=mesh.clearance_agent,
+            sources=sources, evidence=mesh.evidence, tile_cells=tile_cells)
+    mesh.save(output, clearance=clearance)
     return mesh, vertices, triangles
 
 
@@ -33,6 +39,9 @@ def main(argv=None):
     sub.add_parser("backend", help="compile bundled Recast/Detour locally")
     build = sub.add_parser("build", help="build a bounded collision scene")
     build.add_argument("scene", type=Path); build.add_argument("output", type=Path)
+    build.add_argument("--tile-cells", type=int, default=0, help="Recast tile width in cells (32–512, 0 uses one mesh)")
+    build.add_argument("--with-clearance", action="store_true",
+                       help="include a same-scene route-planning mesh with one extra cell of erosion")
     query = sub.add_parser("query", help="query a complete three-dimensional ground path")
     query.add_argument("mesh", type=Path); query.add_argument("request", type=Path)
     query.add_argument("--output", type=Path, required=True)
@@ -53,6 +62,7 @@ def main(argv=None):
     extract.add_argument("--phase", required=True)
     extract.add_argument("--roi", nargs=4, type=float, required=True, metavar=("E_MIN", "N_MIN", "E_MAX", "N_MAX"))
     extract.add_argument("--output", type=Path, required=True)
+    extract.add_argument("--tile-cells", type=int, default=0, help="Recast tile width in cells (32–512, 0 uses one mesh)")
     extract.add_argument("--max-climb", type=float, default=.4,
         help="explicit agent step height in yards; defaults to .4; live capability needs validation")
     probe = sub.add_parser("probe-live", help="record coherent Nav3D telemetry and optionally shadow-plan; never sends input")
@@ -62,6 +72,9 @@ def main(argv=None):
     probe.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        tile_cells = getattr(args, "tile_cells", 0)
+        if tile_cells and not 32 <= tile_cells <= 512:
+            raise NavigationError("tile_cell_limit")
         if args.command == "extract-client":
             from .nav3d.extract import LocalCASC, ClientDecoder, SceneBuilder
             agent=Agent(max_climb=args.max_climb)
@@ -72,12 +85,12 @@ def main(argv=None):
             with LocalCASC(args.client, args.library, product=args.product, cache="data/nav3d/casc-cache") as casc:
                 decoder = ClientDecoder(args.readers, "data/nav3d/decoded-input")
                 try:
-                    builder = SceneBuilder(casc, decoder, [args.roi[:2], args.roi[2:]], names)
+                    builder = SceneBuilder(casc, decoder, [args.roi[:2], args.roi[2:]], names, tiled=bool(tile_cells))
                     scene_path = builder.extract(args.world_id, args.map_dbd, args.output, args.phase,
                                                  wdt_file=args.wdt_file)
                     manifest=json.loads(scene_path.read_text());manifest['agent']=asdict(agent)
                     scene_path.write_text(json.dumps(manifest,indent=2))
-                    mesh, v, t = build_scene(scene_path, args.output/"mesh")
+                    mesh, v, t = build_scene(scene_path, args.output/"mesh", tile_cells=tile_cells)
                     print(json.dumps(dict(scene=str(scene_path), mesh_id=mesh.mesh_id, vertices=len(v), triangles=len(t), reached_in_game=False)))
                 finally:
                     decoder.close()
@@ -87,7 +100,8 @@ def main(argv=None):
         elif args.command == "backend":
             print(json.dumps({"backend": str(build_backend())}))
         elif args.command == "build":
-            mesh, v, t = build_scene(args.scene, args.output)
+            mesh, v, t = build_scene(args.scene, args.output, tile_cells=tile_cells,
+                                     with_clearance=args.with_clearance)
             print(json.dumps({"mesh":str(args.output), "mesh_id":mesh.mesh_id,
                               "vertices":len(v), "triangles":len(t), "frame":asdict(mesh.frame)}))
         elif args.command == "query":

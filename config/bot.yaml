@@ -6,12 +6,12 @@ log_level: INFO
 game_process_names: ["World of Warcraft"]
 
 channel:
-  x: -1824              # 像素通道色条左上角（游戏内 /wagent unlock 拖动后校准）
-  y: 990
+  x: 153                # 像素通道色条左上角（游戏内 /wagent unlock 拖动后校准）
+  y: 884
   calibrated: true
 
 capture:
-  monitor: 2
+  monitor: 1
   control_fps: 15
 
 audio:
@@ -46,7 +46,7 @@ segmented_navigation:
   building_access: false
   models: data/segmentation/models.json
   checkpoint: data/segmentation/sam2.1_hiera_large.pt
-  device: cpu
+  device: auto
 
 fishing:
   key_cast: "1"
@@ -82,11 +82,15 @@ notify:
 # 用户手动启动的门口实走测试；仅授权此摘要的网格试跑，不表示已标定/已进门。
 nav3d:
   mode: visual
-  mesh: data/nav3d/forever-northshire-abbey/mesh
+  mesh: data/nav3d/forever-northshire-perimeter/mesh
   forever_goldshire_mesh: data/nav3d/forever-goldshire-inn/mesh
   forever_goldshire_mesh_id: "7ce37fb637a6d2cc4af63937af4910e8e294a360913e4fe25f33483e79775551"
+  forever_echo_ridge_mesh: data/nav3d/forever-echo-ridge/mesh
+  forever_echo_ridge_mesh_id: "0311c3571f3e18205346e9fdf250e47e5aab766923b92a86d3faf567854e9734"
+  forever_fargodeep_mesh: data/nav3d/forever-fargodeep/mesh
+  forever_fargodeep_mesh_id: "7412a4bbaf06b60e398b321c50cb2f31f8772e9eb1edee7bd40b65c16e07c05f"
   alignment_file: ""
-  supervised_trial_mesh_id: "b69495894320899859b0ea418c6010c16577ad074fd4b37bb7657d0f3d912088"
+  supervised_trial_mesh_id: "fcae06ee54302e006624d00676cc651326a37b47a0d32bc9c8b1a4563a03826a"
   budget_s: 120
   max_replans: 3
   encounter_wait_s: 300

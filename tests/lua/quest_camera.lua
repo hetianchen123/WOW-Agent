@@ -52,14 +52,16 @@ C_Timer = {After = function(delay, fn) timers[#timers + 1] = {now + delay, fn} e
 function CreateFrame(_, name)
     local f = {RegisterForClicks=function() end, Show=function() end, RegisterEvent=function() end}
     function f:SetScript(event, fn) self[event] = fn end
-    if name then button = f else driver = f end
+    if name then button = f elseif not driver then driver = f end
     return f
 end
 function GetBindingAction() return binding end
+function ClearOverrideBindings() end
 function SetOverrideBindingClick(_, _, key, target, mouseButton)
     assert(key == "F8" and mouseButton == "LeftButton")
     binding = "CLICK " .. target .. ":LeftButton"
 end
+dofile("addon/WowAgent/TaskBindings.lua")
 dofile("addon/WowAgent/QuestCamera.lua")
 local camera = WowAgent.QuestCamera
 camera.prepare({})
@@ -303,3 +305,18 @@ assert(camera.overheadReady() and camera.overheadZoom() == nil)
 observe(); assert(WowAgent.RestoreQuestCamera(true, true)); finish()
 assert(camera.applied == 14 and view == 4)
 button.OnClick(button, "RightButton", false)
+
+-- Forever keeps the progression key even when camera preparation runs first.
+WowAgent.Forever = {}
+local previousBinding = GetBindingAction
+orbitBinding = "TARGETPARTYMEMBER3"
+function GetBindingAction(key)
+    if key == "LEFT" then return "TURNLEFT" end
+    if key == "RIGHT" then return "TURNRIGHT" end
+    return previousBinding(key)
+end
+camera.prepare({})
+assert(orbitBinding == "TARGETPARTYMEMBER3")
+assert(not camera.orbitReady() and camera.overheadReady() and camera.turnKeysReady())
+assert(WowAgent.TaskBindings.BindClick({}, "forever_progress"))
+assert(WowAgent.TaskBindings.ClickReady("forever_progress") and not camera.orbitReady())

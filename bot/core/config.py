@@ -96,6 +96,10 @@ class Nav3DConfig:
     legacy_handoff: bool = True
     forever_goldshire_mesh: str = ""
     forever_goldshire_mesh_id: str = ""
+    forever_echo_ridge_mesh: str = ""
+    forever_echo_ridge_mesh_id: str = ""
+    forever_fargodeep_mesh: str = ""
+    forever_fargodeep_mesh_id: str = ""
 
 
 @dataclass

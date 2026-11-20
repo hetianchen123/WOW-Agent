@@ -1,6 +1,7 @@
 """Ground-only runtime coordinator. Shadow never emits movement commands."""
 from __future__ import annotations
-from dataclasses import asdict
+from copy import copy
+from dataclasses import asdict, replace
 import hashlib
 import json
 import math
@@ -10,6 +11,7 @@ import numpy as np
 from .planner import NavigationError, NavMesh, Query
 from .follower import WorldPose, WorldRouteFollower
 from ..control.quest_travel import TravelCommand
+from ..perception.nav3d_channel import with_fast_pose
 
 
 class SurfaceTracker:
@@ -53,29 +55,45 @@ class SurfaceTracker:
             if not heights or abs(h-heights[-1])>.15:heights.append(float(h))
         return [(*map(float,xy),h) for h in heights]
 
-    def update(self, xy):
+    def update(self, xy, *, max_distance=2):
         self.support_basis='mesh_triangle'
         candidates=self.candidates(xy)
         if self.last is not None:
             distance=math.dist(xy,self.last[:2])
-            if distance>2:raise NavigationError('nav3d_displacement_discontinuity')
+            if distance>max_distance:raise NavigationError('nav3d_displacement_discontinuity')
             # A stair transition can rise more than the horizontal displacement.
             # Keep the mesh's agent clearance and the separate short-path check.
             step_limit=self.mesh.agent.max_climb+self.mesh.agent.cell_height/2
-            def connected(points):
+            def connected(points, *, exact=False):
                 result=[]
                 for p in points:
-                    if abs(p[2]-self.last[2])>max(.45,step_limit,distance*1.1):continue
+                    change = p[2] - self.last[2]
+                    limit = max(.45, step_limit, distance * 1.1)
+                    short_descent = exact and limit < -change <= step_limit + 2 * self.mesh.agent.cell_height
+                    if abs(change) > limit and not short_descent:
+                        continue
                     try:route=self.mesh.plan(Query(self.mesh.frame,self.last,p,horizontal_snap=self.edge_tolerance))
                     except NavigationError:continue
-                    if route.length<=distance*1.5+.3:result.append(p)
+                    path_limit = distance * 1.5 + .3
+                    if short_descent:
+                        # Tiny, steep ground transitions can have a longer
+                        # 3D arc without doubling back or changing floors.
+                        horizontal = sum(math.dist(a[:2], b[:2]) for a, b in zip(route.points, route.points[1:]))
+                        if horizontal <= path_limit and route.length <= math.dist(self.last, p) * 1.5 + .3:
+                            result.append(p)
+                    elif route.length <= path_limit:
+                        result.append(p)
                 return result
-            candidates=connected(candidates)
+            candidates=connected(candidates,exact=True)
             # Exact support has priority. Projection must not introduce adjacent
             # slope heights as extra floors when the pose is already inside.
             if not candidates:
                 candidates=connected(self.candidates(xy,edge_tolerance=self.edge_tolerance))
                 self.support_basis='bounded_edge_projection'
+                if len(candidates) > 1 and candidates[-1][2] - candidates[0][2] <= .32:
+                    # Two adjacent edge projections can describe one sloping
+                    # floor. Each still has to connect to the previous pose.
+                    candidates = [min(candidates, key=lambda point: abs(point[2] - self.last[2]))]
         else:
             # Include nearby support at startup so a tiny edge miss cannot
             # silently initialize to the roof above an unobserved ground floor.
@@ -87,13 +105,21 @@ class SurfaceTracker:
 
 class Nav3DCoordinator:
     def __init__(self, config, *, now, log_event=lambda *_:None, resume_runs=None, scene_phases=(),
-                 edge_tolerance=.08):
+                 edge_tolerance=.08, short_steps=False, arrival_radius=None, clearance_route_allowed=None):
         if config.mode not in {'nav3d','nav3d-shadow'}:raise NavigationError('invalid_nav3d_mode')
         if not 0<config.budget_s<=120 or not 0<=config.max_replans<=3:raise NavigationError('invalid_nav3d_budget')
         self.config=config;self.mesh=NavMesh.load(config.mesh)
         self.tracker=SurfaceTracker(self.mesh,edge_tolerance=edge_tolerance)
+        self.clearance_route_allowed = clearance_route_allowed
+        self.clearance_tracker = None
+        self.clearance_checked = False
+        self.short_steps=short_steps
+        self.arrival_radius = arrival_radius
         self.log=log_event;self.deadline=now+config.budget_s;self.follower=None;self.replans=0
         self.sequence=None;self.changed_at=now;self.identity=None;self.terminal=None;self.route=None
+        self.corridor = None
+        self.fast_mode = None
+        self.base_sequence, self.base_changed_at = None, now
         self.goals=None;self.goal_index=0;self.arrived_at=None
         self.exit_goal=None;self.exit_candidates=();self.exit_phase_released=False
         self.exit_hypotheses=None;self.exit_hypothesis_index=0
@@ -125,6 +151,103 @@ class Nav3DCoordinator:
                 and evidence.get('alignment_verified') is True and evidence.get('phase_verified') is True
                 and evidence.get('evidence_kind')=='live_observation' and verified_receipts
                 and {'native_xy_alignment','scene_phase'}<=kinds)
+
+    def wider_support(self):
+        if self.clearance_checked:
+            return self.clearance_tracker
+        self.clearance_checked = True
+        folder = Path(self.config.mesh) / "clearance"
+        if not folder.is_dir():
+            return None
+        try:
+            wider = NavMesh.load(folder)
+            if (wider.frame != self.mesh.frame or wider.geometry_hash != self.mesh.geometry_hash
+                    or wider.sources != self.mesh.sources or wider.origin != self.mesh.origin
+                    or wider.tile_cells != self.mesh.tile_cells or wider.agent != self.mesh.clearance_agent):
+                raise NavigationError("clearance_mesh_does_not_match_base")
+            self.clearance_tracker = SurfaceTracker(wider)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self.log("nav3d_clearance_mesh_unavailable", {"reason": str(exc)})
+        return self.clearance_tracker
+
+    def route_with_clearance(self, route, corridor, spacing):
+        if not self.fast_mode or self.short_steps or not 6 <= route.length <= 35:
+            return route
+        legs = np.diff(np.asarray(route.points)[:, :2], axis=0)
+        scale = np.linalg.norm(legs[:-1], axis=1) * np.linalg.norm(legs[1:], axis=1)
+        if not np.any((scale > 1e-6) & (np.sum(legs[:-1] * legs[1:], axis=1) < scale * math.sqrt(.5))):
+            return route
+        wider = self.wider_support()
+        if wider is None:
+            return route
+
+        def find_connector(indices):
+            previous = None
+            distance = 0.
+            for i in indices:
+                point = route.points[i]
+                if previous is not None:
+                    distance += math.dist(point, previous)
+                if distance > 4:
+                    break
+                candidates = wider.candidates(point[:2])
+                if len(candidates) == 1 and abs(candidates[0][2] - point[2]) <= .18:
+                    return i, candidates[0]
+                previous = point
+            raise NavigationError("clearance_connector_missing")
+
+        try:
+            first, origin = find_connector(range(len(route.points)))
+            last, goal = find_connector(range(len(route.points) - 1, -1, -1))
+            if first >= last or math.dist(origin, goal) < 3:
+                raise NavigationError("clearance_interior_too_short")
+            middle = wider.mesh.plan(Query(wider.mesh.frame, origin, goal, horizontal_snap=.04,
+                                           vertical_snap=.22, spacing=spacing))
+            # Keep the original approach, exit and target. Verify the proposed
+            # interior independently on the base mesh and on the same floor.
+            tracker = copy(self.tracker)
+            points = list(route.points[:first + 1])
+            tracker.last = points[-1]
+            interior = (*middle.points[1:-1], route.points[last])
+            bounds = np.asarray(interior)[:, :2]
+            horizontal = tracker.triangles[:, :, :2]
+            # Retain every triangle that could support a checked point,
+            # including the tolerance used by the base tracker at edges.
+            pad = tracker.edge_tolerance + .002
+            low, high = bounds.min(axis=0) - pad, bounds.max(axis=0) + pad
+            intersects = np.all((horizontal.max(axis=1) >= low) & (horizontal.min(axis=1) <= high), axis=1)
+            tracker.triangles = tracker.triangles[intersects]
+            # Eroding farther into a slope can change the detail triangulation.
+            # Bound the reprojected height shift to one climb and still verify
+            # every exact base surface and its Detour connection below.
+            max_projection_delta = max(.2, min(.4, self.mesh.agent.max_climb))
+            max_projected = 0.
+            for point in interior:
+                supported = tracker.update(point[:2])
+                projected = abs(supported[2] - point[2])
+                if tracker.support_basis != "mesh_triangle" or projected > max_projection_delta:
+                    raise NavigationError("clearance_base_support_mismatch")
+                max_projected = max(max_projected, projected)
+                points.append(supported)
+            points.extend(route.points[last + 1:])
+            gaps = [math.dist(a, b) for a, b in zip(points, points[1:])]
+            length = sum(gaps)
+            if max(gaps) > .6 or length > min(35., route.length * 1.15):
+                raise NavigationError("clearance_path_spacing_or_length_exceeded")
+            candidate = replace(route, points=tuple(points), length=length)
+            if self.clearance_route_allowed and not self.clearance_route_allowed(candidate):
+                raise NavigationError("clearance_path_outside_trial_bounds")
+            probe = copy(corridor)
+            probe.refs = type(corridor.refs).from_buffer_copy(corridor.refs)
+            for point in candidate.points:
+                probe.advance(point, edge_tolerance=self.tracker.edge_tolerance)
+        except NavigationError as exc:
+            self.log("nav3d_clearance_route_rejected", {"reason": str(exc)})
+            return route
+        self.log("nav3d_clearance_route_selected", {"mesh_id": wider.mesh.mesh_id, "length_yards": length,
+            "base_length_yards": route.length, "max_projection_delta_yards": max_projected,
+            "prefix_waypoints": first, "suffix_waypoints": len(route.points) - last - 1})
+        return candidate
 
     def stop(self,reason):
         if self.terminal is None:self.log('nav3d_stop',{'reason':reason,'reached_in_game':False})
@@ -228,9 +351,10 @@ class Nav3DCoordinator:
                 found=row
         return found
 
-    def step(self,now,sample,navigation,*,goal_override=None,blocked_boxes=(),target_receipt=None,travel_only=False):
+    def step(self,now,sample,navigation,*,goal_override=None,blocked_boxes=(),target_receipt=None,
+             travel_only=False,retreating=False,fast_pose=None):
         if self.terminal:return TravelCommand(outcome=self.terminal)
-        try:return self._step(now,sample,navigation,goal_override,blocked_boxes,target_receipt,travel_only)
+        try:return self._step(now,sample,navigation,goal_override,blocked_boxes,target_receipt,travel_only,retreating,fast_pose)
         except (NavigationError,ValueError,OSError) as exc:return self.stop(str(exc))
 
     def next_candidate(self,reason):
@@ -298,17 +422,50 @@ class Nav3DCoordinator:
                 stopped_xy=stopped,z_source='previous_inferred_support',native_altitude_verified=False))
         except (ValueError,KeyError,TypeError,OSError):return
 
-    def _step(self,now,sample,nav,goal_override,blocked_boxes,target_receipt,travel_only):
+    def recover_pose_gap(self, xy, elapsed, sequence_delta):
+        follower, previous = self.follower, self.tracker.last
+        if (not follower or not follower.commanded_motion or previous is None
+                or self.replans >= self.config.max_replans or not .4 <= elapsed <= 1.5
+                or not 2 <= sequence_delta <= 8 or math.dist(xy, previous[:2]) > 3):
+            return False
+        support = self.tracker.candidates(xy, edge_tolerance=self.tracker.edge_tolerance)
+        window = self.route.points[max(0, follower.index - 4):follower.index + 20]
+        if (len(support) != 1 or abs(support[0][2] - previous[2]) > .75
+                or not any(math.dist(point, support[0]) <= .65 for point in window)):
+            return False
+        try:
+            position = self.tracker.update(xy, max_distance=3)
+        except NavigationError:
+            return False
+        self.replans += 1
+        self.follower = self.route = None
+        self.log('nav3d_pose_gap_recovered', dict(previous=previous, position=position,
+            gap_s=round(elapsed, 3), sequence_delta=sequence_delta, candidate=self.goal_index))
+        return True
+
+    def _step(self,now,sample,nav,goal_override,blocked_boxes,target_receipt,travel_only,retreating,fast_pose):
         if now>self.deadline:return self.stop('nav3d_budget_exhausted')
         if sample is None or nav is None:return self.stop('nav3d_channel_unavailable')
         if sample.sequence!=nav.sequence or sample.quest_id!=nav.quest_id or sample.phase!=int(nav.phase) or sample.ui_map_id!=nav.map_id:
             return self.stop('nav3d_incoherent_channels')
+        if self.fast_mode is None:
+            self.fast_mode = fast_pose is not None
+        if self.fast_mode:
+            if sample.sequence != self.base_sequence:
+                self.base_sequence, self.base_changed_at = sample.sequence, now
+            elif now - self.base_changed_at > .5:
+                return self.stop('nav3d_stale_base_pose')
+            sample = with_fast_pose(sample, fast_pose)
+            if sample is None:
+                return self.stop('nav3d_fast_pose_unavailable')
         if self.sequence==sample.sequence:
             if now-self.changed_at>.5:return self.stop('nav3d_stale_pose')
             # Between receipts keep the follower's established hold instead of
             # releasing W into stutter steps; freshness stays bounded above.
             return TravelCommand(keys=frozenset({"w"})) if (
                 self.follower is not None and self.follower.hold_forward) else TravelCommand()
+        sequence_delta = (sample.sequence - self.sequence) % (256 if self.fast_mode else 128) if self.sequence is not None else 0
+        elapsed = now - self.changed_at
         self.sequence=sample.sequence;self.changed_at=now
         frame=self.mesh.frame
         phase_id=f'quest:{sample.quest_id}:{sample.phase}'
@@ -327,7 +484,8 @@ class Nav3DCoordinator:
                 or frame.phase_id!=phase_id):
             return self.stop('nav3d_world_frame_changed')
         if sample.position_xy is None or sample.heading is None:return self.stop('nav3d_position_unavailable')
-        if not sample.grounded or not sample.bindings_verified or sample.in_combat:
+        exit_retreat = retreating and travel_only and self.exit_goal is not None
+        if not sample.grounded or not sample.bindings_verified or (sample.in_combat and not exit_retreat):
             self.log('nav3d_unsafe_state', dict(grounded=sample.grounded,
                 bindings_verified=sample.bindings_verified,in_combat=sample.in_combat,
                 travel_flags=sample.travel_flags,position_xy=sample.position_xy,sequence=sample.sequence))
@@ -342,7 +500,7 @@ class Nav3DCoordinator:
             self.identity=identity
         self.log('nav3d_pose',dict(sequence=sample.sequence,position_xy=sample.position_xy,
             heading=sample.heading,public_z=sample.public_z,elapsed=self.config.budget_s-(self.deadline-now),
-            exit=self.exit_goal is not None))
+            exit=self.exit_goal is not None,retreating=exit_retreat and sample.in_combat))
         if self.exit_goal is not None and self.tracker.last is None:
             # Self-sufficient startup (user 2026-11-18): stacked floors are
             # tried bottom-up with live receipts; run-history seeding above is
@@ -360,6 +518,9 @@ class Nav3DCoordinator:
         if self.tracker.last is None:self.resume_support(sample)
         try:position=self.tracker.update(sample.position_xy)
         except NavigationError as exc:
+            if (travel_only and not retreating and str(exc) == 'nav3d_displacement_discontinuity'
+                    and self.recover_pose_gap(sample.position_xy, elapsed, sequence_delta)):
+                return TravelCommand()
             if self._advance_floor_hypothesis(str(exc),sample.position_xy):
                 return TravelCommand()
             self.log('nav3d_support_failure',dict(reason=str(exc),previous=self.tracker.last,
@@ -386,11 +547,17 @@ class Nav3DCoordinator:
         if self.replans>self.config.max_replans:return self.stop('nav3d_replan_budget_exhausted')
         if self.follower is None:
             self.route=None
+            self.corridor = None
             while self.route is None:
                 while self.goal_index<len(self.goals):
                     goal=self.goals[self.goal_index]
                     try:
-                        self.route=self.mesh.plan(Query(frame,position,goal,blocked_boxes=blocked_boxes))
+                        query = Query(frame, position, goal, blocked_boxes=blocked_boxes)
+                        if self.mesh.tile_cells and not blocked_boxes and self.config.mode == 'nav3d':
+                            self.route, self.corridor = self.mesh.plan_corridor(query)
+                            self.route = self.route_with_clearance(self.route, self.corridor, query.spacing)
+                        else:
+                            self.route = self.mesh.plan(query)
                     except NavigationError as exc:
                         self.next_candidate(str(exc));continue
                     break
@@ -398,13 +565,23 @@ class Nav3DCoordinator:
                     return self.stop('nav3d_exit_unreachable' if self.exit_goal is not None else 'nav3d_candidates_exhausted')
             self.log('nav3d_plan',dict(route=self.route.to_dict(),
                 mode='exit' if self.exit_goal is not None else self.config.mode,
-                z_source='inferred_mesh_support',public_z=sample.public_z))
+                z_source='inferred_mesh_support',public_z=sample.public_z,
+                corridor_polygons=self.corridor.count if self.corridor else None))
             self.follower=WorldRouteFollower(self.route,now=now,mesh_id=self.mesh.mesh_id,obstacle_revision=revision,
                 alignment_verified=self.alignment,supervised_trial=self.supervised_trial,
-                budget=max(.001,self.deadline-now))
+                budget=max(.001,self.deadline-now),short_steps=self.short_steps,arrival_radius=self.arrival_radius,
+                feedback_paced=self.fast_mode)
         if self.config.mode=='nav3d-shadow':
             return TravelCommand(outcome='nav3d_shadow_complete')
-        command=self.follower.step(now,pose,mesh_id=self.mesh.mesh_id,obstacle_revision=revision)
+        if self.corridor is not None:
+            try:
+                self.corridor.advance(position, edge_tolerance=self.tracker.edge_tolerance)
+            except NavigationError as exc:
+                self.log('nav3d_corridor_lost', dict(position=position, reason=str(exc)))
+                self.corridor = None
+        forward_clearance = self.corridor.forward_clearance if self.fast_mode and self.corridor else None
+        command=self.follower.step(now,pose,mesh_id=self.mesh.mesh_id,obstacle_revision=revision,
+            retreating=exit_retreat, forward_clearance=forward_clearance)
         self.log('nav3d_control',dict(sequence=sample.sequence,position=position,candidate=self.goal_index,
             support_basis=self.tracker.support_basis,waypoint=self.follower.index,
             tap=command.tap,hold_s=command.hold_s,outcome=command.outcome))
@@ -416,6 +593,17 @@ class Nav3DCoordinator:
             if self._advance_floor_hypothesis(command.outcome,position[:2]):
                 return TravelCommand()
             self.replans+=1
+            if self.corridor is not None and self.replans <= self.config.max_replans:
+                try:
+                    route = self.corridor.remaining_route()
+                    self.follower.resume_corridor(route, now=now)
+                except NavigationError as exc:
+                    self.log('nav3d_corridor_lost', dict(position=position, reason=str(exc)))
+                else:
+                    self.route = route
+                    self.log('nav3d_corridor_repaired', dict(position=position, goal=route.requested_goal,
+                        remaining_length=route.length, polygons=self.corridor.count, candidate=self.goal_index))
+                    return TravelCommand()
             self.follower=None;self.route=None
             self.log('nav3d_candidate_replanned',dict(index=self.goal_index,
                 goal=self.goals[self.goal_index],reason=command.outcome))

@@ -66,6 +66,15 @@ SlashCmdList["WOWAGENT"] = function(msg)
         else
             print("WowAgent: restart the client to load the combat module")
         end
+    elseif msg == "nav prepare" and WowAgent.PrepareAutomaticQuestCommand then
+        WowAgent.PrepareAutomaticQuestCommand()
+    elseif msg == "nav bindings" and WowAgent.ReportQuestBindings then
+        WowAgent.ReportQuestBindings()
+    elseif msg == "nav recovery" and WowAgent.ReportQuestRecovery then
+        WowAgent.ReportQuestRecovery()
+    elseif msg == "nav stop" and WowAgent.StopQuestNavigation then
+        WowAgent.StopQuestNavigation()
+        print("WowAgent：已关闭寻路。若处于战斗，临时覆盖将在脱战后清理。")
     elseif msg == "quest" or msg:match("^quest%s") then
         if WowAgent.QuestCommand then
             WowAgent.QuestCommand(msg:sub(6):gsub("^%s+", ""))
@@ -91,7 +100,7 @@ SlashCmdList["WOWAGENT"] = function(msg)
         local _, p = WowAgent.BuildPos()
         print("WowAgent raw pos value: " .. tostring(p))
     else
-        print("WowAgent: /wagent debug | learn on/off | unlock | lock | pos | quest")
+        print("WowAgent: /wagent debug | learn on/off | unlock | lock | pos | quest | nav prepare/bindings/recovery/stop")
     end
 end
 

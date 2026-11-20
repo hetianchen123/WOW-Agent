@@ -11,7 +11,7 @@ from bot.control.quest_travel import QuestTrip
 from bot.perception import channel_spec as spec
 from bot.perception.quest_channel import QuestState
 from bot.perception.travel_channel import (
-    ChoiceStep, CorpseSource, ForeverStep, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
+    CameraBindings, ChoiceStep, CorpseLootReceipt, CorpseSource, ForeverStep, LifeState, ObjectiveAction, RoundStage, SkyFlight, TaskFlags, TravelFlags as Flags, TravelSample,
     decode_travel,
 )
 
@@ -21,6 +21,22 @@ def sample(**changes):
                         QuestState.ACTIVE, Flags.CAN_FLY | Flags.CAN_MOUNT | Flags.KEYS_VERIFIED, 1,
                         descent_key="c")
     return replace(base, **changes)
+
+
+def test_outdoor_contact_replans_without_repeating_forward_or_jumping():
+    nav = sample(flags=Flags.OUTDOORS | Flags.KEYS_VERIFIED, position=(.201, .201), destination=(.201, .1))
+    events = []
+    trip = QuestTrip(nav.world_size, nav.destination, "ccw_west", outdoor_detour=True,
+                     log_event=lambda name, data: events.append((name, data)))
+    assert trip.step(0, nav, 0).keys == {"w"}
+    assert trip.step(.4, replace(nav, sequence=2), 0).keys == {"w"}
+    assert trip.step(.8, replace(nav, sequence=3), 0).keys == {"w"}
+    assert trip.step(1.5, replace(nav, sequence=3), 0).keys == {"w"}
+    command = trip.step(1.55, replace(nav, sequence=4), 0)
+    assert not command.keys and command.tap is None and command.outcome is None
+    assert events[-1][0] == "quest_ground_contact_replanned"
+    assert trip.path[0] != nav.destination and trip.path[-1] == nav.destination
+    assert all(trip.router.clear_segment(a, b) for a, b in zip([nav.position] + trip.path, trip.path))
 
 
 def test_ground_stall_tries_jump_turn_jump_and_both_strafes():
@@ -515,6 +531,79 @@ def test_v12_loot_receipts_and_blob_mask_share_the_navigation_frame():
     spec.render_frame(ui_image, 0, 0, spec.encode_frame(13, 45*16384+sequence*128+16+15))
     spec.render_frame(ui_image, 0, 32, spec.encode_frame(14, 273+sequence*4096+524288))
     assert decode_travel(ui_image).visual_ui_hidden is None
+    vitals_image = np.vstack((np.zeros((32, 142, 3), np.uint8), ui_image))
+    spec.render_frame(vitals_image, 0, 64, spec.encode_frame(14, 300 + sequence * 4096))
+    spec.render_frame(vitals_image, 0, 0, spec.encode_frame(12, 118 + sequence * 8192))
+    spec.render_frame(vitals_image, 0, 16, spec.encode_frame(sequence % 16, 51 + 9 * 16384))
+    restored = decode_travel(vitals_image)
+    assert restored.objective_action == decode_travel(ui_image).objective_action
+    assert type(restored.objective_action) is ObjectiveAction
+    vitals = restored.vitals
+    assert (vitals.health, vitals.mana, vitals.action.name, vitals.item_id, vitals.result) == (
+        50, None, "POTION", 118, "consumed")
+    bars_image = np.vstack((np.zeros((80, 142, 3), np.uint8), vitals_image))
+    spec.render_frame(bars_image, 0, 144, spec.encode_frame(14, 303 + sequence * 4096))
+    spec.render_frame(bars_image, 0, 0, spec.encode_frame(sequence % 16, 435 * 1024 + 442))
+    spec.render_frame(bars_image, 0, 16, spec.encode_frame(sequence % 16, 693 * 1024 + 754))
+    for row, item in enumerate((159, 117, 118)):
+        spec.render_frame(bars_image, 0, 32 + row * 16, spec.encode_frame(3 - row, item + sequence * 8192))
+    bars = decode_travel(bars_image).vitals
+    assert bars.supplies == (118, 117, 159) and bars.bars == (362, 484, -154, -140)
+    binding_image = np.vstack((np.zeros((16, 142, 3), np.uint8), bars_image))
+    spec.render_frame(binding_image, 0, 160, spec.encode_frame(14, 319 + sequence*4096 + 524288))
+    spec.render_frame(binding_image, 0, 22*16, spec.encode_frame(9, sequence*1024 + 131072))
+    spec.render_frame(binding_image, 0, 0, spec.encode_frame(4, sequence*8192 + 17*256 + 5*16 + 4))
+    bound = decode_travel(binding_image)
+    assert bound.camera_bindings == CameraBindings(17, "y", "h")
+    assert bound.camera_restore_available and bound.probe_camera_available
+    for payload in ((sequence-1)*8192 + 17*256+5*16+4, sequence*8192 + 17*256+4*16+4):
+        spec.render_frame(binding_image, 0, 0, spec.encode_frame(4, payload))
+        invalid = decode_travel(binding_image)
+        assert invalid.camera_bindings is None and not invalid.camera_restore_available and not invalid.probe_camera_available
+    spec.render_frame(binding_image, 0, 0, spec.encode_frame(4, sequence*8192 + 17*256 + 5*16 + 4))
+    spec.render_frame(binding_image, 0, 160, spec.encode_frame(14, 319 + (sequence-1)*4096 + 524288))
+    stale_build = decode_travel(binding_image, expect_camera_bindings=True)
+    assert stale_build.addon_build is None and stale_build.camera_bindings is None
+    assert not stale_build.camera_restore_available and not stale_build.probe_camera_available
+    spec.render_frame(binding_image, 0, 23*16, spec.encode_frame(12, sequence*8192 + 3 + 1024 + 7*32))
+    assert decode_travel(binding_image).recovery.dialog_key is None
+    spec.render_frame(binding_image, 0, 160, spec.encode_frame(14, 320 + sequence*4096))
+    assert decode_travel(binding_image).recovery.dialog_key == "m"
+    spec.render_frame(binding_image, 0, 160, spec.encode_frame(14, 319 + sequence*4096))
+    assert decode_travel(binding_image).recovery.dialog_key is None
+    spec.render_frame(binding_image, 0, 23*16, spec.encode_frame(12, sequence*8192 + 3 + 1024 + 256))
+    spec.render_frame(binding_image, 0, 160, spec.encode_frame(14, 321 + sequence*4096))
+    assert decode_travel(binding_image).recovery.dialog_key is None
+    spec.render_frame(binding_image, 0, 160, spec.encode_frame(14, 322 + sequence*4096))
+    alternate = decode_travel(binding_image).recovery
+    assert alternate.dialog_key == "f7" and alternate.walk_verified is None
+    spec.render_frame(binding_image, 0, 23*16, spec.encode_frame(12, sequence*8192 + 3 + 256))
+    walking = decode_travel(binding_image).recovery
+    assert walking.dialog_key is None and walking.walk_verified
+    corpse_image = np.vstack((np.zeros((16, 142, 3), np.uint8), binding_image))
+    spec.render_frame(corpse_image, 0, 0, spec.encode_frame(6, sequence*8192 + 5*64 + 4))
+    assert decode_travel(corpse_image).corpse_loot_receipt is None
+    spec.render_frame(corpse_image, 0, 176, spec.encode_frame(14, 324 + sequence*4096))
+    assert decode_travel(corpse_image).corpse_loot_receipt == CorpseLootReceipt(5, 4)
+    spec.render_frame(corpse_image, 0, 0, spec.encode_frame(6, (sequence-1)*8192 + 5*64 + 4))
+    assert decode_travel(corpse_image).corpse_loot_receipt is None
+    spec.render_frame(corpse_image, 0, 176, spec.encode_frame(14, 325 + sequence*4096))
+    spec.render_frame(corpse_image, 0, 0, spec.encode_frame(6, sequence*8192 + 4096 + 5*64 + 4))
+    nearby = decode_travel(corpse_image)
+    assert nearby.nearby_lootable_corpse and nearby.corpse_loot_receipt == CorpseLootReceipt(5, 4)
+    status_image = np.vstack((np.zeros((16, 142, 3), np.uint8), corpse_image))
+    spec.render_frame(status_image, 0, 192, spec.encode_frame(14, 327 + sequence*4096))
+    spec.render_frame(status_image, 0, 0, spec.encode_frame(7, sequence*2+1))
+    assert not decode_travel(status_image).run_status_ready
+    spec.render_frame(status_image, 0, 0, spec.encode_frame(7, sequence*8192 + 4096 + 3*32 + 4*2 + 1))
+    hud = decode_travel(status_image)
+    assert hud.run_status_ready and hud.run_status_receipt == 3 and hud.run_status_epoch == 3
+    spec.render_frame(status_image, 0, 0, spec.encode_frame(7, (sequence-1)*8192 + 4097))
+    assert not decode_travel(status_image).run_status_ready
+    spec.render_frame(bars_image, 0, 32, spec.encode_frame(3, 159 + (sequence - 1) * 8192))
+    assert decode_travel(bars_image).vitals.bars is None
+    spec.render_frame(vitals_image, 0, 0, spec.encode_frame(12, 118 + (sequence - 1) * 8192))
+    assert decode_travel(vitals_image).vitals is None
     spec.render_frame(build_image, 0, 16, spec.encode_frame(14, 269+(sequence-1)*4096+524288))
     assert decode_travel(build_image).round_pending_count is None  # Stale receipt is unknown, never zero.
     assert decode_travel(build_image).extension_schema is None
@@ -688,6 +777,14 @@ def test_forever_progression_carries_full_node_and_ignores_old_task_row():
     row(-3, int(ForeverStep.TRAINER_WAITING_FOR_FUNDS), 10)
     funding = decode_travel(image)
     assert funding.forever_step == ForeverStep.TRAINER_WAITING_FOR_FUNDS and funding.forever_value == 10
+    for step, value in ((ForeverStep.EQUIP, 6), (ForeverStep.REPAIR_TRAVEL, 2046),
+                        (ForeverStep.REPAIRED, 35), (ForeverStep.REPAIR_CANNOT_PAY, 65535)):
+        row(-3, 15, (int(step) - 15) * 65536 + value)
+        maintenance = decode_travel(image)
+        assert (maintenance.forever_step, maintenance.forever_value) == (step, value)
+        assert maintenance.objective_action == ObjectiveAction.NONE
+    row(-3, 15, 15 * 65536)
+    assert decode_travel(image).forever_step == ForeverStep.NONE
     row(-2, 1, 7 * 131072 + 4 * 1024 + int(TaskFlags.PREPARED))
     assert decode_travel(image).forever_step == ForeverStep.NONE
 

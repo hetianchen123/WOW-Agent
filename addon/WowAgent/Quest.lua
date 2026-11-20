@@ -2,11 +2,11 @@
 local K = Enum and Enum.QuestClassification
 if not K or not C_QuestInfoSystem or not C_QuestLine then return end
 local print = WowAgent.Report or print
-local OFF, OFFER, TURN_IN, DETAIL, PROGRESS, REWARD, BLOCKED = 0, 1, 2, 3, 4, 5, 6
+local OFF, OFFER, TURN_IN, DETAIL, PROGRESS, REWARD, BLOCKED, REWARD_CHOICE = 0, 1, 2, 3, 4, 5, 6, 7
 local GOSSIP, GREETING = "GOSSIP_SHOW", "QUEST_GREETING"
 local tracked, trackSet = {}, {}
 local panel, sequence, cursor, elapsed = nil, 0, 0, 0
-local screen
+local screen, navigation
 local rows = {}
 local secret = issecretvalue or function() return false end
 local function Public(value)
@@ -19,6 +19,7 @@ local function QuestObjectives(id)
 end
 local forever = WowAgent.Forever
 local retail = forever and forever.questData or WowAgent.RetailQuestData
+local foreverOfferMaps = {}
 local FindFollowup
 
 local function QuestKind(id, info, mapID)
@@ -35,6 +36,7 @@ local function QuestKind(id, info, mapID)
     if info and info.isStory and not (line and line.isLocalStory) then return 2 end
     if classification == K.Important or (line and line.isImportant) then return 6 end
     if line and line.isLocalStory then return 3 end
+    if forever and (classification == K.Normal or mapID and foreverOfferMaps[id] == mapID) then return 3 end
     if classification == K.Normal then
         local title = info and info.title or C_QuestLog.GetTitleForQuestID(id)
         if title and title ~= "" then return 3 end
@@ -44,7 +46,17 @@ end
 
 local function IsStoryQuest(id, mapID)
     local kind = QuestKind(id, nil, mapID)
-    return kind >= 1 and kind <= 3
+    return kind >= 1 and kind <= 3 or forever and kind == 6
+end
+
+local function IsPickupQuest(id, map)
+    if not forever then return IsStoryQuest(id, map) end
+    local kind = QuestKind(id, nil, map)
+    if kind <= 3 or kind == 6 then
+        foreverOfferMaps[id] = map
+        return true
+    end
+    return false
 end
 
 local function DialogueQuests()
@@ -92,7 +104,15 @@ local function Dialogue()
         if id == 0 then return 0, BLOCKED end
         if panel == "QUEST_DETAIL" then return id, DETAIL end
         if panel == "QUEST_PROGRESS" and IsQuestCompletable() then return id, PROGRESS end
-        if panel == "QUEST_COMPLETE" then return id, GetNumQuestChoices() <= 1 and REWARD or 7 end
+        if panel == "QUEST_COMPLETE" then
+            local count = Public(GetNumQuestChoices())
+            if type(count) ~= "number" or count < 0 then return id, BLOCKED end
+            if count <= 1 then return id, REWARD, 1 end
+            local chosen = forever and navigation and navigation.automatic and navigation.quest == id
+                and forever.RewardChoice(id, count)
+            if chosen then return id, REWARD, chosen end
+            return id, REWARD_CHOICE
+        end
         return id, BLOCKED
     end
     return 0, OFF
@@ -124,6 +144,7 @@ function WowAgent.QuestAction(expectedID)
         if index then SelectActiveQuest(index) else C_GossipInfo.SelectActiveQuest(id) end
     elseif phase == DETAIL then
         if QuestFlagsPVP and QuestFlagsPVP() then return end
+        if WowAgent.RememberQuestDescription then WowAgent.RememberQuestDescription(id) end
         if QuestGetAutoAccept() then
             if AcknowledgeAutoAcceptQuest then AcknowledgeAutoAcceptQuest() end
         else
@@ -132,7 +153,7 @@ function WowAgent.QuestAction(expectedID)
     elseif phase == PROGRESS then
         CompleteQuest()
     elseif phase == REWARD then
-        GetQuestReward(1)
+        GetQuestReward(index)
     end
 end
 
@@ -145,7 +166,7 @@ function WowAgent.OpenQuestOfferID()
     end
     local best, mapID = nil, C_Map.GetBestMapForUnit("player")
     for _, quest in ipairs(DialogueQuests()) do
-        if quest.phase == OFFER and (not best or quest.id < best) and IsStoryQuest(quest.id, mapID) then
+        if quest.phase == OFFER and (not best or quest.id < best) and IsPickupQuest(quest.id, mapID) then
             best = quest.id
         end
     end
@@ -352,7 +373,6 @@ local writeSkySkills, writeSkyMotion
 local lootEpoch = 0
 local navSequence, navElapsed = 0, 0
 local navRows = {}
-local navigation
 local PrepareTutorialMount
 local skyButton
 local flyingTypes = {[242]=true, [247]=true, [248]=true, [402]=true, [424]=true, [436]=true}
@@ -445,20 +465,8 @@ local function QuestDestination(id, mapID)
     end
 end
 
-local movementBindings = {
-    {"W", "MOVEFORWARD", "前进"}, {"S", "MOVEBACKWARD", "后退"},
-    {"LEFT", "TURNLEFT", "左转"}, {"RIGHT", "TURNRIGHT", "右转"},
-    {"SPACE", "JUMP", "跳跃"},
-}
-
-local taskBindings = {
-    {"TAB", "TARGETNEARESTENEMY", "选敌"}, {"F", "INTERACTTARGET", "与目标互动"},
-    {"1", "ACTIONBUTTON1", "一键输出"}, {"5", "ACTIONBUTTON5", "切换飞行风格"},
-    {"6", "ACTIONBUTTON6", "飞行坐骑"}, {"7", "ACTIONBUTTON7", "地面坐骑"},
-    {"8", "ACTIONBUTTON8", "下马"}, {"9", "ACTIONBUTTON9", "任务对话"},
-    {"Q", "STRAFELEFT", "左横移"}, {"E", "STRAFERIGHT", "右横移"},
-}
-for _, binding in ipairs(movementBindings) do taskBindings[#taskBindings + 1] = binding end
+local bindings = WowAgent.TaskBindings
+local movementBindings, taskBindings = bindings.movement, bindings.native
 local taskBindingOwner
 local taskTargetButton, taskItemButton, taskDialogueButton, taskFetchButton, taskSweepButton
 local taskDialogueBody = "/run WowAgent.RunPreparedQuestAction()"
@@ -536,13 +544,14 @@ local function NearbyQuest(expectedID, area, afterID, suspended)
             and Public(quest.isQuestStart) == true and Public(quest.isHidden) == false
             and Public(quest.isDaily) ~= true and Public(quest.isMeta) ~= true
             and startMap == map
-            and (not Enum.QuestLineFloorLocation or Public(quest.floorLocation) == Enum.QuestLineFloorLocation.Same)
+            and (forever or not Enum.QuestLineFloorLocation
+                or Public(quest.floorLocation) == Enum.QuestLineFloorLocation.Same)
             and Coordinate(x) and Coordinate(y)
             and not C_QuestLog.IsOnQuest(id) and not C_QuestLog.IsQuestFlaggedCompleted(id) then
             local point = RetailNPCPoint(id, "pickup", map) or {id = id, map = map, x = x, y = y}
             local distance = ((point.x - player.x) * player.width)^2 + ((point.y - player.y) * player.height)^2
             if distance < best and InQuestArea(point, area) and (PickupNPC(id) or Public(quest.isCampaign) == true
-                or Public(quest.isLocalStory) == true or IsStoryQuest(id, map)) then
+                or Public(quest.isLocalStory) == true or IsPickupQuest(id, map)) then
                 nearest, best = point, distance
             end
         end
@@ -562,6 +571,7 @@ local function KnownFollowup(expectedID, area, afterID, suspended)
             and (data.starter or (data.after and next(data.after)))
             and (not afterID or (data.after and data.after[afterID]))
             and (not forever or (UnitFactionGroup("player") == "Alliance" and UnitLevel("player") >= data.level))
+            and (not data.class or select(2, UnitClass("player")) == data.class)
             and Public(C_QuestLog.IsOnQuest(id)) == false
             and Public(C_QuestLog.IsQuestFlaggedCompleted(id)) == false then
             local ready = true
@@ -657,10 +667,34 @@ local function AddRoundQuest(round, id)
     round.jobs[#round.jobs + 1] = id
 end
 
-local function RoundQuest(round, phase)
-    for _, id in ipairs(round.jobs) do
-        if not (round.suspended and round.suspended[id]) and QuestPhase(id) == phase then return id end
+local function RoundUnlocks(id)
+    local unlocks = 0
+    for nextID, data in pairs(retail.quests) do
+        if data.after and data.after[id] and Public(C_QuestLog.IsQuestFlaggedCompleted(nextID)) == false then
+            unlocks = unlocks + 1
+        end
     end
+    return unlocks
+end
+
+local function RoundQuest(round, phase)
+    local player = forever and QuestArea()
+    local best, bestUnlocks, bestDistance
+    for _, id in ipairs(round.jobs) do
+        if not (round.suspended and round.suspended[id]) and QuestPhase(id) == phase then
+            if not player or phase == 1 then return id end
+            local unlocks = RoundUnlocks(id)
+            local map, x, y = QuestDestination(id, player.map)
+            local point = phase == 3 and RetailNPCPoint(id, "turnIn", player.map)
+            if point then map, x, y = point.map, point.x, point.y end
+            local distance = map == player.map and Coordinate(x) and Coordinate(y)
+                and ((x - player.x) * player.width)^2 + ((y - player.y) * player.height)^2 or math.huge
+            if not best or unlocks > bestUnlocks or (unlocks == bestUnlocks and distance < bestDistance) then
+                best, bestUnlocks, bestDistance = id, unlocks, distance
+            end
+        end
+    end
+    return best
 end
 
 local function ReadyRoundQuest(round)
@@ -761,6 +795,7 @@ local function PrepareRound(id)
         local resume = WowAgent.GetQuestRoundResumeID()
         if round.stage == ROUND_DONE or (round.suspended and round.suspended[id] and not resume) then
             round.stage, round.immediate = ROUND_PICKUP, nil
+            round.anchor = anchor
             -- Explicit preparation after exhaustion starts a new attempt for
             -- ALL unfinished jobs. Resuming an unfinished round keeps its skips.
             round.suspended = {}
@@ -805,7 +840,7 @@ local function RememberRoundOffers(round)
         end
     end
     local function Remember(id)
-        if QuestPhase(id) == 1 and (PickupNPC(id) or IsStoryQuest(id, point.map)) then
+        if QuestPhase(id) == 1 and (PickupNPC(id) or IsPickupQuest(id, point.map)) then
             round.offers[id] = {id = id, map = point.map, x = point.x, y = point.y, npc = npcID, name = name}
         end
     end
@@ -849,13 +884,28 @@ local function RoundNeedsAdvance(round, phase)
         or (round.stage == ROUND_TURN_IN and phase == 4)
 end
 
+local function CanTurnInHere(id)
+    local dialogueID, phase = Dialogue()
+    if dialogueID == id and (phase == TURN_IN or phase == PROGRESS or phase == REWARD or phase == REWARD_CHOICE) then
+        return true
+    end
+    for _, quest in ipairs(DialogueQuests()) do
+        if quest.id == id and quest.phase == TURN_IN then return true end
+    end
+    local player = QuestArea()
+    local point = player and RetailNPCPoint(id, "turnIn", player.map)
+    return point and ((point.x - player.x) * player.width)^2 + ((point.y - player.y) * player.height)^2 <= 5^2
+end
+
 local function NextRoundAction(plan, phase)
     local round = plan.round
     ReconcileRoundSuspensions(round)
     RememberRoundOffers(round)
     if round.stage == ROUND_PICKUP then
         if phase == 2 or phase == 3 then AddRoundQuest(round, plan.quest) end
-        if round.acceptingID == plan.quest and phase == 3 then round.immediate = true end
+        if phase == 3 and (round.acceptingID == plan.quest or round.immediate) then
+            round.immediate = not forever or CanTurnInHere(plan.quest) or nil
+        end
         if phase == 2 then round.immediate = nil end
     end
     if (round.stage >= ROUND_OBJECTIVES and RoundQuest(round, 1))
@@ -872,18 +922,34 @@ local function NextRoundAction(plan, phase)
     end
     -- The quest log and nearby quest markers update separately after accepting or turning in.
     if GetTime() - round.waitSince < 2 then return end
+    if forever and phase == 4 then
+        local here = QuestArea()
+        local pickup = here and RoundOffer(round, here, plan.quest)
+        if pickup then return {stage = ROUND_PICKUP, id = pickup.id, pickup = pickup, anchor = here, keepJobs = true} end
+    end
     if round.stage == ROUND_PICKUP then
         local pickup = RoundOffer(round, round.anchor, phase == 4 and plan.quest or nil)
         if pickup then return {stage = ROUND_PICKUP, id = pickup.id, pickup = pickup} end
+        if forever and C_QuestLine.RequestQuestLinesForMap and GetTime() - round.waitSince < 6 then
+            if not round.scanRetried then
+                round.scanRetried = true
+                C_QuestLine.RequestQuestLinesForMap(round.anchor.map)
+            end
+            return
+        end
     end
     if round.stage <= ROUND_OBJECTIVES then
         local active, ready = RoundQuest(round, 2), ReadyRoundQuest(round)
+        if forever and ready and (CanTurnInHere(ready) or active and RoundUnlocks(ready) > RoundUnlocks(active)) then
+            return {stage = ROUND_TURN_IN, id = ready}
+        end
         if active then return {stage = ROUND_OBJECTIVES, id = active} end
         if ready then return {stage = ROUND_TURN_IN, id = ready} end
     else
         local ready = ReadyRoundQuest(round)
         if ready then return {stage = ROUND_TURN_IN, id = ready} end
-        if RoundQuest(round, 2) then return {blocked = true} end
+        local active = RoundQuest(round, 2)
+        if active then return forever and {stage = ROUND_OBJECTIVES, id = active} or {blocked = true} end
     end
     local area = QuestArea()
     local pickup = area and (RoundOffer(round, area, phase == 4 and plan.quest or nil)
@@ -923,11 +989,6 @@ local function KnownTaskTargetName(expected)
     return names and SafeTaskTargetName(names[locale == "enGB" and "enUS" or locale])
 end
 
-local function TaskClickMatches(key, name)
-    local action = Public(GetBindingAction(key, true))
-    return type(action) == "string" and action:lower() == ("CLICK " .. name .. ":LeftButton"):lower()
-end
-
 local function GameTaskOptions(enable)
     local flags = Enum and Enum.SoftTargetEnableFlags
     if not flags or not C_CVar or not C_CVar.GetCVar then return false end
@@ -959,7 +1020,7 @@ local function SetupTaskClicks(plan)
         taskTargetButton:SetAttribute("type", "target")
         taskTargetButton:SetAttribute("unit", "softinteract")
     end
-    SetOverrideBindingClick(taskBindingOwner, false, "K", "WowAgentTaskTarget", "LeftButton")
+    if not bindings.BindClick(taskBindingOwner, "quest_target", true) then return false end
     local name = KnowsFetch() and C_Spell and C_Spell.GetSpellName and Public(C_Spell.GetSpellName(fetchSpell))
     if type(name) == "string" and name ~= "" then
         if not taskFetchButton then
@@ -967,17 +1028,19 @@ local function SetupTaskClicks(plan)
             taskFetchButton:RegisterForClicks("AnyDown", "AnyUp")
             taskFetchButton:SetAttribute("type", "macro")
         end
-        plan.fetchBody = "/cast " .. name
-        taskFetchButton:SetAttribute("macrotext", plan.fetchBody)
-        SetOverrideBindingClick(taskBindingOwner, false, "L", "WowAgentTaskFetch", "LeftButton")
-        if not taskSweepButton then
-            taskSweepButton = CreateFrame("Button", "WowAgentTaskSweep", UIParent, "SecureActionButtonTemplate")
-            taskSweepButton:RegisterForClicks("AnyDown", "AnyUp")
-            taskSweepButton:SetAttribute("type", "macro")
+        local fetchBody = "/cast " .. name
+        taskFetchButton:SetAttribute("macrotext", fetchBody)
+        if bindings.BindClick(taskBindingOwner, "pet_fetch", true) then
+            plan.fetchBody = fetchBody
+            if not taskSweepButton then
+                taskSweepButton = CreateFrame("Button", "WowAgentTaskSweep", UIParent, "SecureActionButtonTemplate")
+                taskSweepButton:RegisterForClicks("AnyDown", "AnyUp")
+                taskSweepButton:SetAttribute("type", "macro")
+            end
+            local sweepBody = "/cleartarget\n/cast " .. name
+            taskSweepButton:SetAttribute("macrotext", sweepBody)
+            if bindings.BindClick(taskBindingOwner, "pet_fetch_next", true) then plan.sweepBody = sweepBody end
         end
-        plan.sweepBody = "/cleartarget\n/cast " .. name
-        taskSweepButton:SetAttribute("macrotext", plan.sweepBody)
-        SetOverrideBindingClick(taskBindingOwner, false, "O", "WowAgentTaskSweep", "LeftButton")
     end
     if plan.item then
         if not taskItemButton then
@@ -986,34 +1049,41 @@ local function SetupTaskClicks(plan)
             taskItemButton:SetAttribute("type", "item")
         end
         taskItemButton:SetAttribute("item", "item:" .. plan.item)
-        SetOverrideBindingClick(taskBindingOwner, false, "J", "WowAgentTaskItem", "LeftButton")
+        if not bindings.BindClick(taskBindingOwner, "quest_item", true) then return false end
     end
     return true
 end
 
+local function CorpseCanLoot(unit)
+    local guid = UnitGUID and Public(UnitGUID(unit))
+    if not CanLootUnit or type(guid) ~= "string" or not guid:match("^Creature%-")
+        or Public(UnitIsDead(unit)) ~= true then return end
+    local ok, hasLoot, canLoot = pcall(CanLootUnit, guid)
+    if ok then
+        hasLoot, canLoot = Public(hasLoot), Public(canLoot)
+        if hasLoot == false then return false end
+        if hasLoot == true and canLoot == true then return true end
+    end
+end
+
 local function CorpseLootFlags(plan, phase, task)
-    if (phase ~= 2 and phase ~= 3) or task % 2 ~= 1 or InCombatLockdown() or IsMounted()
+    if (phase < 1 or phase > 3) or task % 2 ~= 1 or InCombatLockdown() or IsMounted()
         or (IsFlying and IsFlying()) or (IsFalling and IsFalling()) or (IsSwimming and IsSwimming())
         or (GetCursorInfo and GetCursorInfo()) or (SpellIsTargeting and SpellIsTargeting()) then return 0 end
-    local flags = 0
-    local target = UnitGUID and Public(UnitGUID("target"))
-    if CanLootUnit and type(target) == "string" and target:match("^Creature%-")
-        and Public(UnitIsDead("target")) == true then
-        local ok, hasLoot, canLoot = pcall(CanLootUnit, target)
-        if ok then
-            hasLoot, canLoot = Public(hasLoot), Public(canLoot)
-            if hasLoot == false or canLoot == false then flags = 8192 end
-            if hasLoot == true and canLoot == true then flags = 8192 + 16384 end
-        end
-    end
-    if not plan.fetchBody or not KnowsFetch() or not TaskClickMatches("L", "WowAgentTaskFetch")
+    local targetLootable = CorpseCanLoot("target")
+    local flags = targetLootable == nil and 0 or (targetLootable and 24576 or 8192)
+    local nearby = targetLootable ~= true and taskTargetButton
+        and Public(taskTargetButton:GetAttribute("type")) == "target"
+        and Public(taskTargetButton:GetAttribute("unit")) == "softinteract"
+        and CorpseCanLoot("softinteract") == true
+    if not plan.fetchBody or not KnowsFetch() or not bindings.ClickReady("pet_fetch")
         or Public(taskFetchButton:GetAttribute("macrotext")) ~= plan.fetchBody
         or not UnitExists or Public(UnitExists("pet")) ~= true or Public(UnitIsDead("pet")) ~= false then
-        return flags
+        return flags, nearby
     end
     local usable = C_Spell and C_Spell.IsSpellUsable and Public(C_Spell.IsSpellUsable(fetchSpell))
     if usable ~= false then flags = flags + 32768 end
-    return flags
+    return flags, nearby
 end
 
 local taskTargetMacro
@@ -1045,16 +1115,15 @@ local function SetupTaskDialogue(support, plan)
         taskDialogueButton:SetAttribute("macro", index)
         plan.dialogueMacro = index
     end
-    SetOverrideBindingClick(taskBindingOwner, false, "9", "WowAgentTaskDialogue", "LeftButton")
+    if not bindings.BindClick(taskBindingOwner, "quest_dialogue") then return nil, "quest_dialogue_binding_conflict" end
     if forever then forever.BindProgression(taskBindingOwner, plan) end
-    local suspendBinding = Public(GetBindingAction("F5", true))
-    if plan.round and suspendBinding ~= nil and suspendBinding ~= "SITORSTAND" and suspendBinding ~= "PITCHDOWN" then
+    if plan.round then
         if not WowAgentTaskSuspend then
             local button = CreateFrame("Button", "WowAgentTaskSuspend", UIParent)
             button:RegisterForClicks("LeftButtonUp")
             button:SetScript("OnClick", function() WowAgent.SuspendPreparedQuest() end)
         end
-        SetOverrideBindingClick(taskBindingOwner, false, "F5", "WowAgentTaskSuspend", "LeftButton")
+        bindings.BindClick(taskBindingOwner, "quest_suspend", true)
     end
     return true
 end
@@ -1141,7 +1210,7 @@ end
 local function RecoverQuestDialogue(plan, id, phase, pickup)
     if phase == OFF then return false end
     if id == plan.quest and ((pickup and (phase == OFFER or phase == DETAIL))
-        or (not pickup and (phase == TURN_IN or phase == PROGRESS or phase == REWARD or phase == 7))) then
+        or (not pickup and (phase == TURN_IN or phase == PROGRESS or phase == REWARD or phase == REWARD_CHOICE))) then
         return false
     end
     -- The current quest can coexist with other entries in a gossip list.
@@ -1182,7 +1251,8 @@ local function SwitchRoundQuest(plan, nextAction)
         return
     end
     if nextAction.anchor then
-        round.anchor, round.jobs, round.options = nextAction.anchor, {}, {}
+        round.anchor = nextAction.anchor
+        if not nextAction.keepJobs then round.jobs, round.options = {}, {} end
     end
     round.current = nextAction.id
     if plan.quest ~= nextAction.id then
@@ -1257,7 +1327,7 @@ end
 function WowAgent.SuspendPreparedQuest()
     local plan = navigation
     if not plan or not plan.automatic or not plan.round or not screen:IsShown()
-        or plan.round.stage == ROUND_DONE or InCombatLockdown() or not TaskClickMatches("F5", "WowAgentTaskSuspend")
+        or plan.round.stage == ROUND_DONE or InCombatLockdown() or not bindings.ClickReady("quest_suspend")
         or (IsFlying and IsFlying()) or (IsFalling and IsFalling())
         or (UnitIsDeadOrGhost and Public(UnitIsDeadOrGhost("player")) ~= false)
         or (UnitCastingInfo and Public(UnitCastingInfo("player")))
@@ -1293,6 +1363,16 @@ function WowAgent.RunPreparedQuestAction()
         if RoundNeedsAdvance(plan.round, questPhase) then
             local action = NextRoundAction(plan, questPhase)
             if action and not action.blocked then SwitchRoundQuest(plan, action) end
+        elseif forever and stage == ROUND_OBJECTIVES and questPhase == 2 and plan.quest == 95998 then
+            local player = QuestArea()
+            local camp = player and RetailQuest(plan.quest, player.map)
+            camp = camp and camp.campPoint
+            if camp and DoEmote and not IsMounted() and IsOutdoors() and Public(GetUnitSpeed("player")) == 0
+                and not IsFlying() and not IsFalling() and not IsSwimming()
+                and ((camp[1] / 100 - player.x) * player.width)^2
+                    + ((camp[2] / 100 - player.y) * player.height)^2 <= 6.5^2 then
+                DoEmote("SIT")
+            end
         elseif (stage == ROUND_PICKUP and questPhase == 1)
             or ((stage == ROUND_TURN_IN or plan.round.immediate) and questPhase == 3) then
             RememberRoundOffers(plan.round)
@@ -1360,10 +1440,10 @@ end
 
 local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
     if not plan.automatic then return 0 end
-    local prepared = GameTaskOptions(false) and TaskClickMatches("K", "WowAgentTaskTarget")
+    local prepared = GameTaskOptions(false) and bindings.ClickReady("quest_target")
         and Public(GetBindingAction("F", true)) == "INTERACTTARGET"
         and Public(GetBindingAction("TAB", true)) == "TARGETNEARESTENEMY"
-        and TaskClickMatches("9", "WowAgentTaskDialogue")
+        and bindings.ClickReady("quest_dialogue")
     if not sky and not forever then
         prepared = prepared and plan.dialogueMacro
             and WowAgent.LayoutSupport.ReadMacroBody(plan.dialogueMacro) == taskDialogueBody
@@ -1371,7 +1451,7 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
     local flags = prepared and 1 or 0
     local expected = objectiveNPC or (phase == 3 and plan.npc) or (phase == 1 and plan.pickupNPC)
     if expected then flags = flags + 32 end
-    local itemBound = plan.item and TaskClickMatches("J", "WowAgentTaskItem")
+    local itemBound = plan.item and bindings.ClickReady("quest_item")
     if itemBound then flags = flags + 16 end
     if itemBound and plan.useItem and phase == 2 and QuestItemID(plan.quest) == plan.item then
         flags = flags + 64
@@ -1385,6 +1465,10 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
         RestoreNativeRange()
     end
     local soft, target = Public(UnitGUID("softinteract")), Public(UnitGUID("target"))
+    if phase >= 1 and phase <= 3 and soft and target == soft
+        and Public(UnitIsDead("softinteract")) == true then
+        flags = flags + 8
+    end
     local function Rejected(guid)
         return (phase == 1 or phase == 3) and plan.rejectedNPCs and plan.rejectedNPCs[guid]
     end
@@ -1487,9 +1571,6 @@ local function InteractionFlags(plan, phase, sky, nearMarker, objectiveNPC)
         plan.rangeProbeAt, plan.turnInTarget = nil, nil
         plan.liveTargetEvidence, plan.npcUnmatchedSince = nil, nil
         ConfigureTaskTarget(WowAgent.QuestEncounter and WowAgent.QuestEncounter.Name(plan.quest, phase))
-        if phase == 2 and soft and target == soft and Public(UnitIsDead("softinteract")) == true then
-            flags = flags + 8
-        end
     end
     RestoreNativeRange()
     return flags
@@ -1502,38 +1583,51 @@ local function ClearTaskBindings()
         taskBindingOwner:RegisterEvent("PLAYER_REGEN_ENABLED")
     else
         ClearOverrideBindings(taskBindingOwner)
+        bindings.Forget(taskBindingOwner)
         taskBindingOwner:UnregisterEvent("PLAYER_REGEN_ENABLED")
     end
 end
 
-local function ApplyTaskBindings()
+local function ApplyTaskBindings(plan)
     if not SetOverrideBinding or not ClearOverrideBindings then return false end
+    for _, binding in ipairs(taskBindings) do
+        local key, action = unpack(binding)
+        if (key ~= "9" or not plan.automatic) and not bindings.NativeAvailable(key, action) then
+            if key ~= "Q" and key ~= "E" then return false, key end
+            plan.strafeConflict = true
+        end
+    end
+    if plan.automatic then
+        if not bindings.ClickAvailable("quest_target", true) then return false, "K" end
+        if not bindings.ClickAvailable("quest_dialogue") then return false, "9" end
+        if plan.item and not bindings.ClickAvailable("quest_item", true) then return false, "J" end
+    end
     if not taskBindingOwner then
         taskBindingOwner = CreateFrame("Frame")
         taskBindingOwner:SetScript("OnEvent", ClearTaskBindings)
     end
     for _, binding in ipairs(taskBindings) do
         local key, action = unpack(binding)
-        if Public(GetBindingAction(key, true)) ~= action
+        local skipped = (key == "9" and plan.automatic) or (plan.strafeConflict and (key == "Q" or key == "E"))
+        if not skipped and bindings.Read(key, true) ~= action
             and not pcall(SetOverrideBinding, taskBindingOwner, false, key, action) then
             ClearTaskBindings()
-            return false
+            return false, key
         end
     end
     return true
 end
 
 function WowAgent.ReportQuestBindings()
-    for _, binding in ipairs(taskBindings) do
-        local key, action, label = unpack(binding)
-        local current = Public(GetBindingAction(key, true))
-        print("WowAgent：" .. key .. " " .. label .. " · "
-            .. (current == action and "已核对" or "当前 " .. ((current and current ~= "") and current or "未绑定")))
-    end
-    for _, entry in ipairs({{"L", "WowAgentTaskFetch", "拾回"}, {"O", "WowAgentTaskSweep", "继续拾回附近掉落"}}) do
-        print("WowAgent：" .. entry[1] .. " " .. entry[3] .. " · "
-            .. (TaskClickMatches(entry[1], entry[2]) and "已核对" or "未配置（需已学会拾回）"))
-    end
+    bindings.Report()
+end
+
+function WowAgent.ReportQuestRecovery()
+    if not WowAgent.RecoveryDialogStatus then return end
+    local status, key = WowAgent.RecoveryDialogStatus(navigation and navigation.recovery)
+    local message = "WowAgent recovery: " .. status .. (key and " · " .. key or "")
+    print(message)
+    if UIErrorsFrame then UIErrorsFrame:AddMessage(message, 1, .8, 0) end
 end
 
 local skyKeys, EmptyAuxSlot
@@ -1598,11 +1692,12 @@ local function PrepareSkyBindings(plan, support)
     for pass = 1, 2 do
         local first, last = pass == 1 and 12 or #skyKeys, pass == 1 and 1 or 13
         for code = first, last, -1 do
-            local binding = GetBindingAction(skyKeys[code], true)
-            if not secret(binding) then
-                if binding == nil or binding == "" then free[#free + 1] = code end
+            local key = skyKeys[code]
+            local binding, base = bindings.Read(key, true), bindings.Read(key, false)
+            if binding and base and (not plan.taskBindings or not bindings.Reserved(key) or binding == "PITCHDOWN") then
+                if binding == "" and base == "" then free[#free + 1] = code end
                 if binding == "PITCHDOWN" and not existingPitch then existingPitch = code end
-                local button = type(binding) == "string" and binding:match("^ACTIONBUTTON(1[012])$")
+                local button = binding == base and binding:match("^ACTIONBUTTON(1[012])$")
                 if button and EmptyAuxSlot(button) then
                     spare[#spare + 1], spareButtons[code] = code, button
                 end
@@ -2034,6 +2129,7 @@ local function NavigationDestination(plan, phase, map)
             return map, choice.point[1] / 100, choice.point[2] / 100
         end
         local data = RetailQuest(id, map)
+        if data and data.campPoint then return map, data.campPoint[1] / 100, data.campPoint[2] / 100 end
         if data and data.arrival then
             local point = RetailNPCPoint(id, "turnIn", map)
             if point then return point.map, point.x, point.y end
@@ -2144,9 +2240,10 @@ local function UpdateNavigation()
     if WowAgent.Forever and navigation.automatic then
         navigation.foreverTrain = phase == 2 and IsOutdoors() or navigation.foreverTraining
         navigation.foreverProgress = WowAgent.Forever.Progression(navigation, mapID)
-        if navigation.foreverProgress and navigation.foreverProgress.trainer then
-            local trainer = navigation.foreverProgress.trainer
-            targetMap, gx, gy, objectiveNPC = trainer.map, trainer.x, trainer.y, trainer.id
+        local state = navigation.foreverProgress
+        local npc = state and (state.trainer or state.npc)
+        if npc then
+            targetMap, gx, gy, objectiveNPC = npc.map, npc.x, npc.y, npc.id
         end
     end
     local position = C_Map.GetPlayerMapPosition and C_Map.GetPlayerMapPosition(mapID, "player")
@@ -2208,7 +2305,7 @@ local function UpdateNavigation()
     if GetBindingAction("F", true) == "INTERACTTARGET" then meta = meta + 4096 end
     navSequence = (navSequence + 1) % 128
     writeObjectiveProgress(navSequence % 16, objectiveProgress)
-    local recoveryGhost
+    local recoveryGhost, recoveryLife
     if WowAgent.RecoveryState then
         local state, corpse, button, aspect = WowAgent.RecoveryState(navigation.recovery, mapID, MovementKeys)
         if state % 4 == 1 and navigation.automatic and WowAgent.NearbyPatrol
@@ -2218,7 +2315,8 @@ local function UpdateNavigation()
             button, aspect = WowAgent.CombatHandoff()
             state = state + 1024
         end
-        recoveryGhost = state % 4 == 3
+        recoveryLife = state % 4
+        recoveryGhost = recoveryLife == 3
         writeRecovery[1](12, state + navSequence * 8192)
         writeRecovery[2](13, corpse)
         writeRecovery[3](14, button)
@@ -2240,7 +2338,7 @@ local function UpdateNavigation()
         clickKey, click = 6, QuestChoiceStep(navigation, route)
     elseif objectiveNPC then
         clickKey = 5
-    elseif data and data.arrival then
+    elseif (profile and profile.campPoint) or (data and data.arrival) then
         clickKey = 3
     elseif navigation.automatic and phase == 2 and id ~= 90882 then
         clickKey, click, preciseObject = GenericObjective(id, objectives, entry, objectiveIndex, objectName,
@@ -2254,16 +2352,33 @@ local function UpdateNavigation()
         encounterFlags, encounterTarget = WowAgent.QuestEncounter.State(id, phase, taskTargetButton)
         if encounterFlags >= 2048 and not choice then clickKey, click = 1, encounterTarget end
     end
+    local foreverCode
     if navigation.foreverProgress then
         local state = navigation.foreverProgress
         clickKey, click = 7, state.value or state.node or 0
-        if click >= 1048576 then click = 0 end
+        foreverCode = state.code
+        if foreverCode >= 15 then
+            -- Kind 15 extends Forever progression while retaining the old 1..14 codes.
+            click = (foreverCode - 15) * 65536 + math.min(click, 65535)
+            foreverCode = 15
+        elseif click >= 1048576 then click = 0 end
         if state.trainer then navigation.foreverTraining = true end
         if state.code == 2 or state.code == 11 or state.code == 12 then navigation.foreverTraining = nil end
     end
     if WowAgent.WriteNav3D then
         WowAgent.WriteNav3D(navSequence, id, phase, mapID, targetMap,
-            meta % 256 >= 128 and gx or nil, meta % 256 >= 128 and gy or nil, flags, encounterFlags)
+            meta % 256 >= 128 and gx or nil, meta % 256 >= 128 and gy or nil, flags, encounterFlags,
+            task % 2 == 1 and MovementKeys or nil)
+    end
+    if WowAgent.RoadScan then
+        WowAgent.RoadScan.Write(navSequence, mapID, flags, navigation.automatic and navigation.taskBindings)
+    end
+    if WowAgent.WriteQuestText then
+        local known = choice or objectiveNPC or id == 90883 or encounterFlags >= 2048 or navigation.useItem
+            or (profile and (profile.campPoint or profile.arrival or profile.combatNPC or profile.lootNPCs
+                or profile.resource or profile.objectNames or profile.objectCreature))
+        WowAgent.WriteQuestText(navSequence, id, navigation.automatic and phase == 2 and entry or nil,
+            objectiveIndex, known)
     end
     local mapCenter, mapSize, mapInfo
     if preciseObject or recoveryGhost or navigation.automatic and InCombatLockdown() then
@@ -2274,7 +2389,7 @@ local function UpdateNavigation()
     writeMinimap[3](2, mapInfo and mapInfo + navSequence * 2048 or 0)
     writeSky(0, ascent + halt * 16 + (pitch or 0) * 256 + (dismount or 0) * 16384)
     -- Combat action 1 with row kind 3 carries a counted item-drop objective.
-    writeClick(navigation.foreverProgress and navigation.foreverProgress.code
+    writeClick(foreverCode
         or (clickKey == 1 and data and data.lootNPCs and entry and Public(entry.type) == "item" and 3 or 2), click)
     writeTask(1, task + navSequence * 1024 + clickKey * 131072)
     local roundStatus = 0
@@ -2282,7 +2397,7 @@ local function UpdateNavigation()
         roundStatus = round.stage + (round.next and (round.next.blocked and 16 or 8) or 0)
         if round.immediate then roundStatus = roundStatus + 32 end
     end
-    local suspendReady = round and round.stage ~= ROUND_DONE and TaskClickMatches("F5", "WowAgentTaskSuspend")
+    local suspendReady = round and round.stage ~= ROUND_DONE and bindings.ClickReady("quest_suspend")
     local resource = objectiveKind == 3 and objectiveProgress % 1024 == 1000
     local suspended = round and round.suspended and round.suspended[id]
     writeObjective(12, math.min(63, encodedIndex or objectiveIndex or 0) + (suspended and 64 or 0)
@@ -2295,7 +2410,7 @@ local function UpdateNavigation()
     local area = phase == 2 and targetMap == mapID and WowAgent.QuestAreaMask
         and WowAgent.QuestAreaMask(id, mapID, gx, gy, width, depth)
     for row = 1, 5 do writeArea[row](row + 3, (area and area[row] or 0) + (navSequence % 16) * 65536) end
-    local sweepReady = navigation.sweepBody and taskSweepButton and TaskClickMatches("O", "WowAgentTaskSweep")
+    local sweepReady = navigation.sweepBody and taskSweepButton and bindings.ClickReady("pet_fetch_next")
         and Public(taskSweepButton:GetAttribute("macrotext")) == navigation.sweepBody
     local cameraReady = camera.ready()
     local cameraDistance = targetMap == mapID and width > 0 and depth > 0
@@ -2310,7 +2425,10 @@ local function UpdateNavigation()
     -- Extension schema 6: low two bits retain orbit binding/lease; bits 2..8
     -- report outstanding suspensions (saturated at 127), including saved ones.
     -- Bit 19 retains overhead availability; the build row carries nav sequence.
-    writeBuild(14, 295 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    writeBuild(14, 331 + navSequence * 4096 + (camera.probeReady() and 524288 or 0))
+    local lootFlags, nearbyCorpse = CorpseLootFlags(navigation, phase, task)
+    if WowAgent.CorpseLoot then WowAgent.CorpseLoot.Publish(navSequence, nearbyCorpse) end
+    if WowAgent.RunStatus then WowAgent.RunStatus.Publish(navSequence, task % 2 == 1) end
     writeBuildSchema(15, 357888 + (camera.orbitReady and camera.orbitReady() and 1 or 0)
         + (camera.orbitActive and camera.orbitActive() and 2 or 0)
         + math.min(127, round and ReconcileRoundSuspensions(round) or 0) * 4
@@ -2320,6 +2438,21 @@ local function UpdateNavigation()
     -- bits 14..19: signature 45. No option or Apply result can certify visibility.
     local hiddenUI = WowAgent.VisualUI and WowAgent.VisualUI.HiddenMask() or 0
     writeVisualUI(13, 45 * 16384 + navSequence * 128 + 16 + hiddenUI)
+    local vitals, supply, potion, food, water = 0, 0
+    if WowAgent.PlayerConsumables then
+        vitals, supply, potion, food, water = WowAgent.PlayerConsumables(navigation.recovery, recoveryLife, flags)
+    end
+    writeRecovery[5](navSequence % 16, vitals)
+    writeRecovery[6](12, navSequence * 8192 + supply)
+    bindings.PublishCameraKeys(navSequence, id, phase, mapID, IsMounted(), sky)
+    if WowAgent.Forever then
+        writeRecovery[7](1, navSequence * 8192 + (potion or 0))
+        writeRecovery[8](2, navSequence * 8192 + (food or 0))
+        writeRecovery[9](3, navSequence * 8192 + (water or 0))
+        local barX, barY = WowAgent.RecoveryBarGeometry()
+        writeRecovery[10](navSequence % 16, barX)
+        writeRecovery[11](navSequence % 16, barY)
+    end
     local cameraZoom = cameraReady and camera.zoom()
     local cameraClose = cameraZoom and cameraZoom < camera.target() * .65
     writeLoot(9, lootEpoch + (sweepReady and 256 or 0) + (area and 512 or 0) + navSequence * 1024
@@ -2329,7 +2462,7 @@ local function UpdateNavigation()
     writeSkySkills(10, skyActions[1] + skyActions[2] * 16 + skyActions[3] * 256 + navSequence * 8192)
     writeSkyMotion(11, (sky and speed or 0) + (skyCharges and skyCharges + 1 or 0) * 32
         + skyCast * 256 + skyCastEpoch * 2048 + navSequence * 8192)
-    writeRound(3, roundStatus + navSequence * 64 + CorpseLootFlags(navigation, phase, task)
+    writeRound(3, roundStatus + navSequence * 64 + lootFlags
         + (preciseObject and 65536 or 0) + (aprWaypoint and 131072 or 0) + (strafeVerified and 262144 or 0)
         + (lastTargetVerified and 524288 or 0))
     local values = {id, targetMap or 0, math.floor(gx * 1048575 + .5), math.floor(gy * 1048575 + .5),
@@ -2339,8 +2472,32 @@ local function UpdateNavigation()
     for row, value in ipairs(values) do navRows[row](row + 3, value >= 0 and value <= 1048575 and value or 0) end
 end
 
+local deferredPreparation
+
+function WowAgent.ControllerPreparationAvailable()
+    return not deferredPreparation and (not navigation or navFrame:IsShown())
+end
+
+local function PreparationBlocked()
+    local support = WowAgent.LayoutSupport
+    return InCombatLockdown() or (support and support.NormalBar and not support.NormalBar())
+end
+
+local function DeferPreparation(request)
+    deferredPreparation = request
+    if WowAgent.RunStatus then WowAgent.RunStatus.AwaitBindings() end
+    print("WowAgent：已收到任务准备请求。普通动作栏可配置后会自动补齐键位。")
+end
+
 function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, automatic, npc, useItem, batch)
-    if InCombatLockdown() or IsMounted() then return print("WowAgent：请下马脱战后准备寻路。") end
+    local request = {id, fly, ground, useTaskBindings, automatic, npc, useItem, batch}
+    if PreparationBlocked() then
+        if navigation and navFrame:IsShown() and (navigation.quest == id or batch and navigation.round) then
+            return print("WowAgent：本轮任务已有准备结果，主控将核对当前键位。")
+        end
+        return DeferPreparation(request)
+    end
+    deferredPreparation = nil
     local round
     if automatic and batch and id then
         local selected = id
@@ -2397,7 +2554,7 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
             end
             local melee = forever.MeleeSpell(support.LearnedSpells())
             local meleeSlot = melee and support.BoundSlot(5)
-            if meleeSlot and not select(1, support.ReadAction(meleeSlot)) then
+            if meleeSlot then
                 actions[#actions + 1] = {kind = "forever_melee", id = melee, key = 5, optional = true}
             end
             actions[#actions + 1] = {kind = "forever", id = spell, key = 4}
@@ -2411,9 +2568,13 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
     end
     local function Publish(skyError)
         if navigation ~= plan then return end
-        if InCombatLockdown() or IsMounted() or not CanPrepare() then
+        if PreparationBlocked() then
             WowAgent.StopQuestNavigation()
-            return print("WowAgent：准备已停止，请下马脱战并确认任务仍在日志中后重试。")
+            return DeferPreparation(request)
+        end
+        if not CanPrepare() then
+            WowAgent.StopQuestNavigation()
+            return print("WowAgent：准备已停止，当前任务已不可用。")
         end
         local pitch, dismount, verifyError = SkyBindings()
         if not pitch then
@@ -2423,9 +2584,9 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
         end
         if C_QuestLog.AddQuestWatch and C_QuestLog.IsOnQuest(id) then C_QuestLog.AddQuestWatch(id) end
         if automatic and (InteractionFlags(plan, 2, false) % 2 ~= 1
-                or (plan.sweepBody and (not TaskClickMatches("O", "WowAgentTaskSweep")
+                or (plan.sweepBody and (not bindings.ClickReady("pet_fetch_next")
                     or Public(taskSweepButton:GetAttribute("macrotext")) ~= plan.sweepBody))
-                or (plan.item and not TaskClickMatches("J", "WowAgentTaskItem"))) then
+                or (plan.item and not bindings.ClickReady("quest_item"))) then
             WowAgent.StopQuestNavigation()
             return print("WowAgent：互动、选敌、拾取或任务对话核对失败。")
         end
@@ -2453,14 +2614,15 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
         else print("WowAgent：任务目标坐标尚未返回，脚本会等待坐标。") end
         print("WowAgent：" .. camera.probeStatus())
         if camera.ready() then
-            print("WowAgent：已核对 F8，主控会按场景调整并等待距离回执。可将调好的约 20° 基准保存到视角 5。")
+            print("WowAgent：已核对 " .. bindings.ClickKey("camera_restore")
+                .. "，主控会按场景调整并等待距离回执。可将调好的约 20° 基准保存到视角 5。")
         elseif automatic then
             local started = WowAgent.RestoreQuestCamera()
             print("WowAgent：" .. camera.status()
                 .. (started and "已开始直接调整镜头。" or "本次未启动镜头恢复。"))
         end
         if automatic then
-            if plan.fetchBody and TaskClickMatches("L", "WowAgentTaskFetch") then
+            if plan.fetchBody and bindings.ClickReady("pet_fetch") then
                 print("WowAgent：猎人「拾回」已准备，L 拾回当前尸体，O 清除目标并继续拾回附近掉落。")
             end
             if QuestPhase(id) == 1 and type(plan.pickupNPC) == "number" then
@@ -2471,14 +2633,18 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
                     .. "。互动和自动拾取已启用。"
                     .. (plan.item and ("J 已核对任务道具 " .. plan.item .. "。") or "当前任务没有专用道具键。"))
             else print("WowAgent：将按游戏任务标记和对话中的任务编号确认交付对象。") end
-            print("WowAgent：一键准备完成。到 macOS 菜单栏「WoW 键鼠」选择「授权并运行已准备任务」。")
+            print("WowAgent：一键准备完成。主控未运行时可在「WoW 键鼠」菜单点「启动任务主控」。")
         end
     end
     local function Prepare(index, retries)
         if navigation ~= plan then return end
-        if InCombatLockdown() or IsMounted() or not CanPrepare() then
+        if PreparationBlocked() then
             WowAgent.StopQuestNavigation()
-            return print("WowAgent：准备已停止，请下马脱战并确认任务仍在日志中后重试。")
+            return DeferPreparation(request)
+        end
+        if not CanPrepare() then
+            WowAgent.StopQuestNavigation()
+            return print("WowAgent：准备已停止，当前任务已不可用。")
         end
         local action = actions[index]
         if action then
@@ -2511,13 +2677,19 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
     end
     print("WowAgent：正在逐个核对寻路键位，请等待准备结果。")
     if not useTaskBindings then return Prepare(1) end
-    if not ApplyTaskBindings() then
+    local applied, conflictKey = ApplyTaskBindings(plan)
+    if not applied then
         WowAgent.StopQuestNavigation()
-        return print("WowAgent：无法启用临时任务键位。")
+        return print("WowAgent：无法启用临时任务键位。" .. (conflictKey and " 冲突键 " .. conflictKey or ""))
     end
     plan.taskBindings = true
     camera.prepare(taskBindingOwner)
-    if automatic then pcall(SetOverrideBinding, taskBindingOwner, false, "P", "TARGETLASTTARGET") end
+    if automatic then
+        local base, effective = bindings.Read("P", false), bindings.Read("P", true)
+        if (base == "" or base == "TOGGLESPELLBOOK" or base == "TARGETLASTTARGET") and effective == base then
+            pcall(SetOverrideBinding, taskBindingOwner, false, "P", "TARGETLASTTARGET")
+        end
+    end
     if automatic and (not GameTaskOptions(true) or not SetupTaskClicks(plan)) then
         WowAgent.StopQuestNavigation()
         return print("WowAgent：无法启用游戏互动、自动拾取或任务辅助键位。")
@@ -2525,21 +2697,32 @@ function WowAgent.PrepareQuestNavigation(id, fly, ground, useTaskBindings, autom
     if automatic and WowAgent.PrepareRecovery then
         plan.recovery = WowAgent.PrepareRecovery(taskBindingOwner)
     end
+    if automatic and WowAgent.RunStatus then WowAgent.RunStatus.Prepare(taskBindingOwner) end
     C_Timer.After(.25, function()
         if navigation ~= plan then return end
+        if PreparationBlocked() then
+            WowAgent.StopQuestNavigation()
+            return DeferPreparation(request)
+        end
         for _, binding in ipairs(taskBindings) do
             local key, action, label = unpack(binding)
-            if Public(GetBindingAction(key, true)) ~= action then
+            local skipped = (key == "9" and automatic) or (plan.strafeConflict and (key == "Q" or key == "E"))
+            if not skipped and Public(GetBindingAction(key, true)) ~= action then
                 WowAgent.StopQuestNavigation()
                 return print("WowAgent：临时键位未通过核对，" .. key .. " 应为「" .. label .. "」。")
             end
         end
+        if plan.strafeConflict then print("WowAgent：Q/E 与原生控制冲突，保留原键；横移依赖实测读回。") end
         print("WowAgent：临时任务键位已核对，F 与目标互动，Tab 选敌。")
         Prepare(1)
     end)
 end
 
 function WowAgent.StopQuestNavigation()
+    deferredPreparation = nil
+    if WowAgent.RunStatus then WowAgent.RunStatus.Close() end
+    if WowAgent.RoadScan then WowAgent.RoadScan.Stop() end
+    if WowAgent.HideQuestText then WowAgent.HideQuestText() end
     if WowAgent.HideNav3D then WowAgent.HideNav3D() end
     if WowAgent.VisualUI then WowAgent.VisualUI.Restore(true) end
     navigation = nil
@@ -2556,6 +2739,10 @@ navFrame = CreateFrame("Frame", nil, UIParent)
 navFrame:SetSize(142, 304)
 navFrame:SetPoint("BOTTOMLEFT", WowAgentChannelFrame, "TOPLEFT", 144, 0)
 navFrame:SetFrameStrata("TOOLTIP")
+if WowAgent.RoadScan then
+    WowAgent.RoadScan.RegisterStrip(screen)
+    WowAgent.RoadScan.RegisterStrip(navFrame)
+end
 writeMinimap = {}
 writeRecovery = {}
 writeArea = {}
@@ -2569,6 +2756,14 @@ writeCameraState = WowAgent.NewPixelRow(navFrame, -256)
 writeBuild = WowAgent.NewPixelRow(navFrame, -272)
 writeBuildSchema = WowAgent.NewPixelRow(navFrame, -288)
 writeVisualUI = WowAgent.NewPixelRow(navFrame, -304)
+writeRecovery[5] = WowAgent.NewPixelRow(navFrame, -320)
+writeRecovery[6] = WowAgent.NewPixelRow(navFrame, -336)
+if forever then
+    for row = 7, 11 do writeRecovery[row] = WowAgent.NewPixelRow(navFrame, -(row + 15) * 16) end
+end
+bindings.RegisterCameraWire(navFrame)
+if WowAgent.CorpseLoot then WowAgent.CorpseLoot.Register(navFrame) end
+if WowAgent.RunStatus then WowAgent.RunStatus.Register(navFrame) end
 writeSkyMotion = WowAgent.NewPixelRow(navFrame, -176)
 if WowAgent.RecoveryState then
     for row = 1, 4 do writeRecovery[row] = WowAgent.NewPixelRow(navFrame, (row - 5) * 16) end
@@ -2590,10 +2785,31 @@ navFrame:RegisterEvent("ADDON_LOADED")
 navFrame:RegisterEvent("PLAYER_LOGOUT")
 navFrame:RegisterEvent("PLAYER_DEAD")
 navFrame:RegisterEvent("PLAYER_UNGHOST")
+navFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+navFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
 navFrame:RegisterEvent("LOOT_SLOT_CLEARED")
 navFrame:RegisterEvent("UI_ERROR_MESSAGE")
 navFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+for _, event in ipairs({"UPDATE_BINDINGS", "ACTIONBAR_PAGE_CHANGED", "ACTIONBAR_SLOT_CHANGED",
+        "UPDATE_OVERRIDE_ACTIONBAR", "UPDATE_VEHICLE_ACTIONBAR", "UPDATE_SHAPESHIFT_FORM",
+        "PLAYER_SPECIALIZATION_CHANGED", "PLAYER_ENTERING_WORLD"}) do
+    pcall(navFrame.RegisterEvent, navFrame, event)
+end
 navFrame:SetScript("OnEvent", function(_, event, name, message, spell)
+    if deferredPreparation and (event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_MOUNT_DISPLAY_CHANGED"
+            or event == "UPDATE_OVERRIDE_ACTIONBAR" or event == "UPDATE_VEHICLE_ACTIONBAR"
+            or event == "UPDATE_SHAPESHIFT_FORM" or event == "ACTIONBAR_PAGE_CHANGED") then
+        local request = deferredPreparation
+        C_Timer.After(0, function()
+            if deferredPreparation == request and not PreparationBlocked() then
+                WowAgent.PrepareQuestNavigation(unpack(request, 1, 8))
+            end
+        end)
+    end
+    if event == "UPDATE_BINDINGS" or event == "ACTIONBAR_PAGE_CHANGED" or event == "ACTIONBAR_SLOT_CHANGED"
+        or event == "UPDATE_OVERRIDE_ACTIONBAR" or event == "UPDATE_VEHICLE_ACTIONBAR"
+        or event == "UPDATE_SHAPESHIFT_FORM" or event == "PLAYER_SPECIALIZATION_CHANGED"
+        or event == "PLAYER_ENTERING_WORLD" then bindings.Invalidate() end
     if event == "UNIT_SPELLCAST_SUCCEEDED" and name == "player" then
         if WowAgent.RecordPetMend then WowAgent.RecordPetMend(spell) end
         local action = SkySpellAction(Public(spell))
@@ -2615,6 +2831,7 @@ navFrame:SetScript("OnEvent", function(_, event, name, message, spell)
         end
     end
     if event == "LOOT_SLOT_CLEARED" then lootEpoch = (lootEpoch + 1) % 256 end
+    if WowAgent.CorpseLoot then WowAgent.CorpseLoot.Event(event, name, message) end
     if event == "PLAYER_DEAD" and WowAgent.RecordRecoveryDeath then WowAgent.RecordRecoveryDeath() end
     if event == "PLAYER_UNGHOST" and WowAgent.ClearRecoveryDeath then WowAgent.ClearRecoveryDeath() end
     if event == "PLAYER_LOGOUT" or (event == "ADDON_LOADED" and name == "WowAgent") then RestoreNativeRange() end

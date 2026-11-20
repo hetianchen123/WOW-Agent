@@ -6,6 +6,7 @@ import math
 import numpy as np
 import pytest
 
+from bot.control.quest_travel import TravelCommand
 from bot.nav3d import Agent, Frame, NavigationError, NavMesh, Query
 from bot.nav3d.backend import from_native, to_native
 from bot.nav3d.demo import Geometry, scene, write_scene
@@ -152,6 +153,87 @@ def test_persisted_mesh_reloads_and_checks_hash(meshes, tmp_path):
         NavMesh.load(folder)
 
 
+def test_tiled_mesh_links_adjacent_tiles_and_persists_the_route(tmp_path):
+    geometry = Geometry()
+    geometry.floor(0, 0, 130, 18)
+    mesh = NavMesh.build(*geometry.arrays(), frame=FRAME, tile_cells=128)
+    query = Query(FRAME, (3, 9, 0), (123, 9, 0))
+    path = mesh.plan(query)
+    assert abs(path.length - 120) < .1
+    assert all(abs(point[1] - 9) < .02 for point in path.points)
+    assert all(abs(a[0] - b[0]) < .26 for a, b in zip(path.points, path.points[1:]))
+    folder = tmp_path / "tiles"
+    mesh.save(folder)
+    loaded = NavMesh.load(folder)
+    assert loaded.tile_cells == 128
+    assert loaded.plan(query).points == path.points
+    assert len(loaded.debug_triangles()) > len(NavMesh.build(*geometry.arrays(), frame=FRAME).debug_triangles())
+
+    blocked = replace(query, blocked_boxes=(((50, 0, 0), (53, 18, 3)),))
+    with pytest.raises(NavigationError, match="no_complete_path|off_mesh"):
+        loaded.plan(blocked)
+    assert loaded.plan(query).points == path.points
+
+
+def test_tiled_mesh_does_not_connect_across_void_or_change_floor_at_a_seam():
+    geometry = Geometry()
+    geometry.floor(0, 0, 25, 16)
+    geometry.floor(26.2, 0, 55, 16)
+    geometry.floor(0, 0, 55, 16, z=4)
+    mesh = NavMesh.build(*geometry.arrays(), frame=FRAME, tile_cells=128)
+    with pytest.raises(NavigationError, match="no_complete_path"):
+        mesh.plan(Query(FRAME, (5, 8, 0), (45, 8, 0)))
+    assert all(point[2] >= 3.9 for point in mesh.plan(Query(FRAME, (5, 8, 4), (45, 8, 4))).points)
+
+
+def test_corridor_rejects_wrong_floor_and_keeps_verified_anchor():
+    floor = Geometry()
+    floor.floor(0, 0, 50, 12)
+    floor.floor(0, 0, 50, 12, z=2.5)
+    mesh = NavMesh.build(*floor.arrays(), frame=FRAME, tile_cells=128)
+    path, corridor = mesh.plan_corridor(Query(FRAME, (24, 8, 0), (45, 8, 0)))
+    _, other = mesh.plan_corridor(Query(FRAME, (24, 8, 2.5), (45, 8, 2.5)))
+    with pytest.raises(NavigationError, match='corridor_support_mismatch'):
+        corridor.advance((25, 8, .4), edge_tolerance=.08)
+    assert corridor.remaining_route().points == path.points
+    assert other.remaining_route().points[0][2] > 2
+    corridor.advance((25.7, 8, path.points[0][2]), edge_tolerance=.08)
+    repaired = corridor.remaining_route()
+    assert repaired.points[0][:2] == pytest.approx((25.7, 8), abs=.001)
+    assert repaired.points[-1] == path.points[-1]
+
+
+def test_corridor_forward_clearance_crosses_a_tile_but_stays_on_its_floor():
+    geometry = Geometry()
+    geometry.floor(0, 0, 50, 12)
+    geometry.floor(0, 0, 50, 18, z=4)
+    mesh = NavMesh.build(*geometry.arrays(), frame=FRAME, tile_cells=128)
+    lower_route, lower = mesh.plan_corridor(Query(FRAME, (24.8, 10.8, 0), (45, 10.8, 0)))
+    _, upper = mesh.plan_corridor(Query(FRAME, (24.8, 10.8, 4), (45, 10.8, 4)))
+
+    assert lower.forward_clearance(1.5 * math.pi, 2.) == pytest.approx(2.)
+    assert lower.forward_clearance(0, 2.) == pytest.approx(.6, abs=.05)
+    assert upper.forward_clearance(0, 2.) == pytest.approx(2.)
+    assert lower.remaining_route().points == lower_route.points
+
+
+def test_short_trial_waits_for_its_stricter_arrival_radius(meshes):
+    mesh, _, _ = meshes["door"]
+    path = mesh.plan(Query(FRAME, (3, 8.5, 0), (5.5, 8.5, 0)))
+    follower = WorldRouteFollower(path, now=0, mesh_id=mesh.mesh_id,
+                                  obstacle_revision=path.obstacle_revision, alignment_verified=True,
+                                  short_steps=True, arrival_radius=.28)
+    pose = WorldPose(FRAME, path.points[0], 3 * math.pi / 2, 1, 0, True, True)
+    status = dict(mesh_id=mesh.mesh_id, obstacle_revision=path.obstacle_revision)
+    assert follower.step(0, pose, **status).tap == "w"
+    for i, x in enumerate((3.65, 4.3, 4.95), 1):
+        now = i * .2
+        next_pose = replace(pose, position=(x, 8.5, path.points[-1][2]), sequence=i+1, captured_at=now)
+        assert follower.step(now, next_pose, **status).tap == "w"
+    at_end = replace(pose, position=(5.27, 8.5, path.points[-1][2]), sequence=5, captured_at=.8)
+    assert follower.step(.8, at_end, **status).outcome == "nav3d_route_arrived"
+
+
 def test_backend_version_mismatch_requires_rebuild(meshes,tmp_path):
     mesh,_,_=meshes["door"]; mesh.save(tmp_path/"mesh")
     p=tmp_path/"mesh/manifest.json"; meta=json.loads(p.read_text())
@@ -226,6 +308,104 @@ def test_follower_consumes_full_3d_path_without_claiming_quest_success(meshes):
         command=f.step(i*.05,replace(p,position=point,sequence=i,captured_at=i*.05),**kwargs)
     assert command.outcome=="nav3d_route_arrived"
     assert not f.route.reached_in_game
+
+
+def test_short_step_route_only_moves_once_per_aligned_pose(meshes):
+    f,p,kwargs=follower_and_pose(meshes)
+    f.short_steps = True
+    command=f.step(0,p,**kwargs)
+    assert command.tap == "w" and command.precise and command.hold_s <= .085 and not command.keys
+    assert f.step(.02,p,**kwargs) == TravelCommand()
+    turning=f.step(.2,replace(p,heading=p.heading+.2,sequence=2,captured_at=.2),**kwargs)
+    assert turning.tap == "right" and not turning.keys
+
+
+def test_fast_short_step_waits_for_delayed_movement_and_settled_arrival(meshes):
+    follower, pose, kwargs = follower_and_pose(meshes)
+    points = ((0., 0., 0.), (.3, 0., 0.), (.6, 0., 0.))
+    follower.route = replace(follower.route, points=points, requested_goal=points[-1])
+    follower.short_steps = follower.feedback_paced = True
+    follower.arrival_radius = .28
+    pose = replace(pose, position=points[0])
+    assert follower.step(0, pose, **kwargs).tap == 'w'
+
+    for sequence, at, xy in ((2, .10, points[0]), (3, .17, points[1]),
+                             (4, .22, points[-1]), (5, .28, points[-1])):
+        sample = replace(pose, position=xy, sequence=sequence, captured_at=at)
+        assert follower.step(at, sample, **kwargs) == TravelCommand()
+    assert follower.step(.36, replace(sample, sequence=6, captured_at=.36),
+                         **kwargs).outcome == 'nav3d_route_arrived'
+
+
+def test_continuous_follower_brakes_and_waits_for_precise_goal(meshes):
+    follower, pose, kwargs = follower_and_pose(meshes)
+    points = tuple((index * .25, 0., 0.) for index in range(17))
+    follower.route = replace(follower.route, points=points, requested_goal=points[-1])
+    follower.arrival_radius = .28
+    follower.feedback_paced = True
+    pose = replace(pose, position=points[0])
+    assert follower.step(0, pose, **kwargs).keys == {'w'}
+
+    def receipt(at, x, sequence):
+        return follower.step(at, replace(pose, position=(x, 0., 0.), sequence=sequence, captured_at=at), **kwargs)
+
+    assert receipt(.2, 1.4, 2).keys == {'w'}
+    assert receipt(.4, 2.8, 3) == TravelCommand()
+    assert follower.approaching_goal
+    assert receipt(.46, 3.5, 4) == TravelCommand()
+    command = receipt(.62, 3.5, 5)
+    assert command.tap == 'w' and not command.keys and command.hold_s < .075
+
+
+def test_continuous_follower_releases_and_settles_before_short_step_near_mesh_edge(meshes):
+    follower, pose, kwargs = follower_and_pose(meshes)
+    points = tuple((i * .25, 0., 0.) for i in range(21))
+    follower.route = replace(follower.route, points=points, requested_goal=points[-1])
+    follower.feedback_paced = True
+    pose = replace(pose, position=points[0])
+    assert follower.step(0, pose, forward_clearance=lambda heading, horizon: horizon, **kwargs).keys == {'w'}
+
+    def receipt(at, x, sequence):
+        sample = replace(pose, position=(x, 0., 0.), sequence=sequence, captured_at=at)
+        return follower.step(at, sample, forward_clearance=lambda heading, horizon: .7, **kwargs)
+
+    assert receipt(.2, 1.4, 2) == TravelCommand()
+    assert receipt(.26, 1.8, 3) == TravelCommand()  # Late displacement after key-up.
+    assert receipt(.34, 1.8, 4) == TravelCommand()
+    command = receipt(.42, 1.8, 5)
+    assert command.tap == 'w' and command.precise and not command.keys
+
+
+def test_follower_approaches_corner_before_turning_onto_next_leg(meshes):
+    follower, pose, kwargs = follower_and_pose(meshes)
+    points = ((0., 0., 0.), (.5, 0., 0.), (1., 0., 0.), (1.5, 0., 0.),
+              (1.5, .5, 0.), (1.5, 1., 0.), (1.5, 1.5, 0.))
+    follower.route = replace(follower.route, points=points, requested_goal=points[-1])
+    pose = replace(pose, position=points[0])
+    assert follower.step(0, pose, **kwargs).keys == frozenset({"w"})
+
+    approach = replace(pose, position=points[2], sequence=2, captured_at=.2)
+    step = follower.step(.2, approach, **kwargs)
+    assert follower.index == 3
+    assert step.tap == "w" and step.precise and not step.keys
+    assert follower.step(.25, approach, **kwargs) == TravelCommand()
+
+    at_corner = replace(pose, position=points[3], sequence=3, captured_at=.4)
+    turn = follower.step(.4, at_corner, **kwargs)
+    assert follower.index > 3 and turn.tap == "left" and not turn.keys
+
+
+@pytest.mark.parametrize('rise,feedback_paced,expected', [
+    (0, True, .4 / 7), (.2, True, .4 / 7), (.34, False, .4 / 7), (.34, True, .035),
+])
+def test_fast_follower_limits_a_slope_pulse_at_a_bend(meshes, rise, feedback_paced, expected):
+    follower, pose, kwargs = follower_and_pose(meshes)
+    points = ((0., 0., 0.), (.4, 0., rise), (.4, .4, rise), (.4, .8, rise))
+    follower.route = replace(follower.route, points=points, requested_goal=points[-1])
+    follower.feedback_paced = feedback_paced
+    command = follower.step(0, replace(pose, position=points[0]), **kwargs)
+    assert command.tap == 'w' and command.precise and not command.keys
+    assert command.hold_s == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("change,reason", [({"grounded":False},"unsafe"),({"in_combat":True},"unsafe"),

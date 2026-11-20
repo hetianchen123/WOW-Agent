@@ -522,3 +522,46 @@ assert(point == 409 * 1024 + 409 and flags == 17)
 UnitIsUnit = function() return false end
 point, flags = WowAgent.CombatHandoff()
 assert(point == 0 and flags == 0)
+
+function GetBuildInfo() return "1.60.1", "70959", nil, 16001 end
+SlashCmdList = {}
+assert(loadfile("addon/WowAgent/Forever.lua"))()
+CreateMacro = originalCreate
+spellNames[2973] = "猛禽一击"
+C_SpellBook.GetSpellBookItemInfo = function() return {itemType = 1, spellID = 2973} end
+local legacy = WowAgent.Forever.MeleeMacro(2973, spellNames, true)
+local queued = WowAgent.Forever.MeleeMacro(2973, spellNames)
+assert(queued:find("!猛禽一击", 1, true))
+local meleeIndex = CreateMacro("WAFMelee2973", 134400, legacy, true)
+bar[5] = {"macro", meleeIndex}
+function EditMacro(id, _, _, body)
+    assert(id == meleeIndex and macros[id] == legacy)
+    macros[id] = body
+    return id
+end
+assert(WowAgent.LayoutSupport.SetupAction("forever_melee", 2973, 5))
+assert(macros[meleeIndex] == queued and bar[5][2] == meleeIndex)
+macros[meleeIndex] = "/say existing"
+assert(not WowAgent.LayoutSupport.SetupAction("forever_melee", 2973, 5))
+assert(macros[meleeIndex] == "/say existing")
+macros[meleeIndex] = queued
+spellNames[75] = "自动射击"
+C_SpellBook.GetSpellBookItemInfo = function(slot)
+    return {itemType = 1, spellID = slot == 1 and 75 or 2973}
+end
+function GetBindingAction(key) return "ACTIONBUTTON" .. key end
+UnitGUID = function(unit)
+    if unit == "target" then return "Creature-0-0-0-0-6-01" end
+end
+UnitIsDead = function() return false end
+C_Spell.IsSpellInRange = function(spell) return spell == 2973 end
+local close = false
+function CheckInteractDistance(unit, index)
+    assert(unit == "target" and index == 3)
+    return close
+end
+assert(WowAgent.LayoutSupport.SetupAction("forever", 75, 4))
+assert(math.floor(rows[112] / 8) % 16 == 4 and rows[0] % 4 == 2)
+close = true
+assert(WowAgent.LayoutSupport.SetupAction("forever", 75, 4))
+assert(math.floor(rows[112] / 8) % 16 == 5 and rows[0] % 4 == 1)

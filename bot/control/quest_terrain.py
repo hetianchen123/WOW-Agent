@@ -14,7 +14,7 @@ import cv2
 from ..core.paths import DATA_DIR
 from ..decision.terrain import decide_multiview
 from ..perception.capture import CaptureError, frontmost_game_bounds
-from ..perception.travel_channel import TravelFlags, CameraScene, CameraResult, LifeState
+from ..perception.travel_channel import TravelFlags, CameraScene, CameraResult, LifeState, camera_binding_key
 from ..terrain_cli import inspect_images
 from .navigation import compass_from_delta, heading_error
 from .quest_travel import TravelCommand
@@ -118,10 +118,11 @@ class TerrainDetour:
     """Try distinct views around an obstacle, confirming each before walking."""
 
     def __init__(self, now, nav, heading, trip, client, *, retreat_first=True, ground_trace=None,
-                 player_identity=None, contact_release=False, npc_bypass=False):
+                 player_identity=None, contact_release=False, npc_bypass=False, allow_segmented=True):
         self.started, self.anchor = now, nav
         self.router, self.client = trip.router, client
         self.convention = trip.convention
+        self.allow_segmented = allow_segmented
         left = math.radians(55) * (1 if trip.convention == "ccw_west" else -1)
         self.left_positive = left > 0
         self.angles = {"left": heading + left, "right": heading - left, "back": heading + math.pi,
@@ -208,14 +209,17 @@ class TerrainDetour:
                                                              DETOUR_PROBE_YARDS * math.sin(error)), 1)
                                       for name, error in errors.items()}
 
-    def begin_model_route(self, ctx, now, nav, heading, reason):
+    def begin_model_route(self, ctx, now, nav, heading, reason, *, travel_goal=None):
         local = getattr(getattr(ctx,"cfg",None),"segmented_navigation",None)
-        if local and local.enabled:
+        if self.allow_segmented and local and local.enabled:
             from .segmented_detour import SegmentedDetour
+            goal_mode = 'travel' if travel_goal is not None else 'npc'
             self.model_detour=SegmentedDetour(now,nav,self.router,self.convention,local,
-                                             capture_scene,deadline=self.started+PROBE_BUDGET_S)
+                capture_scene,deadline=self.started+PROBE_BUDGET_S,
+                goal_mode=goal_mode,travel_goal=travel_goal)
             self.anchor,self.phase=nav,"model_route"
-            ctx.log_event('quest_segmented_detour_started',{'id':nav.quest_id,'reason':reason})
+            ctx.log_event('quest_segmented_detour_started',{'id':nav.quest_id,'reason':reason,
+                'goal_mode':goal_mode})
             return True
         config = getattr(getattr(ctx, "cfg", None), "route_planner", None)
         if not config or not config.enabled:
@@ -307,7 +311,8 @@ class TerrainDetour:
         self.settled_at = now + .5
         planner_config = getattr(getattr(ctx, "cfg", None), "route_planner", None)
         local_config=getattr(getattr(ctx,"cfg",None),"segmented_navigation",None)
-        if self.npc_bypass and ((planner_config and planner_config.enabled) or (local_config and local_config.enabled)):
+        if self.npc_bypass and ((planner_config and planner_config.enabled)
+                                or (self.allow_segmented and local_config and local_config.enabled)):
             # Real screenshot planning replaces fixed doglegs in this mode,
             # including a retreat that encountered another obstacle.
             self.begin_model_route(ctx, now, nav, self.retreat_heading, reason)
@@ -380,7 +385,7 @@ class TerrainDetour:
     def step(self, ctx, now, nav, heading):
         if not self.view_availability_logged:
             self.view_availability_logged = True
-            ctx.log_event("quest_terrain_view_capability", {"id": nav.quest_id, "key": "f6",
+            ctx.log_event("quest_terrain_view_capability", {"id": nav.quest_id, "key": camera_binding_key(nav, probe=True),
                 "available": nav.probe_camera_available, "build": nav.addon_build,
                 "reason": "verified" if nav.probe_camera_available else "binding_not_verified_or_older_protocol"})
         try:
@@ -558,6 +563,7 @@ class TerrainDetour:
                 or nav.phase != self.anchor.phase or nav.objective_index != self.anchor.objective_index
                 or nav.objective_target != self.anchor.objective_target
                 or nav.destination != self.anchor.destination or nav.destination_map != self.anchor.destination_map
+                or getattr(nav, "camera_bindings", None) != getattr(self.anchor, "camera_bindings", None)
                 or nav.recovery and nav.recovery.life != LifeState.ALIVE
                 or nav.camera and nav.camera.paused
                 or nav.position is None or nav.flags & busy
@@ -579,11 +585,11 @@ class TerrainDetour:
             return TravelCommand()
         if self.phase in {"view_prepare", "view_restore"}:
             restoring = self.phase == "view_restore"
-            key = "f8" if restoring else "f6"
+            key = camera_binding_key(nav, probe=not restoring)
             next_phase = "view_recheck" if restoring else "view_check"
             camera = nav.camera
             available = nav.camera_restore_available if restoring else nav.probe_camera_available
-            if not available or camera is None or camera.paused:
+            if not available or key is None or camera is None or camera.paused:
                 if restoring:
                     return TravelCommand(outcome="camera_restore_unconfirmed")
                 self.phase, self.settled_at = next_phase, now + .5

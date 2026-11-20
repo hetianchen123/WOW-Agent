@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-apps="$PWD/data/apps"
+apps="${WOWAGENT_APP_OUTPUT:-$PWD/data/apps}"
 log="$(mktemp /private/tmp/wowagent-input-smoke.XXXXXX)"
 "$apps/WowAgent Keyboard Mouse.app/Contents/MacOS/WowAgentInput" --smoke > "$log" 2>&1 &
 helper=$!

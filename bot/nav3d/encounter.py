@@ -91,7 +91,7 @@ class RespawnEncounter:
             return TravelCommand(tap=key, hold_s=.06 if status == 'turn' else None)
         return TravelCommand() if status == 'waiting' else self.stop('defense_' + status)
 
-    def step(self, now, sample, nav, observation):
+    def step(self, now, sample, nav, observation, *, loot_pending=False):
         """None means navigation owns this tick; an empty command releases keys."""
         if self.terminal:
             return TravelCommand(outcome=self.terminal)
@@ -148,6 +148,12 @@ class RespawnEncounter:
         unsafe = TravelFlags.MOUNTED | TravelFlags.FLYING | TravelFlags.FALLING | TravelFlags.SWIMMING
         if nav.flags & unsafe or (not sample.grounded and not nav.flags & TravelFlags.CASTING):
             return self.stop('player_state_unsafe')
+        if loot_pending:
+            if ((sample.in_combat or nav.flags & TravelFlags.IN_COMBAT) and observation.combat.fresh(now, .75)
+                    and combat and not combat.unsafe and combat.build == sample.client_build
+                    and not combat.target_dead and combat.target_engaged and not nav.flags & TravelFlags.CASTING):
+                return self.defend(now, combat, nav)
+            return self.wait('loot_pending', now, budget=5)
         if nav.phase == QuestState.READY or (nav.objectives_finished and
                 nav.objective_progress[1] > 0 and nav.objective_progress[0] >= nav.objective_progress[1]):
             self.log('quest_encounter_credit', dict(quest_id=QUEST_ID, progress=nav.objective_progress,

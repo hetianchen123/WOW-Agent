@@ -6,8 +6,17 @@ end
 
 local callPet = {883, 83242, 83243, 83244, 83245}
 local classBuff = {MAGE = 1459, PRIEST = 21562, DRUID = 1126, WARRIOR = 6673}
-local keys = {Follow = "F9", Summon = "F10", Revive = "F11", Buff = "F12", Mend = "F7"}
+local bindings = WowAgent.TaskBindings
+local actions = {Follow = "pet_follow", Summon = "pet_summon", Revive = "pet_revive",
+    Buff = "class_buff", Mend = "pet_mend", Potion = "potion", Food = "food", Water = "water"}
 local buttons = {}
+local InstallSupplyClick, PrepareDialogKey
+local armedDialogButton
+local supplies = {
+    {118, 858, 929, 1710}, -- Healing potions by rank.
+    {117, 4540, 4536, 2070, 2287, 4541, 4537, 414},
+    {159, 1179, 1205},
+}
 
 local function SpellName(id)
     if not id then return end
@@ -50,8 +59,9 @@ local function Bind(owner, plan, action, body)
     button:RegisterForClicks("AnyDown", "AnyUp")
     button:SetAttribute("type", "macro")
     button:SetAttribute("macrotext", body)
-    SetOverrideBindingClick(owner, false, keys[action], name, "LeftButton")
+    if not bindings.BindClick(owner, actions[action], true) then return false end
     plan[action] = body
+    return true
 end
 
 local function Cast(name, condition)
@@ -99,15 +109,168 @@ function WowAgent.PrepareRecovery(owner)
     Bind(owner, plan, "Revive", Cast(revive))
     Bind(owner, plan, "Buff", Cast(buff, "[@player] "))
     Bind(owner, plan, "Mend", Cast(mend, "[@pet,exists,nodead] "))
+    plan.dialogKey = PrepareDialogKey(owner)
+    if WowAgent.Forever then
+        plan.supplyOwner, plan.supplyItems = owner, {}
+        for _, action in ipairs({"Potion", "Food", "Water"}) do
+            if Bind(owner, plan, action, "") then
+                buttons[action].supplyPlan = plan
+                InstallSupplyClick(action, plan)
+            end
+        end
+    end
     return plan
 end
 
 local function Verified(plan, action)
     if not plan or not plan[action] then return false end
-    local binding = Public(GetBindingAction(keys[action], true))
-    return type(binding) == "string"
-        and binding:lower() == ("CLICK WowAgentRecovery" .. action .. ":LeftButton"):lower()
+    return bindings.ClickReady(actions[action])
         and Public(buttons[action]:GetAttribute("macrotext")) == plan[action]
+end
+
+local function SupplyRead(api, ...)
+    if type(api) ~= "function" then return end
+    local ok, a, b, c = pcall(api, ...)
+    if ok then return Public(a), Public(b), Public(c) end
+end
+
+local function SupplyCount(id)
+    return SupplyRead(C_Item and C_Item.GetItemCount or GetItemCount, id, false, false)
+end
+
+local function SupplyReady(id)
+    local count = id and SupplyCount(id)
+    if type(count) ~= "number" or count <= 0 then return end
+    local spell = SupplyRead(C_Item and C_Item.GetItemSpell or GetItemSpell, id)
+    if not spell then
+        if C_Item and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(id) end
+        return
+    end
+    if SupplyRead(C_Item and C_Item.IsUsableItem or IsUsableItem, id) ~= true then return end
+    local start, duration, enabled = SupplyRead(C_Item and C_Item.GetItemCooldown or GetItemCooldown, id)
+    if type(start) == "number" and type(duration) == "number"
+        and (enabled == true or enabled == 1) and (start == 0 or start + duration <= GetTime()) then
+        return count
+    end
+end
+
+local function SupplyPercent(current, maximum, ...)
+    local value, limit = SupplyRead(current, ...), SupplyRead(maximum, ...)
+    if type(value) ~= "number" or type(limit) ~= "number" or not (value >= 0 and value < math.huge)
+        or not (limit > 0 and limit < math.huge) then return 0 end
+    return 1 + math.min(100, math.max(0, math.floor(value * 100 / limit + .5)))
+end
+
+local function NativePercent(api, ...)
+    local fraction = SupplyRead(api, ...)
+    if type(fraction) == "number" and fraction >= 0 and fraction <= 1 then
+        return 1 + math.floor(fraction * 100 + .5)
+    end
+    return 0
+end
+
+local function ReadySupply(plan, action, kind, combat)
+    if not Verified(plan, action) then return end
+    local selected = plan.supplyItems[action]
+    if selected and selected.kind == kind and SupplyReady(selected.id) then return selected.id end
+    if combat then return end
+    for _, id in ipairs(supplies[kind]) do
+        if SupplyReady(id) then
+            local condition = action == "Potion" and "[nomounted]" or "[nocombat,nomounted]"
+            local body = "/use " .. condition .. " item:" .. id
+            buttons[action]:SetAttribute("macrotext", body)
+            plan[action], plan.supplyItems[action] = body, {id = id, kind = kind}
+            return id
+        end
+    end
+end
+
+InstallSupplyClick = function(action, plan)
+    if not plan[action] then return end
+    local button = buttons[action]
+    if button.supplyHooked then return end
+    button.supplyHooked = true
+    button:HookScript("PreClick", function(frame)
+        local current = frame.supplyPlan
+        if not current or current.supplyPending or not Verified(current, action) then return end
+        local selected = current.supplyItems[action]
+        local count = selected and SupplyReady(selected.id)
+        if not count then return end
+        current.supplyPending = {id = selected.id, kind = selected.kind, count = count, expires = GetTime() + 2.8}
+    end)
+end
+
+function WowAgent.PlayerConsumables(plan, life, flags)
+    if not WowAgent.Forever or life ~= 1 then return 0, 0 end
+    local hp = SupplyPercent(UnitHealth, UnitHealthMax, "player")
+    if hp == 0 then hp = NativePercent(UnitHealthPercent, "player", false) end
+    local mana = 0
+    if SupplyRead(UnitPowerType, "player") == 0 then
+        mana = SupplyPercent(UnitPower, UnitPowerMax, "player", 0)
+        if mana == 0 then mana = NativePercent(UnitPowerPercent, "player", 0, false) end
+    end
+    local vitals = hp + mana * 128
+    if not plan or not plan.supplyOwner then return vitals, 0 end
+    local state, id, potion, food, water = 0, nil
+    local now = GetTime()
+    local pending, receipt = plan.supplyPending, plan.supplyReceipt
+    if pending then
+        local count = SupplyCount(pending.id)
+        if (type(count) == "number" and count < pending.count) or now >= pending.expires then
+            local confirmed = type(count) == "number" and count < pending.count
+            receipt = {state = (confirmed and 8 or 12) + pending.kind, id = pending.id, expires = now + 2}
+            plan.supplyPending, plan.supplyReceipt = nil, receipt
+        end
+    end
+    if receipt and now < receipt.expires then
+        state, id = receipt.state, receipt.id
+    elseif not plan.supplyPending and bit.band(flags, 4 + 8 + 16 + 32 + 128) == 0 then
+        local combat = InCombatLockdown() or bit.band(flags, 64) ~= 0
+        potion = ReadySupply(plan, "Potion", 1, combat)
+        if not combat then
+            food = ReadySupply(plan, "Food", 2, false)
+            if SupplyRead(UnitPowerType, "player") == 0 then water = ReadySupply(plan, "Water", 3, false) end
+        end
+        if food and hp > 0 and hp <= 66 then state, id = 2, food
+        elseif water and mana > 0 and mana <= 46 then state, id = 3, water
+        elseif potion and hp > 0 and hp <= (combat and 41 or 31) then state, id = 1, potion end
+    end
+    return vitals + state * 16384, id or 0, potion, food, water
+end
+
+local function VisibleBar(bar, originX, originY, anchorScale)
+    if not bar or SupplyRead(bar.IsVisible, bar) ~= true then return end
+    local left, bottom, width = SupplyRead(bar.GetRect, bar)
+    local height, scale = SupplyRead(bar.GetHeight, bar), SupplyRead(bar.GetEffectiveScale, bar)
+    if not (left and bottom and width and height and scale and width >= 24 and height >= 6) then return end
+    scale = scale / anchorScale
+    return left * scale - originX, (left + width) * scale - originX, originY - (bottom + height / 2) * scale
+end
+
+-- Report the geometry of the game's ordinary visible bars, never their protected values.
+function WowAgent.RecoveryBarGeometry()
+    local anchor = WowAgentChannelFrame
+    if not WowAgent.Forever or not anchor or not PlayerFrame
+        or SupplyRead(UnitHasVehiclePlayerFrameUI, "player") == true or Public(PlayerFrame.state) == "vehicle" then
+        return 0, 0
+    end
+    local unit = Public(PlayerFrame.unit)
+    if type(unit) == "string" and unit ~= "player" then return 0, 0 end
+    local x, y, scale = anchor:GetLeft(), anchor:GetTop(), anchor:GetEffectiveScale()
+    if not (x and y and scale and scale > 0) then return 0, 0 end
+    local left, right, hpY = VisibleBar(SupplyRead(PlayerFrame_GetHealthBar) or PlayerFrameHealthBar, x, y, scale)
+    if not left then return 0, 0 end
+    local manaY
+    if SupplyRead(UnitPowerType, "player") == 0 then
+        local mx, mxEnd, my = VisibleBar(SupplyRead(PlayerFrame_GetManaBar) or PlayerFrameManaBar, x, y, scale)
+        if mx and math.abs(mx - left) <= 2 and math.abs(mxEnd - right) <= 2 then manaY = my end
+    end
+    local function Pack(value)
+        if not value then return 0 end
+        local cell = math.floor(value / 2 + .5) + 512
+        return cell > 0 and cell <= 1023 and cell or 0
+    end
+    return Pack(left) * 1024 + Pack(right), Pack(hpY) * 1024 + Pack(manaY)
 end
 
 local mendUntil = 0
@@ -231,15 +394,77 @@ local function TrackedCorpse(map)
     return point, distance
 end
 
-local function Dialog(which)
+local function NativeDeathDialog(which)
     if not StaticPopup_FindVisible then return end
     local dialog = StaticPopup_FindVisible(which)
     if not dialog or not dialog:IsVisible() then return end
     local button = dialog.GetButton1 and dialog:GetButton1() or dialog.button1
     if not button or not button:IsVisible() or not button:IsEnabled() then return true end
+    return true, button
+end
+
+local function PlayerLife()
+    local dead = UnitIsDead and Public(UnitIsDead("player"))
+    local ghost = UnitIsGhost and Public(UnitIsGhost("player"))
+    return ghost == true and 3 or dead == true and 2
+        or dead == false and ghost == false and 1 or 0
+end
+
+local function ButtonClickBlocker(button)
+    if not button then return "button_unavailable" end
+    if type(button.Click) ~= "function" then return "click_unavailable" end
+    if button.IsForbidden and Public(button:IsForbidden()) ~= false then return "forbidden" end
+    if button.HasAccessConstraints and Public(button:HasAccessConstraints()) ~= false then return "access_constrained" end
+    local scripted = Enum and Enum.ForbiddenAspect and Enum.ForbiddenAspect.ScriptedInput
+    if scripted and button.HasAnyForbiddenAspects and Public(button:HasAnyForbiddenAspects(scripted)) ~= false then
+        return "scripted_input_restricted"
+    end
+end
+
+local function RecoveryDialogKey(plan, button)
+    if not plan then return 0, "not_prepared" end
+    if not plan.dialogKey then return 0, "binding_unavailable" end
+    if InCombatLockdown() then return 0, "combat_lockdown" end
+    local reason = ButtonClickBlocker(button)
+    if reason then return 0, reason end
+    local code = bindings.RecoveryCode()
+    if code == 0 then return 0, "binding_unverified" end
+    return code, "ready"
+end
+
+function WowAgent.RecoveryDialogStatus(plan)
+    local life = PlayerLife()
+    if life < 2 then return "no_death_dialog" end
+    local shown, button = NativeDeathDialog(life == 3 and "RECOVER_CORPSE" or "DEATH")
+    if not shown then return "no_death_dialog" end
+    local _, reason = RecoveryDialogKey(plan, button)
+    return reason, bindings.ClickKey("player_recovery")
+end
+
+PrepareDialogKey = function(owner)
+    armedDialogButton = nil
+    if not buttons.Dialog then
+        local keyButton = CreateFrame("Button", "WowAgentPlayerRecovery", UIParent)
+        keyButton:RegisterForClicks("AnyUp")
+        keyButton:SetScript("OnClick", function(_, mouseButton)
+            if mouseButton ~= "LeftButton" or InCombatLockdown() or bindings.RecoveryCode() == 0 then return end
+            local life = PlayerLife()
+            if life < 2 then return end
+            local _, button = NativeDeathDialog(life == 3 and "RECOVER_CORPSE" or "DEATH")
+            if button and button == armedDialogButton and not ButtonClickBlocker(button) then
+                pcall(button.Click, button, "LeftButton")
+            end
+        end)
+        buttons.Dialog = keyButton
+    end
+    return bindings.BindClick(owner, "player_recovery", false, true)
+end
+
+local function Dialog(button)
+    if not button then return end
     local ok, x, y = pcall(button.GetCenter, button)
     x, y = Public(x), Public(y)
-    if not ok or not x or not y then return true end
+    if not ok or not x or not y then return end
     local width, height = UIParent:GetWidth(), UIParent:GetHeight()
     local scale = button:GetEffectiveScale() / UIParent:GetEffectiveScale()
     local point = Point((x * scale - UIParent:GetLeft()) / width, (UIParent:GetTop() - y * scale) / height)
@@ -248,18 +473,19 @@ local function Dialog(which)
         local focus = Public(GetMouseFoci())
         hovered = type(focus) == "table" and Public(focus[1]) == button
     end
-    return true, point, math.floor(height / width * 100000 + .5), hovered
+    return point, math.floor(height / width * 100000 + .5), hovered
 end
 
 function WowAgent.RecoveryState(plan, map, movementKeys)
-    local dead = UnitIsDead and Public(UnitIsDead("player"))
-    local ghost = UnitIsGhost and Public(UnitIsGhost("player"))
-    local life = ghost == true and 3 or dead == true and 2
-        or dead == false and ghost == false and 1 or 0
+    local life = PlayerLife()
+    armedDialogButton = nil
     if life >= 2 then
         local corpse, source
         if life == 3 then corpse, source = CorpsePoint(map) end
-        local shown, point, aspect, hovered = Dialog(life == 3 and "RECOVER_CORPSE" or "DEATH")
+        local shown, button = NativeDeathDialog(life == 3 and "RECOVER_CORPSE" or "DEATH")
+        local point, aspect, hovered = Dialog(button)
+        local keyCode = RecoveryDialogKey(plan, button)
+        if keyCode > 0 then armedDialogButton = button end
         local distance
         if life == 3 and not shown then
             local tracked
@@ -274,8 +500,11 @@ function WowAgent.RecoveryState(plan, map, movementKeys)
                 facing = math.floor((facing % full) / full * 1048575) + 1
             else facing = nil end
         end
-        local walk = life == 3 and movementKeys()
-        return life + (source or 0) * 4 + (walk and 256 or 0) + (corpse and 512 or 0) + (shown and 1024 or 0)
+        -- While the popup is visible, bit 8 carries the F7 extension. Outside
+        -- the popup it continues to report verified ghost movement bindings.
+        local walkOrF7 = not shown and life == 3 and movementKeys() or keyCode == 8
+        return life + (source or 0) * 4 + (keyCode % 8) * 32 + (walkOrF7 and 256 or 0)
+            + (corpse and 512 or 0) + (shown and 1024 or 0)
             + (hovered and 2048 or 0) + (point and 4096 or 0), corpse or 0, point or facing or 0,
             aspect or distance or 0
     end

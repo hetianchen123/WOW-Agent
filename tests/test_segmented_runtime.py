@@ -1,6 +1,8 @@
 from dataclasses import asdict,replace
 import hashlib
 import json
+from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import cv2
@@ -65,10 +67,12 @@ def test_static_region_preparation_is_explicit_and_bound_to_reference(tmp_path):
     assert data['targets'][result['target_key']]['bundle_image_sha256']==data['frame']['image_sha256']
 
 
-def controller(tmp_path,monkeypatch):
+def controller(tmp_path,monkeypatch,*,goal_mode='npc'):
     _,ctx,_,nav,_=npc(tmp_path,monkeypatch)
     nav=replace(nav,camera=SimpleNamespace(view=4,zoom=32,request=0),height=10,strafe_verified=True,
                 calibration_orbit_available=True)
+    if goal_mode=='travel':
+        nav=replace(nav,flags=nav.flags|TravelFlags.OUTDOORS,task=TaskFlags(0))
     monkeypatch.setattr(sd,'preflight',lambda *_:'test-ground')
     created=[]
     class Request:
@@ -76,7 +80,8 @@ def controller(tmp_path,monkeypatch):
             self.frame,self.job,self.closed=frame,job,False
             self.result=dict(frame_id=frame.frame_id,executable=False,requires_fresh_feedback=True,
                 kind='route',target_key='12345:READY:0',calibration_source='automatic_native_motion',
-                automatic_goal=dict(goal_kind='automatic_npc_search_region'),
+                automatic_goal=dict(goal_kind='automatic_travel_frontier' if goal_mode=='travel'
+                                    else 'automatic_npc_search_region'),
                 registration=dict(current_frame=frame.frame_id,combined_bound_yards=.1,
                                   fit_movements=2,validation_movements=2),
                 movement_budget_yards=.75,next_segment_world=[list(nav.position),[nav.position[0]+.0005,nav.position[1]]])
@@ -84,7 +89,8 @@ def controller(tmp_path,monkeypatch):
         def poll(self):return self.result
         def close(self):self.closed=True
     obj=sd.SegmentedDetour(1,nav,GridRouter(1000,1000),'ccw_west',SegmentedNavigationConfig(),
-        lambda _:np.zeros((100,100,3),np.uint8),deadline=61,request_factory=Request)
+        lambda _:np.zeros((100,100,3),np.uint8),deadline=61,request_factory=Request,
+        goal_mode=goal_mode,travel_goal=(.42,.5) if goal_mode=='travel' else None)
     obj.overhead=SimpleNamespace(step=lambda *_:None,used=True)
     return obj,ctx,nav,created
 
@@ -99,7 +105,12 @@ def ready(obj,ctx,nav):
 
 def test_task_controller_uses_fresh_capture_one_pulse_and_reobserves(tmp_path,monkeypatch):
     obj,ctx,nav,requests=controller(tmp_path,monkeypatch)
+    events = []
+    ctx.log_event = lambda kind, data: events.append((kind, data))
+    marks = iter((1000., 1000.004, 1000.016, 1000.1, 1002.5, 1002.7, 1003.3, 1003.5, 1003.504, 1003.516))
+    monkeypatch.setattr(sd.time, 'monotonic', lambda: next(marks))
     nav,heading=ready(obj,ctx,nav)
+    requests[0].result.update(model_diagnostics=dict(sam_device='mps'), model_timings=dict(semantics_s=.4))
     assert obj.step(ctx,1.2,nav,heading).tap is None
     command=obj.step(ctx,1.3,nav,heading)
     assert command.tap=='w' and 0<command.hold_s<=.07 and command.precise
@@ -107,8 +118,30 @@ def test_task_controller_uses_fresh_capture_one_pulse_and_reobserves(tmp_path,mo
     fresh=replace(nav,sequence=3,position=(nav.position[0]+.00045,nav.position[1]))
     assert obj.step(ctx,1.9,fresh,heading).tap is None
     assert obj.plan is None and obj.total==pytest.approx(.45)
+    observed, planned, issued, feedback = (data for kind, data in events if kind in {
+        'quest_segmented_observation', 'quest_segmented_plan_ready',
+        'quest_segmented_movement_issued', 'quest_segmented_movement_feedback'})
+    assert {row['frame_id'] for row in (observed, planned, issued, feedback)} == {requests[0].frame.frame_id}
+    assert (observed['capture_ms'], observed['encoding_ms'], observed['capture_to_submit_ms']) == (4., 12., 98.)
+    assert planned['sam_device'] == 'mps' and planned['model_timings'] == {'semantics_s': .4}
+    assert planned['capture_to_plan_ms'] == 2498. and issued['capture_to_issue_ms'] == 2698.
+    assert (issued['before_sequence'], feedback['before_sequence'], feedback['after_sequence']) == (2, 2, 3)
+    assert feedback['status'] == 'verified' and feedback['capture_to_feedback_ms'] == 3298.
     assert obj.step(ctx,2,fresh,heading).tap is None
     assert obj.pending is not None  # Does not continue the old route.
+
+
+def test_travel_frontier_releases_to_navigation_after_verified_progress(tmp_path, monkeypatch):
+    obj, ctx, nav, requests = controller(tmp_path, monkeypatch, goal_mode='travel')
+    nav, heading = ready(obj, ctx, nav)
+    assert requests[0].job['destination'] == (.42,.5)
+    target = (nav.position[0]+.0006,nav.position[1])
+    requests[0].result.update(search_goal_world=target, next_segment_world=[nav.position,target])
+    assert obj.step(ctx,1.2,nav,heading).outcome is None
+    assert obj.step(ctx,1.3,nav,heading).tap == 'w'
+    assert obj.step(ctx,1.6,nav,heading).outcome is None
+    fresh = replace(nav,sequence=3,position=target)
+    assert obj.step(ctx,2,fresh,heading).outcome == 'detoured'
 
 
 def test_worker_frame_clock_is_monotonic_even_when_task_clock_is_wall_time(tmp_path,monkeypatch):
@@ -116,6 +149,78 @@ def test_worker_frame_clock_is_monotonic_even_when_task_clock_is_wall_time(tmp_p
     monkeypatch.setattr(sd.time,'monotonic',lambda:1234.5)
     nav,heading=ready(obj,ctx,nav)
     assert requests[0].frame.captured_at==1234.5
+
+
+def test_local_request_reuses_the_exposure_png(tmp_path, monkeypatch):
+    obj, ctx, nav, _ = controller(tmp_path, monkeypatch)
+    obj.request_factory = sd.LocalRouteRequest
+    monkeypatch.setattr(sd, 'DATA_DIR', tmp_path)
+    imencode = cv2.imencode
+    encodings = []
+
+    def encode(*args):
+        result = imencode(*args)
+        encodings.append(result[1].tobytes())
+        return result
+
+    def inspect(paths, *, target, guard, timeout):
+        guard()
+        path, = paths
+        assert encodings == [path.read_bytes()]
+        assert target['frame']['image_sha256'] == hashlib.sha256(encodings[0]).hexdigest()
+        assert json.loads((path.parent / 'request.json').read_text())['frame']['frame_id'] == target['frame']['frame_id']
+        return [{'frame_id': target['frame']['frame_id']}]
+
+    monkeypatch.setattr(cv2, 'imencode', encode)
+    monkeypatch.setattr(sd, 'local_worker', lambda: SimpleNamespace(inspect=inspect))
+    ready(obj, ctx, nav)
+    try:
+        assert obj.request.future.result(timeout=2)['frame_id'] == obj.anchor[3].frame_id
+    finally:
+        obj.close()
+
+
+def test_local_request_rejects_mismatched_image_before_saving(tmp_path, monkeypatch):
+    ref, *_ = scene()
+    monkeypatch.setattr(sd, 'DATA_DIR', tmp_path)
+    request = sd.LocalRouteRequest(b'wrong bytes', ref.frame, {})
+    try:
+        with pytest.raises(ValueError, match='segmentation_capture_encoding_mismatch'):
+            request.future.result(timeout=2)
+        assert not (tmp_path / 'terrain').exists()
+    finally:
+        request.close()
+
+
+def test_local_request_can_cancel_during_background_save(tmp_path, monkeypatch):
+    ref, *_ = scene()
+    _, encoded = cv2.imencode('.png', cv2.cvtColor(ref.image, cv2.COLOR_RGB2BGR))
+    png = encoded.tobytes()
+    frame = replace(ref.frame, image_sha256=hashlib.sha256(png).hexdigest())
+    saving, resume = Event(), Event()
+    write_bytes = Path.write_bytes
+
+    def delayed_save(path, data):
+        saving.set()
+        assert resume.wait(timeout=2)
+        return write_bytes(path, data)
+
+    monkeypatch.setattr(sd, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(Path, 'write_bytes', delayed_save)
+    monkeypatch.setattr(sd, 'local_worker', lambda: pytest.fail('cancelled capture entered inference'))
+    job = {'visited': [[0, 0]]}
+    request = sd.LocalRouteRequest(png, frame, job)
+    try:
+        assert saving.wait(timeout=2) and request.poll() is None
+        job['visited'].append([1, 1])
+        request.close()
+    finally:
+        resume.set()
+        request.close()
+    with pytest.raises(ValueError, match='segmentation_cancelled'):
+        request.future.result(timeout=2)
+    request_path = tmp_path / 'terrain' / ('segmented-' + frame.frame_id) / 'request.json'
+    assert json.loads(request_path.read_text())['visited'] == [[0, 0]]
 
 
 def test_current_image_translation_reanchors_world_coordinates(tmp_path):

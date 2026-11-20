@@ -23,10 +23,18 @@ class HelperSessionStopped(OSError):
     """The input helper has already disarmed and released its held keys."""
 
 
+class HelperActionRejected(OSError):
+    """The connected helper refused a particular input request."""
+
+
+class HelperForegroundPaused(OSError):
+    """The managed session is alive, with input gated until fresh telemetry."""
+
+
 class HelperInput(InputBase):
     name = "helper"
 
-    def __init__(self, key_jitter: bool = True, *, simulate: bool = False) -> None:
+    def __init__(self, key_jitter: bool = True, *, simulate: bool = False, keep_online: bool = False) -> None:
         super().__init__(key_jitter)
         if not has_helper_socket():
             raise ValueError("请先启动 WowAgent Keyboard Mouse.app，然后从主 App 启动命令")
@@ -40,10 +48,14 @@ class HelperInput(InputBase):
         self._lock = threading.Lock()
         self._next_check = 0.0
         self._failed = False
+        self.focus_epoch = None
         try:
-            if self._request("info").get("simulate") is not simulate:
+            info = self._request("info")
+            if info.get("simulate") is not simulate:
                 raise ValueError("键鼠执行器模式不符")
-            self._request("ready")
+            self.supports_navigation_pulse = info.get("navigationPulse") is True
+            self._request("ready", keep_online=keep_online)
+            self.supports_focus_pause = keep_online and self.focus_epoch is not None
         except (OSError, ValueError):
             self._reader.close()
             self._socket.close()
@@ -65,11 +77,17 @@ class HelperInput(InputBase):
             except (ValueError, OSError):
                 self._failed = True
                 raise
+            if type(reply.get("focus_epoch")) is int:
+                self.focus_epoch = reply["focus_epoch"]
+                self._held_keys.clear()
+                self._held_buttons.clear()
+                if reply.get("ok") is not True:
+                    raise HelperForegroundPaused(str(reply.get("error")))
             if reply.get("ok") is not True:
                 message = str(reply.get("error", "键鼠执行器拒绝操作"))
                 if message in {"键鼠会话已停止", "魔兽窗口不在前台"}:
                     raise HelperSessionStopped(message)
-                raise OSError(message)
+                raise HelperActionRejected(message)
             return reply
 
     def interrupted(self) -> bool:
@@ -87,8 +105,25 @@ class HelperInput(InputBase):
     def _key_down_raw(self, key: str) -> None:
         self._request("down", key=key.strip().lower())
 
+    def resume_foreground(self, epoch: int) -> None:
+        self._request("resume_foreground", focus_epoch=epoch)
+        self.focus_epoch = None
+
     def _key_up_raw(self, key: str) -> None:
         self._request("up", key=key.strip().lower())
+
+    def start_navigation_pulse(self, key: str, hold_s: float) -> bool:
+        """Schedule one measured movement key release on the native helper."""
+        if not self.supports_navigation_pulse:
+            return False
+        if key not in {"w", "s", "q", "e", "left", "right"} or not 0 < hold_s <= .12:
+            raise ValueError("precise_pulse_duration_invalid")
+        self._request("navigation_pulse", key=key, hold_us=max(1, round(hold_s * 1_000_000)))
+        return True
+
+    def cancel_navigation_pulse(self) -> None:
+        if self.supports_navigation_pulse:
+            self._request("cancel_navigation_pulse")
 
     def _move_raw(self, x: int, y: int) -> None:
         self._request("move", x=x, y=y)
@@ -104,6 +139,20 @@ class HelperInput(InputBase):
 
     def click_ui(self) -> None:
         self._request("ui_click")
+
+    def publish_run_status(self, state: int) -> bool:
+        try:
+            self._request("run_status_v2", state=state, wire=2)
+        except OSError:
+            return False
+        return True
+
+    def request_quest_preparation(self) -> bool:
+        try:
+            self._request("prepare_quest")
+        except HelperActionRejected:
+            return False
+        return True
 
     def position(self) -> tuple[int, int]:
         reply = self._request("position")
@@ -123,8 +172,65 @@ class HelperInput(InputBase):
 
 
 def _smoke() -> None:
-    backend = HelperInput(key_jitter=False, simulate=True)
+    backend = HelperInput(key_jitter=False, simulate=True, keep_online=True)
+    assert backend.supports_focus_pause and backend.focus_epoch is not None
+    backend.resume_foreground(backend.focus_epoch)
     backend.down("w")
+    assert backend.start_navigation_pulse("left", .12)
+    events = backend._request("info")["events"]
+    backend._request("simulate_blur")
+    heartbeat = backend._request("heartbeat")
+    assert not backend.interrupted() and heartbeat["focus_epoch"] == backend.focus_epoch
+    assert backend._request("info")["events"] == events + 2
+    blurred_epoch = backend.focus_epoch
+    backend._request("simulate_focus")
+    try:
+        backend.resume_foreground(blurred_epoch)
+    except HelperForegroundPaused:
+        pass
+    else:
+        raise AssertionError("resume accepted with the old foreground epoch")
+    try:
+        backend.down("w")
+    except HelperForegroundPaused:
+        pass
+    else:
+        raise AssertionError("movement accepted before fresh foreground confirmation")
+    backend.resume_foreground(backend.focus_epoch)
+    backend.down("w")
+    backend._request("simulate_stop")
+    backend._next_check = 0
+    assert backend.interrupted()
+    assert backend._request("info")["events"] == events + 4
+    backend.release_all()
+    backend._request("simulate_arm")
+    backend._request("ready")
+    backend._next_check = 0
+    assert not backend.interrupted()
+    print("Managed session paused, released keys, resumed with new foreground epoch and honored stop")
+    events = backend._request("info")["events"]
+    assert backend.request_quest_preparation()
+    backend._request("simulate_blur")
+    assert not backend.request_quest_preparation()
+    assert backend._request("heartbeat")["ok"]
+    backend._request("simulate_focus")
+    assert backend._request("info")["events"] == events + 2
+    events += 2
+    assert backend.start_navigation_pulse("left", .12)
+    backend.cancel_navigation_pulse()
+    assert backend._request("info")["events"] == events + 2
+    assert backend.start_navigation_pulse("right", .035)
+    deadline = time.monotonic() + 1
+    while backend._request("info")["events"] < events + 4 and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert backend._request("info")["events"] == events + 4
+    assert backend.publish_run_status(3)
+    assert not backend.publish_run_status(10)
+    assert backend.publish_run_status(9)
+    assert backend.request_quest_preparation()
+    assert backend._request("info")["events"] == events + 12
+    backend.down("w")
+    assert not backend.request_quest_preparation()
     backend.move_to(-1800, 500, jitter_px=0)
     backend.right_click()
     backend.rmb_turn(35)
@@ -156,10 +262,14 @@ def _smoke() -> None:
         pass
     else:
         raise AssertionError("UI click accepted while moving")
+    assert backend.start_navigation_pulse("left", .12)
     backend._request("simulate_blur")
+    backend._next_check = 0
     assert backend.interrupted()
     info = backend._request("info")
-    assert info["events"] == events + 7 and not info["armed"]
+    assert info["events"] == events + 9 and not info["armed"]
+    time.sleep(.15)
+    assert backend._request("info")["events"] == events + 9
     print("Signed controller, simulated input, window bounds, focus loss and key release passed")
 
 

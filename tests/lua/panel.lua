@@ -111,6 +111,17 @@ local function field(x, y)
     error("missing field")
 end
 
+do
+    local request
+    WowAgent.GetQuestRoundResumeID = function() return 47 end
+    WowAgent.PrepareQuestNavigation = function(...) request = {...} end
+    C_QuestLog = { IsOnQuest = function(id) return id == 47 end }
+    WowAgent.PrepareAutomaticQuestCommand()
+    assert(not WowAgentControlPanel:IsShown())
+    assert(request and request[1] == 47 and request[4] and request[5] and request[8])
+    WowAgent.GetQuestRoundResumeID, WowAgent.PrepareQuestNavigation, C_QuestLog = nil, nil, nil
+end
+
 click("WowAgent")
 click("配置一键输出")
 assert(combat[#combat] == "setup assist")

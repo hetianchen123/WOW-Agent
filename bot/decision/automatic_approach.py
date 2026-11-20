@@ -135,3 +135,24 @@ def npc_search_region(projection, observed, rgb, destination, *, visited=()):
         intermediate=frontier,requires_reobservation=frontier,
         candidate_count=len(bodies),identity_confirmed=False,interaction_verified=False,
         manual_regions=0)
+
+
+def travel_search_region(projection, observed, destination):
+    """Reach the next visible ground toward an outdoor navigation waypoint."""
+    if not finite_pair(destination) or not all(0 <= value <= 1 for value in destination):
+        raise ProjectionError('auto_travel_destination_missing')
+    height, width = observed.ground.shape
+    y, x = np.mgrid[:height, :width]
+    projected = np.stack((x, y, np.ones_like(x)), axis=-1) @ projection.matrix.T
+    valid = abs(projected[:, :, 2]) > 1e-8
+    metric = projected[:, :, :2] / np.where(valid, projected[:, :, 2], 1)[:, :, None]
+    support = np.zeros((height, width), np.uint8)
+    cv2.fillConvexPoly(support, np.rint(projection.hull).astype(np.int32), 1)
+    valid &= support.astype(bool)
+    target = np.asarray(projection.metric_delta(destination))
+    pin_distance = np.linalg.norm(metric - target, axis=-1)
+    eligible = (valid & observed.ground & ~observed.water & ~observed.forbidden & ~observed.obstacles
+                & (np.linalg.norm(metric, axis=-1) <= 4))
+    region = _measured_frontier(projection, observed, valid, eligible, pin_distance, target)
+    return region, dict(goal_kind='automatic_travel_frontier', basis='measured_local_frontier',
+                        intermediate=True, requires_reobservation=True)

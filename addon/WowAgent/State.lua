@@ -164,6 +164,9 @@ function WowAgent.BuildStatus()
         hp = math.floor(currentHealth / hpm * 15 + 0.5)
         if hp < 0 then hp = 0 elseif hp > 15 then hp = 15 end
     end
+    if WowAgent.RunStatus and WowAgent.RunStatus.PrepareKeyReady() then
+        flags = flags + 8192 + (WowAgent.Forever and 16384 or 0)
+    end
     return MSG_STATUS, flags * 16 + hp
 end
 

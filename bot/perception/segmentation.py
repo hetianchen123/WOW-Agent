@@ -4,6 +4,7 @@ Run with the isolated segmentation environment; imports of Torch/Transformers
 are deferred so the main controller does not acquire heavyweight dependencies.
 All ground is a visual candidate, never a verified collision-free surface.
 """
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import time
 
@@ -172,26 +173,61 @@ class LocalSegmenter:
         import torch
         from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
         from transformers import AutoImageProcessor, SegformerForSemanticSegmentation
-        from sam2.build_sam import build_sam2
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
         began = time.monotonic()
         torch.set_num_threads(threads)
         self.torch = torch
-        if sam_device not in ('cpu', 'mps'):
+        if sam_device not in ('auto', 'cpu', 'mps'):
             raise ValueError('segmentation_device_invalid')
-        if sam_device == 'mps' and not torch.backends.mps.is_available():
+        has_mps = sam_device != 'cpu' and torch.backends.mps.is_available()
+        if sam_device == 'mps' and not has_mps:
             raise RuntimeError('segmentation_mps_unavailable')
-        self.sam_device = sam_device
+        self.requested_sam_device = sam_device
+        self.sam_device = 'mps' if has_mps else 'cpu'
+        self.sam_fallback = 'segmentation_mps_unavailable' if sam_device == 'auto' and not has_mps else None
+        self.checkpoint = str(checkpoint)
+        self.sam_variant = {'tiny': 't', 'large': 'l'}[variant]
         self.detector_processor = AutoProcessor.from_pretrained(paths['IDEA-Research/grounding-dino-tiny']['path'], local_files_only=True)
         self.detector = AutoModelForZeroShotObjectDetection.from_pretrained(
             paths['IDEA-Research/grounding-dino-tiny']['path'], local_files_only=True).eval()
         semantic_path = paths['nvidia/segformer-b2-finetuned-ade-512-512']['path']
         self.semantic_processor = AutoImageProcessor.from_pretrained(semantic_path, local_files_only=True)
         self.semantic = SegformerForSemanticSegmentation.from_pretrained(semantic_path, local_files_only=True).eval()
-        config = {'tiny': 't', 'large': 'l'}[variant]
-        self.sam = SAM2ImagePredictor(build_sam2(f'configs/sam2.1/sam2.1_hiera_{config}.yaml',
-                    str(checkpoint), device=sam_device, apply_postprocessing=False))
+        try:
+            self.sam = self._build_sam()
+        except RuntimeError as exc:
+            if not self._switch_sam_to_cpu(exc):
+                raise
         self.load_s = time.monotonic()-began
+
+    def _build_sam(self):
+        from sam2.build_sam import build_sam2
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        return SAM2ImagePredictor(build_sam2(f'configs/sam2.1/sam2.1_hiera_{self.sam_variant}.yaml',
+            self.checkpoint, device=self.sam_device, apply_postprocessing=False))
+
+    def _switch_sam_to_cpu(self, error):
+        if self.requested_sam_device != 'auto' or self.sam_device != 'mps':
+            return False
+        self.sam = None
+        self.sam_device = 'cpu'
+        self.sam_fallback = str(error)[:512]
+        self.sam = self._build_sam()
+        return True
+
+    def _detect(self, image, prompt, size):
+        began = time.monotonic()
+        inputs = self.detector_processor(images=image, text=prompt, return_tensors='pt')
+        detected = self.detector(**inputs)
+        found = self.detector_processor.post_process_grounded_object_detection(
+            detected, inputs.input_ids, threshold=.25, text_threshold=.25, target_sizes=[size])[0]
+        return found, time.monotonic() - began
+
+    def _embed(self, rgb):
+        began = time.monotonic()
+        with self.torch.inference_mode():
+            self.sam.set_image(rgb)
+            self._sync()
+        return time.monotonic() - began
 
     def _semantics(self, image, size):
         torch = self.torch
@@ -219,6 +255,16 @@ class LocalSegmenter:
 
     def inspect(self, rgb, *, prompt=DETECTION_PROMPT, local_detail=False, optimize=False, excluded=None,
                 review_surfaces=False,review_portals=False):
+        options = dict(prompt=prompt, local_detail=local_detail, optimize=optimize, excluded=excluded,
+                       review_surfaces=review_surfaces, review_portals=review_portals)
+        try:
+            return self._inspect(rgb, **options)
+        except RuntimeError as exc:
+            if not self._switch_sam_to_cpu(exc):
+                raise
+        return self._inspect(rgb, **options)
+
+    def _inspect(self, rgb, *, prompt, local_detail, optimize, excluded, review_surfaces, review_portals):
         from PIL import Image
         if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
             raise ValueError('segmentation_rgb_invalid')
@@ -232,14 +278,19 @@ class LocalSegmenter:
         torch = self.torch
         timings = {}
         diagnostics = {'optimization': optimize, 'ground_proposals': [], 'refinements': [], 'ignored_ui_detections': 0,
+                       'sam_device': self.sam_device, 'sam_device_requested': self.requested_sam_device,
+                       'sam_fallback': self.sam_fallback,
                        'excluded_pixels': int(excluded.sum()) if excluded is not None else 0}
         with torch.inference_mode():
-            began = time.monotonic()
-            inp = self.detector_processor(images=image, text=prompt, return_tensors='pt')
-            detected = self.detector(**inp)
-            found = self.detector_processor.post_process_grounded_object_detection(
-                detected, inp.input_ids, threshold=.25, text_threshold=.25, target_sizes=[(h, w)])[0]
-            timings['detection_s'] = time.monotonic()-began
+            if self.sam_device == 'mps':
+                # Both stages read the same immutable exposure. Wait for its
+                # embedding before issuing any mask prompt for this frame.
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix='sam-embed') as gpu:
+                    embedding = gpu.submit(self._embed, rgb)
+                    found, timings['detection_s'] = self._detect(image, prompt, (h, w))
+                    timings['embedding_s'] = embedding.result()
+            else:
+                found, timings['detection_s'] = self._detect(image, prompt, (h, w))
             # Suppress near-identical same-label boxes; no human reference used.
             order = torch.argsort(found['scores'], descending=True).tolist()
             chosen = []
@@ -254,9 +305,8 @@ class LocalSegmenter:
                 if any(label == old['label'] and box_iou(box, old['box']) > .8 for old in chosen): continue
                 chosen.append({'box': box, 'label': label, 'detection_score': float(found['scores'][i])})
                 if len(chosen) >= 32: break
-            began = time.monotonic(); self.sam.set_image(rgb)
-            self._sync()
-            timings['embedding_s'] = time.monotonic()-began
+            if self.sam_device == 'cpu':
+                timings['embedding_s'] = self._embed(rgb)
             began = time.monotonic()
             for item in chosen:
                 masks, scores, _ = self.sam.predict(box=np.asarray(item['box']), multimask_output=True)

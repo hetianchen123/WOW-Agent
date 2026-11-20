@@ -27,17 +27,42 @@ local function Text(value)
     return value:gsub("|", ""):gsub("%c", " "):match("^%s*(.-)%s*$")
 end
 
+function Roads.ProfileKey()
+    local realm = GetRealmName and GetRealmName()
+    if type(realm) == "string" and realm ~= "" then
+        return tostring(WOW_PROJECT_ID or 0) .. ":" .. realm, realm
+    end
+end
+
+function Roads.ProfileToken()
+    local key = Roads.ProfileKey()
+    if not key then return end
+    local token = 0
+    for i = 1, #key do token = (token * 131 + key:byte(i)) % 16777216 end
+    return token
+end
+
 function Roads.Store()
     WowAgentDB = WowAgentDB or {}
     WowAgentDB.roads = WowAgentDB.roads or {schema = 1, profiles = {}}
     local root = WowAgentDB.roads
     if root.schema ~= 1 then return nil, "路线数据版本不支持，原数据已保留。" end
     -- Different realms/clients can use the same map IDs for different terrain.
-    local realm = GetRealmName and GetRealmName() or "unknown"
-    local key = tostring(WOW_PROJECT_ID or 0) .. ":" .. realm
+    local key, realm = Roads.ProfileKey()
+    realm = realm or "unknown"
+    key = key or tostring(WOW_PROJECT_ID or 0) .. ":" .. realm
     root.profiles[key] = root.profiles[key] or {nextID = 1, routes = {}, realm = realm,
         project = WOW_PROJECT_ID or 0}
     return root.profiles[key]
+end
+
+function Roads.Scanned(mapID, artID)
+    if not WowAgent.Forever or not artID then return {} end
+    local _, build = GetBuildInfo()
+    local profile = WowAgent.RoadScanData and WowAgent.RoadScanData[Roads.ProfileToken()]
+    local maps = profile and profile[tonumber(build)]
+    local arts = maps and maps[mapID]
+    return arts and arts[artID] or {}
 end
 
 function Roads.Draft()
